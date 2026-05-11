@@ -50,6 +50,7 @@ base64.workspace = true
 mls-rs.workspace = true
 mls-rs-core.workspace = true
 mls-rs-crypto-rustcrypto.workspace = true
+mls-rs-codec.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

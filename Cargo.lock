@@ -1867,6 +1867,7 @@ dependencies = [
  "ml-dsa",
  "ml-kem",
  "mls-rs",
+ "mls-rs-codec",
  "mls-rs-core 0.21.0",
  "mls-rs-crypto-rustcrypto",
  "rand 0.8.6",

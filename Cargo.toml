@@ -64,6 +64,8 @@ subtle = "2"
 mls-rs = "0.45"
 mls-rs-core = "0.21"
 mls-rs-crypto-rustcrypto = "0.16"
+# MLS TLS-style codec (used by custom Credential / extension serialization)
+mls-rs-codec = "0.6"
 
 # QUIC transport
 quinn = "0.11"
