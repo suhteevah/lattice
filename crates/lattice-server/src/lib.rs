@@ -10,15 +10,22 @@ pub mod config;
 pub mod error;
 pub mod observability;
 pub mod routes;
+pub mod state;
 
 /// Build the full Axum router with all middleware applied.
 ///
 /// Exposed so integration tests can spin up the app in-process via
 /// `axum::serve` against a randomly-bound port.
-pub fn app() -> axum::Router {
+pub fn app(state: state::ServerState) -> axum::Router {
     use tower_http::trace::TraceLayer;
 
-    axum::Router::new().merge(routes::health::router()).layer(
+    axum::Router::new()
+        .merge(routes::health::router())
+        .merge(routes::well_known::router().with_state(state.clone()))
+        .merge(routes::identity::router().with_state(state.clone()))
+        .merge(routes::groups::router().with_state(state.clone()))
+        .merge(routes::federation::router().with_state(state))
+        .layer(
         TraceLayer::new_for_http()
             .make_span_with(|request: &axum::http::Request<_>| {
                 let request_id = uuid::Uuid::new_v4();

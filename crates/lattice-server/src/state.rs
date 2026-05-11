@@ -1,0 +1,368 @@
+//! In-memory server state for M3.
+//!
+//! This is the home-server's view of identities, key-package inboxes,
+//! group state, and peer-server registry. All stores are
+//! `Arc<RwLock<HashMap<_>>>` — cheap to clone for axum's per-request
+//! state and the federation client.
+//!
+//! The sqlx-backed equivalents land later in M3 alongside the
+//! Postgres migration; until then we keep the data model identical
+//! so the swap-over is a refactor of the storage trait rather than
+//! a redesign.
+
+#![allow(clippy::module_name_repetitions)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use base64::Engine;
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+use rand_core::RngCore;
+use tokio::sync::RwLock;
+
+use lattice_protocol::wire::{IdentityClaim, SealedEnvelope};
+
+/// Server-side identity registration entry. Persistence is in-memory
+/// for M3; sqlx-backed later in the milestone.
+#[derive(Clone, Debug)]
+pub struct RegisteredUser {
+    /// 32-byte BLAKE3 user_id (matches the credential field).
+    pub user_id: [u8; 32],
+    /// The user's hybrid identity claim, as published.
+    pub claim: IdentityClaim,
+    /// Unix-epoch seconds when the claim was accepted.
+    pub registered_at: i64,
+}
+
+/// A published KeyPackage waiting to be consumed by a future inviter.
+#[derive(Clone, Debug)]
+pub struct PublishedKeyPackage {
+    /// The owning user's user_id.
+    pub user_id: [u8; 32],
+    /// `mls_rs::MlsMessage::mls_encode_to_vec()` bytes for the
+    /// KeyPackage. Server is opaque to the contents.
+    pub key_package: Vec<u8>,
+    /// Unix-epoch seconds when the KP was published. Used for
+    /// last-resort lifetime tracking once we add KP rotation.
+    pub published_at: i64,
+}
+
+/// One entry in a group's commit log. Servers replay commits to
+/// late-joiners so they can rebuild state without re-soliciting.
+#[derive(Clone, Debug)]
+pub struct GroupCommitEntry {
+    /// MLS epoch this commit advances to (i.e. the *post*-commit epoch).
+    pub epoch: u64,
+    /// Serialized MLS commit message (`MlsMessage` bytes).
+    pub commit: Vec<u8>,
+    /// One Welcome per joiner added by this commit. Each entry pairs
+    /// the joiner's `user_id` with the bundled MLS-Welcome bytes +
+    /// the PQ Welcome payload bytes.
+    pub welcomes: Vec<WelcomeForJoiner>,
+}
+
+/// Server-side projection of a [`lattice_crypto::mls::LatticeWelcome`]
+/// addressed to a single joiner.
+#[derive(Clone, Debug)]
+pub struct WelcomeForJoiner {
+    /// Recipient's user_id (the inviter tells us; we use it for
+    /// federation routing).
+    pub joiner_user_id: [u8; 32],
+    /// Serialized `MlsMessage::Welcome` bytes.
+    pub mls_welcome: Vec<u8>,
+    /// Serialized `PqWelcomePayload` bytes (`MlsEncode`).
+    pub pq_payload: Vec<u8>,
+}
+
+/// One application message awaiting fetch by a recipient. Stored
+/// opaquely — server doesn't decrypt.
+#[derive(Clone, Debug)]
+pub struct StoredAppMessage {
+    /// Sender's `LeafNodeIndex` is hidden — only the group_id and the
+    /// envelope are visible. For sealed envelopes the routing server
+    /// has already run `verify_at_router`; for plain group sends the
+    /// server takes the bytes opaquely.
+    pub group_id: [u8; 16],
+    /// Sealed envelope OR raw MLS application-message bytes.
+    pub envelope: Vec<u8>,
+    /// Monotonic sequence number so clients can fetch with a
+    /// `since` filter.
+    pub seq: u64,
+}
+
+/// Federation peer descriptor. Each known peer server's federation
+/// pubkey (D-06) is cached after first contact; trust-on-first-use
+/// pinning per §M3 plan.
+#[derive(Clone, Debug)]
+pub struct FederationPeer {
+    /// Lowercased host (e.g. `pixie.lattice.chat`).
+    pub host: String,
+    /// Base URL with scheme and optional port (e.g.
+    /// `https://pixie.lattice.chat:4443`).
+    pub base_url: String,
+    /// Peer's federation Ed25519 pubkey (32 bytes).
+    pub federation_pubkey: [u8; 32],
+}
+
+/// The single server state object passed as axum's `State<ServerState>`.
+#[derive(Clone)]
+pub struct ServerState {
+    /// This server's own federation signing key (Ed25519). Used to
+    /// sign `MembershipCert` issuance + `.well-known` server descriptors.
+    pub federation_sk: Arc<SigningKey>,
+    /// This server's federation pubkey, hex-encoded for log lines and
+    /// `.well-known` JSON.
+    pub federation_pubkey_b64: String,
+    /// Registered users keyed by `user_id`.
+    pub users: Arc<RwLock<HashMap<[u8; 32], RegisteredUser>>>,
+    /// Published KeyPackages keyed by `user_id`. Last-write-wins: the
+    /// server keeps only the most recent KP per user for M3. KP
+    /// rotation policy is a follow-up.
+    pub key_packages: Arc<RwLock<HashMap<[u8; 32], PublishedKeyPackage>>>,
+    /// Commit log keyed by group_id.
+    pub groups: Arc<RwLock<HashMap<[u8; 16], Vec<GroupCommitEntry>>>>,
+    /// Message inboxes keyed by group_id. Each new send appends with
+    /// a monotonically-increasing `seq`.
+    pub messages: Arc<RwLock<HashMap<[u8; 16], Vec<StoredAppMessage>>>>,
+    /// Federation peer registry. Key = host string.
+    pub peers: Arc<RwLock<HashMap<String, FederationPeer>>>,
+    /// Monotonic seq counter shared across all groups.
+    pub next_seq: Arc<RwLock<u64>>,
+    /// `reqwest` client for outbound federation pushes. One per
+    /// process; reused.
+    pub federation_http: reqwest::Client,
+}
+
+impl ServerState {
+    /// Construct a fresh server state. The federation signing key is
+    /// generated with `OsRng` — the persistence story (load from
+    /// `LATTICE_FEDERATION_KEY_PATH` if present) lives one layer up
+    /// in `main.rs`.
+    #[must_use]
+    pub fn new_with_federation_key(federation_sk: SigningKey) -> Self {
+        let pk = federation_sk.verifying_key().to_bytes();
+        let federation_pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(pk);
+        let http = reqwest::Client::builder()
+            .user_agent("lattice-server/0.1")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            federation_sk: Arc::new(federation_sk),
+            federation_pubkey_b64,
+            users: Arc::default(),
+            key_packages: Arc::default(),
+            groups: Arc::default(),
+            messages: Arc::default(),
+            peers: Arc::default(),
+            next_seq: Arc::new(RwLock::new(0)),
+            federation_http: http,
+        }
+    }
+
+    /// Build a fresh state with a freshly-generated federation key.
+    /// Convenience wrapper for tests and the dev path.
+    #[must_use]
+    pub fn new_test() -> Self {
+        let mut seed = [0u8; 32];
+        OsRng
+            .try_fill_bytes(&mut seed)
+            .expect("OsRng never fails in normal operation");
+        Self::new_with_federation_key(SigningKey::from_bytes(&seed))
+    }
+}
+
+/// Append-only push of a single application message into a group's
+/// inbox. Returns the assigned monotonic `seq`.
+pub async fn append_message(state: &ServerState, group_id: [u8; 16], envelope: Vec<u8>) -> u64 {
+    let mut seq_guard = state.next_seq.write().await;
+    *seq_guard += 1;
+    let seq = *seq_guard;
+    drop(seq_guard);
+
+    let mut messages = state.messages.write().await;
+    let inbox = messages.entry(group_id).or_default();
+    inbox.push(StoredAppMessage {
+        group_id,
+        envelope,
+        seq,
+    });
+    seq
+}
+
+/// Fetch all messages with `seq > since_seq`, ordered by `seq`.
+pub async fn fetch_messages(
+    state: &ServerState,
+    group_id: [u8; 16],
+    since_seq: u64,
+) -> Vec<StoredAppMessage> {
+    let messages = state.messages.read().await;
+    messages
+        .get(&group_id)
+        .map(|inbox| {
+            inbox
+                .iter()
+                .filter(|m| m.seq > since_seq)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Look up a user's most recently-published KeyPackage. Returns
+/// `None` if the user has never published.
+pub async fn fetch_key_package(
+    state: &ServerState,
+    user_id: [u8; 32],
+) -> Option<PublishedKeyPackage> {
+    state.key_packages.read().await.get(&user_id).cloned()
+}
+
+/// Store / overwrite the most recent KeyPackage for a user.
+pub async fn put_key_package(state: &ServerState, kp: PublishedKeyPackage) {
+    state.key_packages.write().await.insert(kp.user_id, kp);
+}
+
+/// Register a new user (or update an existing claim). Returns true if
+/// this was a new registration.
+pub async fn register_user(state: &ServerState, user: RegisteredUser) -> bool {
+    state
+        .users
+        .write()
+        .await
+        .insert(user.user_id, user)
+        .is_none()
+}
+
+/// Look up a federation peer by host.
+pub async fn peer_by_host(state: &ServerState, host: &str) -> Option<FederationPeer> {
+    state.peers.read().await.get(host).cloned()
+}
+
+/// Insert or replace a federation peer (trust-on-first-use cache).
+pub async fn upsert_peer(state: &ServerState, peer: FederationPeer) {
+    state.peers.write().await.insert(peer.host.clone(), peer);
+}
+
+/// Append a commit entry to a group's log.
+pub async fn append_commit(state: &ServerState, group_id: [u8; 16], entry: GroupCommitEntry) {
+    let mut groups = state.groups.write().await;
+    groups.entry(group_id).or_default().push(entry);
+}
+
+/// Walk a group's commit log. Returns owned copies for the caller to
+/// serialize.
+pub async fn commit_log(state: &ServerState, group_id: [u8; 16]) -> Vec<GroupCommitEntry> {
+    state
+        .groups
+        .read()
+        .await
+        .get(&group_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Suppress the unused import warning when only some helpers are used.
+const _: fn(&SealedEnvelope) = |_| {};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn message_inbox_seq_is_monotonic() {
+        let state = ServerState::new_test();
+        let gid = [0xAA; 16];
+        let a = append_message(&state, gid, b"a".to_vec()).await;
+        let b = append_message(&state, gid, b"b".to_vec()).await;
+        let c = append_message(&state, gid, b"c".to_vec()).await;
+        assert!(a < b && b < c);
+
+        let after_a = fetch_messages(&state, gid, a).await;
+        assert_eq!(after_a.len(), 2);
+        assert_eq!(after_a[0].seq, b);
+        assert_eq!(after_a[1].seq, c);
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_empty_for_unknown_group() {
+        let state = ServerState::new_test();
+        let unknown = [0xFF; 16];
+        let msgs = fetch_messages(&state, unknown, 0).await;
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_package_last_write_wins() {
+        let state = ServerState::new_test();
+        let uid = [0xBB; 32];
+        put_key_package(
+            &state,
+            PublishedKeyPackage {
+                user_id: uid,
+                key_package: b"first".to_vec(),
+                published_at: 1,
+            },
+        )
+        .await;
+        put_key_package(
+            &state,
+            PublishedKeyPackage {
+                user_id: uid,
+                key_package: b"second".to_vec(),
+                published_at: 2,
+            },
+        )
+        .await;
+        let fetched = fetch_key_package(&state, uid).await.expect("present");
+        assert_eq!(fetched.key_package, b"second");
+        assert_eq!(fetched.published_at, 2);
+    }
+
+    #[tokio::test]
+    async fn register_user_returns_true_on_first_insert() {
+        let state = ServerState::new_test();
+        let user = RegisteredUser {
+            user_id: [0xCC; 32],
+            claim: IdentityClaim::default(),
+            registered_at: 1,
+        };
+        assert!(register_user(&state, user.clone()).await);
+        assert!(!register_user(&state, user).await);
+    }
+
+    #[tokio::test]
+    async fn peer_upsert_round_trip() {
+        let state = ServerState::new_test();
+        let peer = FederationPeer {
+            host: "home.example.com".into(),
+            base_url: "https://home.example.com:4443".into(),
+            federation_pubkey: [0x11; 32],
+        };
+        upsert_peer(&state, peer.clone()).await;
+        let found = peer_by_host(&state, "home.example.com").await.expect("present");
+        assert_eq!(found.federation_pubkey, [0x11; 32]);
+    }
+
+    #[tokio::test]
+    async fn commit_log_appends_in_order() {
+        let state = ServerState::new_test();
+        let gid = [0xDD; 16];
+        for epoch in 1..=3 {
+            append_commit(
+                &state,
+                gid,
+                GroupCommitEntry {
+                    epoch,
+                    commit: vec![epoch as u8],
+                    welcomes: vec![],
+                },
+            )
+            .await;
+        }
+        let log = commit_log(&state, gid).await;
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0].epoch, 1);
+        assert_eq!(log[2].epoch, 3);
+    }
+}
