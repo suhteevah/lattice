@@ -24,9 +24,9 @@ use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider
 use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
-    LatticeIdentity, add_member, apply_commit, commit, create_group, create_group_with_storage,
-    decrypt, encrypt_application, generate_key_package, process_welcome,
-    process_welcome_with_storage, remove_member,
+    LatticeIdentity, add_member, add_members, apply_commit, commit, create_group,
+    create_group_with_storage, decrypt, encrypt_application, generate_key_package,
+    process_welcome, process_welcome_with_storage, remove_member,
 };
 use lattice_protocol::sealed_sender::{open_at_recipient, seal};
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
@@ -146,6 +146,14 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
             }
         });
+    };
+
+    let multi_member_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        match try_multi_member_demo(append) {
+            Ok(()) => set_status.set("multi-member demo OK".to_string()),
+            Err(e) => set_status.set(format!("multi-member error: {e}")),
+        }
     };
 
     let persistent_group_demo = move |_| {
@@ -342,6 +350,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=revocation_demo>"Device revocation demo"</button>
                     <button class="button" on:click=distrust_demo>"Federation distrust demo"</button>
                     <button class="button" on:click=persistent_group_demo>"Persistent group demo (δ.3)"</button>
+                    <button class="button" on:click=multi_member_demo>"Multi-member group (3-party)"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -704,6 +713,115 @@ async fn try_server_backed_demo(
     ));
 
     log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
+}
+
+/// M5: multi-member MLS group with shared PSK injection. Three
+/// parties (Alice + Bob + Carol) join the same group in **one
+/// commit** thanks to the wire-v2 `PqWelcomePayload` carrying an
+/// HKDF-wrap of a single shared 32-byte secret `W`. Both joiners
+/// recover the same `W` from their own ML-KEM ciphertext + wrap_ct,
+/// register it under the same PSK id, and `Client::join_group`
+/// succeeds for both.
+///
+/// After the commit applies the group is at epoch 1 with three
+/// members. Alice broadcasts a message; both Bob and Carol decrypt
+/// it.
+fn try_multi_member_demo(log: impl Fn(String) + Copy) -> Result<(), String> {
+    log("== multi-member group demo ==".to_string());
+    let alice = make_identity(0xA1)?;
+    let bob = make_identity(0xA2)?;
+    let carol = make_identity(0xA3)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+    let carol_psk = LatticePskStorage::new();
+    log(format!(
+        "alice/bob/carol user_ids: {}/{}/{}",
+        &B64.encode(alice.credential.user_id)[..8],
+        &B64.encode(bob.credential.user_id)[..8],
+        &B64.encode(carol.credential.user_id)[..8],
+    ));
+
+    let group_id: [u8; 16] = *b"lattice-3-party!";
+    let mut alice_group = create_group(&alice, alice_psk.clone(), &group_id)
+        .map_err(|e| format!("create_group: {e}"))?;
+    log(format!(
+        "alice created group (epoch {})",
+        alice_group.current_epoch()
+    ));
+
+    let bob_kp =
+        generate_key_package(&bob, bob_psk.clone()).map_err(|e| format!("bob kp: {e}"))?;
+    let carol_kp =
+        generate_key_package(&carol, carol_psk.clone()).map_err(|e| format!("carol kp: {e}"))?;
+    log(format!(
+        "bob kp: {} bytes, carol kp: {} bytes",
+        bob_kp.len(),
+        carol_kp.len()
+    ));
+
+    log("== alice adds {bob, carol} in one commit ==".to_string());
+    let commit_output = add_members(&mut alice_group, &[&bob_kp, &carol_kp])
+        .map_err(|e| format!("add_members: {e}"))?;
+    if commit_output.welcomes.len() != 2 {
+        return Err(format!(
+            "expected 2 welcomes, got {}",
+            commit_output.welcomes.len()
+        ));
+    }
+    log(format!(
+        "commit: {} bytes, welcomes: 2 (idx 0 pq epoch {}, idx 1 pq epoch {})",
+        commit_output.commit.len(),
+        commit_output.welcomes[0].pq_payload.epoch,
+        commit_output.welcomes[1].pq_payload.epoch,
+    ));
+    log(format!(
+        "joiner_idx: w0={}, w1={}",
+        commit_output.welcomes[0].pq_payload.joiner_idx,
+        commit_output.welcomes[1].pq_payload.joiner_idx,
+    ));
+
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit: {e}"))?;
+
+    // Each joiner gets the welcome at their position in the add list.
+    let bob_welcome = &commit_output.welcomes[0];
+    let carol_welcome = &commit_output.welcomes[1];
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), bob_welcome)
+        .map_err(|e| format!("bob process_welcome: {e}"))?;
+    let mut carol_group = process_welcome(&carol, carol_psk.clone(), carol_welcome)
+        .map_err(|e| format!("carol process_welcome: {e}"))?;
+    log(format!(
+        "epochs after join — alice={}, bob={}, carol={}",
+        alice_group.current_epoch(),
+        bob_group.current_epoch(),
+        carol_group.current_epoch()
+    ));
+
+    // PSK stores all hold the same W under epoch 1.
+    let alice_psk_count = alice_psk
+        .len()
+        .map_err(|e| format!("alice psk len: {e}"))?;
+    let bob_psk_count = bob_psk.len().map_err(|e| format!("bob psk len: {e}"))?;
+    let carol_psk_count = carol_psk.len().map_err(|e| format!("carol psk len: {e}"))?;
+    log(format!(
+        "PSK stores: alice={alice_psk_count}, bob={bob_psk_count}, carol={carol_psk_count}"
+    ));
+
+    // Alice broadcasts to both joiners.
+    let ct = encrypt_application(&mut alice_group, b"hello, 3-party group!")
+        .map_err(|e| format!("alice encrypt: {e}"))?;
+    log(format!("alice ciphertext: {} bytes", ct.len()));
+
+    let bob_pt = decrypt(&mut bob_group, &ct).map_err(|e| format!("bob decrypt: {e}"))?;
+    if bob_pt != b"hello, 3-party group!" {
+        return Err("bob plaintext mismatch".into());
+    }
+    let carol_pt = decrypt(&mut carol_group, &ct).map_err(|e| format!("carol decrypt: {e}"))?;
+    if carol_pt != b"hello, 3-party group!" {
+        return Err("carol plaintext mismatch".into());
+    }
+    log("bob & carol both recovered: \"hello, 3-party group!\"".to_string());
+    log("== M5 multi-member (3-party) complete ==".to_string());
     Ok(())
 }
 

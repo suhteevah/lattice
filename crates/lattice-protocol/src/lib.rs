@@ -23,7 +23,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Current wire protocol version. Bump on any breaking schema change.
-pub const WIRE_VERSION: u32 = 1;
+///
+/// * v1 (M2): initial scaffolding — single-joiner PqWelcomePayload
+///   {epoch, ml_kem_ct}, no AEAD wrap.
+/// * v2 (M5): multi-joiner support — PqWelcomePayload gains
+///   `joiner_idx`, `wrap_nonce`, `wrap_ct` so one shared PSK secret
+///   can be sealed to N joiners in a single commit. See
+///   `lattice_crypto::mls::welcome_pq` module docs for the construction.
+pub const WIRE_VERSION: u32 = 2;
 
 /// Identifier for a Lattice user. UUIDv7 — embeds timestamp for
 /// natural ordering and debuggability.

@@ -77,7 +77,7 @@ use self::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider};
 use self::identity_provider::LatticeIdentityProvider;
 use self::leaf_node_kem::{KemKeyPair, LatticeKemPubkey};
 use self::psk::{LatticePskStorage, psk_id_for_epoch};
-use self::welcome_pq::{PqWelcomePayload, open_pq_secret, seal_pq_secret};
+use self::welcome_pq::{PqWelcomePayload, open_pq_secret, seal_pq_secret, seal_pq_secret_multi};
 
 /// Per-device identity bundle used to build an MLS [`Client`].
 ///
@@ -474,6 +474,119 @@ where
         epoch_after_commit = next_epoch,
         welcome_count = welcomes.len(),
         "MLS commit built with PQ-PSK"
+    );
+    Ok(CommitOutput {
+        commit: commit_bytes,
+        welcomes,
+    })
+}
+
+/// Add **N joiners** to the group in a single commit (M5 multi-member
+/// path). The flow mirrors [`add_member`] but:
+///
+/// 1. A single shared PSK secret `W` is generated.
+/// 2. `seal_pq_secret_multi` produces one [`PqWelcomePayload`] per
+///    joiner, each encapsulated to that joiner's ML-KEM pubkey and
+///    wrapping the same `W`.
+/// 3. The commit references one external PSK (the shared `W`).
+/// 4. mls-rs emits one MLS Welcome per joiner; each gets paired with
+///    its corresponding [`PqWelcomePayload`] (matched by add-list
+///    order).
+///
+/// The order of `joiner_key_packages` is significant: each joiner's
+/// `joiner_idx` in the wire payload is its position in this slice.
+/// Callers must hand the recipient the welcome whose `joiner_idx`
+/// matches their KP position; the simplest mapping is "k-th input ↔
+/// k-th output welcome".
+///
+/// # Errors
+///
+/// Returns [`Error::Mls`] on any of: KP decode, missing
+/// `LatticeKemPubkey` extension, PQ seal failure, mls-rs commit /
+/// welcome build, or MLS encode failure.
+#[instrument(level = "debug", skip(group, joiner_key_packages), fields(joiner_count = joiner_key_packages.len()))]
+pub fn add_members<G>(
+    group: &mut GroupHandle<G>,
+    joiner_key_packages: &[&[u8]],
+) -> Result<CommitOutput>
+where
+    G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+{
+    if joiner_key_packages.is_empty() {
+        return Err(Error::Mls(
+            "add_members called with empty joiner list".to_string(),
+        ));
+    }
+
+    // Decode every joiner's KeyPackage + pluck their ML-KEM pubkey.
+    let mut kps = Vec::with_capacity(joiner_key_packages.len());
+    let mut joiner_kem_pks = Vec::with_capacity(joiner_key_packages.len());
+    for (idx, raw) in joiner_key_packages.iter().enumerate() {
+        let kp = MlsMessage::mls_decode(&mut &**raw)
+            .map_err(|e| Error::Mls(format!("decode joiner KP #{idx}: {e:?}")))?;
+        let pk = extract_leaf_kem_pubkey(&kp)?;
+        kps.push(kp);
+        joiner_kem_pks.push(pk);
+    }
+
+    let next_epoch = group.inner.context().epoch() + 1;
+
+    // ML-KEM-encapsulate one shared W to all joiners.
+    let joiner_ref: Vec<&LatticeKemPubkey> = joiner_kem_pks.iter().collect();
+    let (pq_payloads, ss) = seal_pq_secret_multi(&joiner_ref, next_epoch)
+        .map_err(|e| Error::Mls(format!("seal PQ secret (multi): {e:?}")))?;
+
+    // Store the shared W locally.
+    let psk_id = psk_id_for_epoch(next_epoch);
+    let psk_secret = mls_rs_core::psk::PreSharedKey::from(ss.to_vec());
+    group
+        .psk_store
+        .insert(psk_id.clone(), psk_secret)
+        .map_err(|e| Error::Mls(format!("store PSK: {e:?}")))?;
+
+    // Build the commit with multiple Add proposals + the external PSK.
+    let mut builder = group.inner.commit_builder();
+    for kp in kps {
+        builder = builder
+            .add_member(kp)
+            .map_err(|e| Error::Mls(format!("add_member proposal: {e:?}")))?;
+    }
+    let commit_output = builder
+        .add_external_psk(psk_id)
+        .map_err(|e| Error::Mls(format!("add_external_psk: {e:?}")))?
+        .build()
+        .map_err(|e| Error::Mls(format!("commit build (multi): {e:?}")))?;
+
+    let commit_bytes = commit_output
+        .commit_message
+        .mls_encode_to_vec()
+        .map_err(|e| Error::Mls(format!("encode commit: {e:?}")))?;
+
+    if commit_output.welcome_messages.len() != pq_payloads.len() {
+        return Err(Error::Mls(format!(
+            "mls-rs emitted {} welcomes for {} joiners — mismatch",
+            commit_output.welcome_messages.len(),
+            pq_payloads.len()
+        )));
+    }
+    let welcomes = commit_output
+        .welcome_messages
+        .into_iter()
+        .zip(pq_payloads.into_iter())
+        .map(|(w, pq_payload)| -> Result<LatticeWelcome> {
+            Ok(LatticeWelcome {
+                mls_welcome: w
+                    .mls_encode_to_vec()
+                    .map_err(|e| Error::Mls(format!("encode welcome: {e:?}")))?,
+                pq_payload,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    tracing::debug!(
+        epoch_after_commit = next_epoch,
+        joiner_count = joiner_kem_pks.len(),
+        "MLS multi-member commit built with PQ-PSK"
     );
     Ok(CommitOutput {
         commit: commit_bytes,
