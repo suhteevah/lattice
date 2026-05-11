@@ -18,7 +18,7 @@ the **Trade-off accepted** so future readers know what we knew.
 | D-01 | RNG strategy on wasm32 | M1 | Locked |
 | D-02 | HKDF info strings | M1 | Locked |
 | D-03 | Hybrid signature serialization | M1 | Locked |
-| D-04 | Custom MLS ciphersuite identifier | M2 | Locked |
+| D-04 | Custom MLS ciphersuite identifier | M2 | Locked (re-opened 2026-05-10, amended) |
 | D-05 | Sealed sender unwrap-key derivation | M2 | Locked |
 | D-06 | Federation discovery JSON schema | M3 | Locked |
 | D-07 | QUIC server certificate handling | M3 | Locked |
@@ -80,7 +80,7 @@ wire protocol version in `lattice-protocol`.
 | Constant | Bytes | Purpose |
 |---|---|---|
 | `HKDF_INIT` | `b"lattice/init/v1"` | PQXDH-style initial session secret derivation |
-| `HKDF_MLS_INIT` | `b"lattice/mls-init/v1"` | Fold hybrid KEM secret into MLS `init_secret` |
+| `HKDF_MLS_INIT` | `b"lattice/mls-init/v1"` | Namespace prefix for the per-epoch external-PSK ID that folds the ML-KEM-768 secret into the MLS key schedule. Full PSK ID = prefix `\|\|` `epoch.to_le_bytes()`. Renamed in semantics from "HKDF info" to "PSK id prefix" by the D-04 re-open of 2026-05-10; the byte string is unchanged. |
 | `HKDF_SEALED_SENDER` | `b"lattice/sealed-sender/v1"` | Sealed sender envelope key |
 | `HKDF_AEAD_NONCE_PREFIX` | `b"lattice/aead-nonce/v1"` | Direction-specific AEAD nonce prefix |
 | `HKDF_IDENTITY_CLAIM` | `b"lattice/identity-claim/v1"` | Identity-claim binding hash |
@@ -180,6 +180,67 @@ draft-mahy-mls-xwing.
 with other MLS implementations. We control both ends and have no peer
 impls; accepted. If we ever pursue interop, an IETF draft submission
 follows the V1.5 ship (M6).
+
+**Re-opened 2026-05-10:** The original construction — folding the
+ML-KEM-768 encapsulated secret into `init_secret` via HKDF with
+`HKDF_MLS_INIT` info — assumed mls-rs exposed a public hook for
+rewriting `init_secret`. Implementation research found it does not:
+`KeySchedule::from_epoch_secret` is `pub(crate)` and there is no
+`KeyScheduleProvider` trait. Two viable paths were identified:
+**(A) PSK injection** via the standard MLS PreSharedKey mechanism with
+a per-epoch external PSK; or **(B) fork mls-rs** with a ~30 line patch
+to `key_schedule.rs` exposing the hook. After review (see scratch/mls-rs-api.md
+in the implementation session), the hybrid path was selected:
+
+- **M2 ships PSK injection.** Per-commit, the committer encapsulates a
+  fresh ML-KEM-768 shared secret targeted at every member's leaf
+  init-key, stores it in `PreSharedKeyStorage` under
+  `PreSharedKeyID::External(psk_nonce)` where `psk_nonce` =
+  `b"lattice/mls-init/v1" || epoch.to_le_bytes()`, and references that
+  id from the commit via `CommitBuilder::add_psk(...)`. mls-rs's key
+  schedule then evaluates
+  `epoch_secret = Expand("epoch", Extract(joiner_secret, psk_secret))`
+  — the PQ secret enters the schedule under HKDF-SHA-256 at the
+  position immediately following `joiner_secret` derivation. Welcome
+  wrapping still depends on the hybrid HPKE at the leaf-init-key level
+  (the recipient's leaf init key is ML-KEM-768-based), so the PQ
+  property of the Welcome itself is preserved through a different
+  mechanism than the PSK injection point.
+
+- **M6 retains fork as a hardening fallback.** If audit in V1 reveals
+  that PSK injection is inadequate (e.g., subtle attack on
+  `joiner_secret` derivation that the PSK does not cover), the V1.5
+  hardening milestone vendors `mls-rs/src/group/key_schedule.rs` with
+  the `KeyScheduleHook` patch and migrates groups via a coordinated
+  re-key. ROADMAP M6 carries this contingency as an explicit
+  scope-guard.
+
+**Security argument for PSK-equivalence:** RFC 9420 §8 defines PSK
+injection as the standard mechanism for binding external secrets into
+the MLS key schedule. The MLS-WG explicitly intended this extension
+point to support hybrid (classical + PQ) constructions — see Wickr /
+IETF mailing-list discussion of MLS PSK for PQ hybridization. The
+`epoch_secret` becomes a function of the X25519-derived
+`init_secret_prev` AND the ML-KEM-768 `psk_secret` under HKDF-SHA-256,
+so any forward-secrecy break in either KEM alone does not compromise
+the epoch — which is exactly the property the original
+`init_secret`-folding construction sought.
+
+**Wire impact:** None on outer envelopes (PSK is internal MLS framing,
+not surfaced at the Lattice protocol layer). Welcome messages gain a
+custom extension carrying the ML-KEM ciphertext that joiners
+decapsulate and store as PSK before invoking `Client::join_group` —
+implemented as a private extension with id `0xF002`. PSK lifecycle is
+spelled out in `crates/lattice-crypto/src/mls.rs` module docs.
+
+**Implementation update:** `LatticeHybridCipherSuite` (`CipherSuiteProvider`
+impl) delegates 18 of 22 trait methods to the base 0x0003 RustCrypto
+suite, and overrides only `signature_key_generate`,
+`signature_key_derive_public`, `sign`, `verify` to handle the packed
+Ed25519 + ML-DSA-65 signature scheme (D-03). The PQ folding is **not**
+done in the `CipherSuiteProvider` trait at all — it's done one level
+up, in a `LatticeGroup` wrapper around `mls_rs::Group` that injects the
+PSK on every `commit_builder()`.
 
 ---
 

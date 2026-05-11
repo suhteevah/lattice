@@ -67,9 +67,15 @@ pub struct Envelope {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Recipient {
     /// 1:1 message to a user. May use sealed sender.
-    User { id: UserId },
+    User {
+        /// Recipient user ID.
+        id: UserId,
+    },
     /// Group message. Always MLS-framed.
-    Group { id: GroupId },
+    Group {
+        /// Target group ID.
+        id: GroupId,
+    },
 }
 
 /// Protocol-level errors.

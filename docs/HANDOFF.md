@@ -2,9 +2,17 @@
 
 **Last updated:** 2026-05-10
 **Owner:** Matt Gates (suhteevah)
-**Status:** Steps 1 + 2 complete; M1 (crypto primitives) shipped. Identity,
-hybrid KEX, AEAD, padding, and HKDF constants all implemented and tested
-(31 unit tests pass). Next: M2 (MLS + sealed sender + protocol wire types).
+**Status:** Steps 1 + 2 complete; M1 (crypto primitives) shipped; M2 in
+progress. **Wire types done** (`lattice-protocol::{wire, sig}` with all
+seven Prost messages — `HybridSignatureWire`, `IdentityClaim`,
+`MembershipCert`, `SealedEnvelope`, `KeyPackage`, `Welcome`, `Commit`,
+`ApplicationMessage` — plus `encode`/`decode` helpers and 9 round-trip
+tests). **MLS + sealed sender scaffolded only** —
+`lattice-crypto::{mls, sealed_sender}` modules wired into the crate with
+public API surface defined but bodies return `Error::Mls(_)` /
+`Error::SealedSender(_)` stubs. Workspace builds clean; 40 tests pass
+(31 crypto + 9 wire). Next: implement `LatticeHybridCipherSuite` (D-04)
+and the sealed-sender cert flow (D-05).
 
 > **What this doc is.** A self-contained brief that lets a fresh Claude (or any
 > engineer) load full context in one read and start producing useful work
@@ -161,15 +169,53 @@ lattice/
 - [x] Pinned `ml-dsa = "=0.1.0-rc.11"` in workspace deps (was `"0.1"`, no
       matching stable release yet)
 
-### Not done (next sessions pick from here)
-- [ ] M2 — MLS + sealed sender + protocol wire types (custom hybrid
-      ciphersuite per D-04, sealed sender per D-05). **Start here.**
-- [ ] Cap'n Proto schema in `lattice-protocol/` (interim: define structs
-      with Prost — deferred to M5 per roadmap)
+### Done (M2 partial — 2026-05-10)
+- [x] `lattice-protocol::wire` — Prost messages for `HybridSignatureWire`,
+      `IdentityClaim`, `MembershipCert`, `SealedEnvelope`, `KeyPackage`,
+      `Welcome`, `Commit`, `ApplicationMessage` + `encode`/`decode` helpers
+- [x] `lattice-protocol::sig` — re-exports `HybridSignature` + `HybridSignatureWire`
+      per D-03 (no architectural-invariant breach: protocol depends on crypto)
+- [x] `From<HybridSignature>` / `TryFrom<HybridSignatureWire>` round-trip
+      with length validation on the Ed25519 component
+- [x] `cargo test -p lattice-protocol`: 9 unit tests green
+- [x] `MembershipCert` + `SealedEnvelope` wire types match D-05 (server-issued
+      per-epoch certs + `envelope_sig` under `ephemeral_sender_pubkey`)
+- [x] `lattice-crypto::mls` — module wired into crate; public API surface
+      (`GroupHandle`, `CommitOutput`, `create_group`, `add_member`,
+      `encrypt_application`, `decrypt`, `commit`) defined with full
+      tracing instrumentation; bodies return `Error::Mls(_)` stubs
+- [x] `lattice-crypto::sealed_sender` — module wired; `seal`, `open`
+      signatures present; bodies return `Error::SealedSender(_)` stubs
+
+### Not done — M2 remaining work
+- [ ] `LatticeHybridCipherSuite` (D-04): wrap MLS 0x0003 base ciphersuite
+      (`MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`), fold an
+      ML-KEM-768 encapsulated secret into `init_secret` via
+      HKDF-SHA-256 with `HKDF_MLS_INIT` info. Register as 0xF000.
+- [ ] Real impl of `mls::{create_group, add_member, encrypt_application,
+      decrypt, commit}` on top of `mls-rs::Group` with the custom suite
+- [ ] `mls_integration` test: Alice + Bob round-trip without a live
+      server (per ROADMAP M2 acceptance)
+- [ ] Real impl of `sealed_sender::{seal, open}` per D-05: client signs
+      `SealedEnvelope` with cert's ephemeral private key; verifier checks
+      `server_sig` on cert + `envelope_sig` under `ephemeral_sender_pubkey`
+- [ ] Sealed-sender 3-party round-trip test (sender / synthetic routing
+      server / recipient) verifying routing server cannot identify sender
+- [ ] Doc-comment fix on `mls.rs` module header (currently references the
+      superseded `MLS_256_DHKEMP384_AES256GCM_SHA384_P384` pick — D-04
+      supersedes that)
+- [ ] Doc-comment fix on `sealed_sender.rs` module header (currently
+      describes Signal-pre-cert sender-ephemeral-keypair construction —
+      D-05 supersedes that with the server-issued cert flow)
+
+### Not done — M3 and beyond
 - [ ] Server routes beyond `/health`: registration, MLS commit upload,
-      message fetch, WebTransport endpoint (M3)
+      message fetch, federation gossip, server-side `MembershipCert`
+      issuance (M3)
+- [ ] Cap'n Proto migration from interim Prost wire (M5)
 - [ ] Solid UI past the "Hello, Lattice" placeholder (M4)
-- [ ] First end-to-end vertical slice (see §6) (M3)
+- [ ] First end-to-end vertical slice — two servers, two CLI clients,
+      "hello, lattice" cross-federation (see §6, M3)
 
 ---
 

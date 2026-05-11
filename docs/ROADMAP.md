@@ -120,12 +120,19 @@ is non-standard.
 
 ### Deliverables
 
-- **`lattice-crypto::mls`** — `mls-rs` wrapper exposing a thin async API:
+- **`lattice-crypto::mls`** — `mls-rs` wrapper exposing a thin **sync**
+  API (sync chosen per implementation research — mls-rs `mls_build_async`
+  cfg is workspace-wide; server uses `spawn_blocking`):
   `create_group`, `add_member`, `process_welcome`, `encrypt_app_message`,
-  `decrypt_app_message`, `commit`. Custom `CipherSuite` impl that wraps
-  `MLS_256_DHKEMP384_AES256GCM_SHA384_P384` and folds an ML-KEM-768
-  encapsulated secret into `init_secret` derivation. Reference
-  draft-mahy-mls-xwing for the construction pattern.
+  `decrypt_app_message`, `commit`. Custom `CipherSuiteProvider` impl
+  wrapping base `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`
+  (0x0003) per D-04. ML-KEM-768 secret folded into the MLS key
+  schedule via **per-epoch external PSK injection** (D-04 re-open
+  2026-05-10) — not via `init_secret` rewrite (mls-rs has no public hook
+  for that). Reference draft-mahy-mls-xwing for the security pattern;
+  the PSK construction is mechanically different but achieves the same
+  property of binding the PQ secret into the key schedule under
+  HKDF-SHA-256. Fork as M6 fallback if PSK proves inadequate.
 - **`lattice-crypto::sealed_sender`** — envelope type that hides sender
   identity from the routing server. Encrypt sender→recipient under a key
   derived from the recipient's current MLS epoch.
@@ -171,7 +178,12 @@ membership certs).
 - **Custom MLS ciphersuite is the single biggest correctness risk in the
   project.** Plan a separate audit pass on this module before M5 ship.
 - `mls-rs` API surface may not cleanly accept a fully custom ciphersuite;
-  if it requires patching upstream, vendor a fork into the workspace.
+  research confirmed `CipherSuiteProvider` + `CryptoProvider` are
+  sufficient for the signature/AEAD/KDF override path, but the
+  `init_secret` rewrite path is not exposed — PSK injection (D-04
+  re-open) is the v0.1 workaround. If audit reveals PSK is inadequate,
+  M6 vendors a fork of `mls/src/group/key_schedule.rs` with a
+  `KeyScheduleHook` patch (~30 lines) as the hardening fallback.
 
 ---
 
@@ -415,6 +427,16 @@ as private MLS extension, wire bump to v0.2), §D-17 (UnifiedPush primary
   budget conservatively
 - Hidden-membership MLS extension may not be cleanly composable with
   the custom hybrid ciphersuite from M2 — verify early
+
+### Fallback work carried from M2
+
+- **mls-rs fork for `KeyScheduleHook`** — contingency from the D-04
+  2026-05-10 re-open. M2 ships PSK injection as the PQ-secret folding
+  mechanism; if V1 audit finds PSK injection inadequate, M6 vendors
+  `mls-rs/src/group/key_schedule.rs` with a ~30-line patch exposing a
+  hook on `from_epoch_secret`, then migrates groups by coordinated
+  re-key. No action if PSK proves sufficient (which is the expected
+  outcome).
 
 ---
 

@@ -11,10 +11,18 @@
 /// `init_secret`. See `docs/ARCHITECTURE.md §"Crypto handshake spec"`.
 pub const HKDF_INIT: &[u8] = b"lattice/init/v1";
 
-/// HKDF info for folding the hybrid KEM secret into MLS `init_secret`.
+/// Namespace prefix for the per-epoch external-PSK ID that folds the
+/// ML-KEM-768 shared secret into the MLS key schedule.
 ///
-/// Used by the custom `LATTICE_HYBRID_V1` ciphersuite (D-04) to extend
-/// the standard MLS key schedule with the ML-KEM-768 layer.
+/// The full `PreSharedKeyID::External` id used in MLS commits is this
+/// prefix followed by the eight-byte little-endian epoch counter:
+/// `HKDF_MLS_INIT || epoch.to_le_bytes()`. Both committer and joiner
+/// derive the id identically given the epoch number, so PSK lookup is
+/// deterministic per epoch.
+///
+/// Renamed in semantics by the 2026-05-10 re-open of D-04 — the byte
+/// string is unchanged. See `docs/DECISIONS.md §D-04` for the PSK-injection
+/// path that replaced the original "fold into `init_secret`" construction.
 pub const HKDF_MLS_INIT: &[u8] = b"lattice/mls-init/v1";
 
 /// HKDF info for sealed sender envelope key derivation.
