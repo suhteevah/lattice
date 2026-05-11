@@ -1,12 +1,14 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 α + β + γ.1/.2/.3 shipped — browser
-drives the full Alice⇌Bob vertical slice against a live `lattice-server`)
+**Last updated:** 2026-05-11 (M4 α + β + γ.1-.3 + δ.1 + ζ.1 shipped —
+browser is a full Lattice client with localStorage-persisted identity
+and an a11y-clean UI)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1 + 2 complete; M1 shipped; M2 shipped; M3 federated
-bridge working three-node; **M4 Phases α + β + γ.1/.2/.3 shipped**. The
-M3 vertical-slice acceptance gate is now hit from a browser tab — no
-CLI required. Sixteen+ commits on `main` (local repo, no remote yet):
+bridge working three-node; **M4 Phases α + β + γ.1-.3 + δ.1 + ζ.1
+shipped**. The M3 vertical-slice acceptance gate is now hit from a
+browser tab — no CLI required. Eighteen+ commits on `main` (local
+repo, no remote yet):
 
 ```
 2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
@@ -515,23 +517,41 @@ Module additions:
       `LatticeWelcome` ready for `process_welcome`. Live values:
       commit 15601 bytes, MLS Welcome 19819, PQ ct 1088 (epoch 1),
       ciphertext 3662 bytes, "hello via server" round-trip OK.
-- [ ] Phase γ.4: still open — replace HTTP with WebTransport
+- [ ] Phase γ.4: replace HTTP with WebTransport
       (`web-sys::WebTransport`) per D-11; HTTP stays as fallback.
 - [ ] Phase γ-polish: `api::issue_cert` (`POST /group/:gid/issue_cert`)
       for sealed-sender envelopes — currently the demo posts the raw
       MLS application message, not a `SealedEnvelope`.
-- [ ] Phase γ.4: replace HTTP with WebTransport (`web-sys::WebTransport`)
-      per D-11; HTTP stays as the fallback.
-- [ ] Phase δ: IndexedDB-backed storage providers
+- [x] Phase δ.1 (shipped 2026-05-11): `LatticeIdentity` saves to
+      `window.localStorage["lattice/identity/v1"]` as a JSON blob with
+      base64 fields (user_id, ed25519_pub, ml_dsa_pub, kem_ek, kem_dk,
+      sig_sk). 7679 bytes on disk; reload restores via
+      `persist::load()` during App component construction. **At-rest
+      threat model:** plaintext — anyone with read access to the
+      browser profile can recover the keys. Phase δ.2 / ε are the
+      security follow-ups. Blob carries `version: 1` so future
+      encrypted-at-rest migration is non-breaking.
+- [ ] Phase δ.2: wrap the secret fields in Argon2id-keyed
+      ChaCha20-Poly1305. argon2 + chacha20poly1305 are already
+      workspace deps and `lattice_crypto::aead::{encrypt, decrypt}`
+      is ready to call. Needs a passphrase-input UI element.
+- [ ] Phase δ.3: IndexedDB-backed MLS storage providers
       (`KeyPackageStorage`, `GroupStateStorage`, `PreSharedKeyStorage`)
-      so the browser persists state across reloads. Pull `idb`
-      (thin async wrapper) and wrap the three `mls_rs_core::*::*Storage`
-      traits. Identity persistence is D-08; chunked encrypt-at-rest
-      can land on the same store.
+      so MLS group state survives reloads, not just identity. Pull
+      `idb` (thin async wrapper) and wrap the three
+      `mls_rs_core::*::*Storage` traits.
 - [ ] Phase ε: WebAuthn passkey flow (D-09 — PRF / passphrase+badge /
-      refuse three-tier).
-- [ ] Phase ζ: a11y pass — keyboard nav, focus rings, ARIA roles,
-      Lighthouse ≥ 95.
+      refuse three-tier). KEK from PRF feeds Phase δ.2's AEAD wrap.
+- [x] Phase ζ.1 (shipped 2026-05-11): a11y landmarks + ARIA. `<main>`,
+      `<section aria-labelledby>`, `<footer>` landmarks; status div
+      `role="status" aria-live="polite"`; button group `role="group"`
+      + `aria-label`; log `role="log" aria-live="polite"`; decorative
+      sage dot `aria-hidden="true"`; `.button:focus-visible` outline
+      restored after the `appearance: none` reset stripped it.
+- [ ] Phase ζ.2: Lighthouse a11y ≥ 95 verification; keyboard nav
+      audit; contrast ratio audit of lilac-on-ink-900 (currently
+      passes WCAG AA at body sizes, want to verify the muted
+      variants).
 - [ ] Production CSP verification (`scripts/verify-csp.ps1`) updated
       for the Trunk-generated asset hashes — current script was written
       against the old Vite-bundle layout.
