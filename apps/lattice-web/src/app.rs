@@ -32,6 +32,7 @@ use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 
 use crate::api;
 use crate::capabilities::Capabilities;
+use crate::distrust::{DistrustEvent, DistrustLedger, Verdict};
 use crate::passkey;
 use crate::persist;
 
@@ -141,6 +142,20 @@ pub fn App() -> impl IntoView {
             match try_server_backed_demo(DEFAULT_SERVER_URL, log).await {
                 Ok(()) => set_status.set("server-backed demo OK".to_string()),
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
+            }
+        });
+    };
+
+    let distrust_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("running distrust demo…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_distrust_demo(DEFAULT_SERVER_URL, log).await {
+                Ok(verdict) => {
+                    set_status.set(format!("distrust demo OK ({verdict:?})"))
+                }
+                Err(e) => set_status.set(format!("distrust error: {e}")),
             }
         });
     };
@@ -315,6 +330,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=cadence_demo>"Commit cadence demo"</button>
                     <button class="button" on:click=attachment_demo>"Attachment demo"</button>
                     <button class="button" on:click=revocation_demo>"Device revocation demo"</button>
+                    <button class="button" on:click=distrust_demo>"Federation distrust demo"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -678,6 +694,69 @@ async fn try_server_backed_demo(
 
     log("== M4 phase γ.3 complete ==".to_string());
     Ok(())
+}
+
+/// M5: local-only federation distrust scoring (D-13). Exercises
+/// the in-tab `DistrustLedger`:
+///
+/// 1. Load the ledger from localStorage.
+/// 2. Fetch the dev server's `/.well-known/lattice/server`
+///    descriptor, TOFU-pin its federation pubkey, record a
+///    `PinnedKeyMatch` event.
+/// 3. Try pinning a fake-but-different pubkey to the same URL —
+///    `pin_pubkey` returns `Err` and records a `PinViolation`,
+///    which knocks the score down hard.
+/// 4. Apply a few `Ok` events to show the score recovering.
+/// 5. Save the ledger back to localStorage.
+async fn try_distrust_demo(
+    server: &str,
+    log: impl Fn(String) + Copy,
+) -> Result<Verdict, String> {
+    log("== distrust demo ==".to_string());
+    let mut ledger = DistrustLedger::load();
+    let pre_count = ledger.peers.len();
+    log(format!("ledger loaded ({pre_count} peer(s) before)"));
+
+    let descriptor = api::fetch_descriptor(server).await?;
+    log(format!(
+        "fetched descriptor: federation_pubkey={}…",
+        &descriptor.federation_pubkey_b64[..16]
+    ));
+
+    let now = chrono_now_unix();
+    let pin1 = ledger.pin_pubkey(server, &descriptor.federation_pubkey_b64, now)?;
+    log(format!("after PinnedKeyMatch: score = {pin1}"));
+
+    let pin2 = ledger.pin_pubkey(server, "AAAA-fake-key-that-does-not-match-AAAA=", now);
+    match pin2 {
+        Err(e) => log(format!("violation caught (expected): {e}")),
+        Ok(s) => return Err(format!("violation NOT caught: score={s}")),
+    }
+    let after_violation = ledger
+        .peers
+        .get(server)
+        .map(|p| p.score)
+        .unwrap_or_default();
+    log(format!("after PinViolation: score = {after_violation}"));
+
+    for _ in 0..5 {
+        let _ = ledger.record(server, DistrustEvent::Ok, now);
+    }
+    let after_recovery = ledger
+        .peers
+        .get(server)
+        .map(|p| p.score)
+        .unwrap_or_default();
+    log(format!("after 5×Ok events: score = {after_recovery}"));
+
+    ledger.save();
+    let post_count = ledger.peers.len();
+    log(format!("ledger saved ({post_count} peer(s) now)"));
+
+    let verdict = Verdict::from_score(after_recovery);
+    log(format!("verdict: {verdict:?}"));
+    log("== M5 distrust scoring complete ==".to_string());
+    Ok(verdict)
 }
 
 /// M5: device revocation via MLS Remove proposal. ROADMAP §M5

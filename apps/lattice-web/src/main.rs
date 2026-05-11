@@ -12,6 +12,7 @@
 mod api;
 mod app;
 mod capabilities;
+mod distrust;
 mod passkey;
 mod persist;
 
