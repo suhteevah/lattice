@@ -22,6 +22,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 /// Library version surfaced for diagnostic UI.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

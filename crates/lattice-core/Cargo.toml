@@ -36,5 +36,13 @@ web-sys = { workspace = true, features = ["Window", "console", "Crypto"] }
 getrandom = { workspace = true, features = ["js"] }
 getrandom_04 = { workspace = true }
 
+# WASM FFI surface — only pulled in on wasm32. Direct deps because
+# only the wasm module references them.
+base64 = { workspace = true }
+blake3 = { workspace = true }
+mls-rs-core = { workspace = true }
+serde = { workspace = true }
+serde-wasm-bindgen = "0.6"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
