@@ -24,8 +24,9 @@ use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider
 use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
-    LatticeIdentity, add_member, apply_commit, commit, create_group, decrypt, encrypt_application,
-    generate_key_package, process_welcome, remove_member,
+    LatticeIdentity, add_member, apply_commit, commit, create_group, create_group_with_storage,
+    decrypt, encrypt_application, generate_key_package, process_welcome,
+    process_welcome_with_storage, remove_member,
 };
 use lattice_protocol::sealed_sender::{open_at_recipient, seal};
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
@@ -35,6 +36,7 @@ use crate::capabilities::Capabilities;
 use crate::distrust::{DistrustEvent, DistrustLedger, Verdict};
 use crate::passkey;
 use crate::persist;
+use crate::storage::LocalStorageGroupStateStorage;
 
 const PASSKEY_CREDENTIAL_LS_KEY: &str = "lattice/passkey/credential_id_b64url";
 
@@ -144,6 +146,14 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
             }
         });
+    };
+
+    let persistent_group_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        match try_persistent_group_demo(append) {
+            Ok(()) => set_status.set("persistent group demo OK".to_string()),
+            Err(e) => set_status.set(format!("persistent group error: {e}")),
+        }
     };
 
     let distrust_demo = move |_| {
@@ -331,6 +341,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=attachment_demo>"Attachment demo"</button>
                     <button class="button" on:click=revocation_demo>"Device revocation demo"</button>
                     <button class="button" on:click=distrust_demo>"Federation distrust demo"</button>
+                    <button class="button" on:click=persistent_group_demo>"Persistent group demo (δ.3)"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -693,6 +704,93 @@ async fn try_server_backed_demo(
     ));
 
     log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
+}
+
+/// M4 Phase δ.3: MLS group state persisted to localStorage via
+/// `LocalStorageGroupStateStorage`. The demo creates a fresh 1:1
+/// group with Alice and Bob, sends an application message, then
+/// reads `LocalStorageGroupStateStorage::stored_groups()` to prove
+/// the group state is on disk. Reload-survival is the deferred
+/// follow-up (needs a load_group entrypoint wired into the demo
+/// flow).
+fn try_persistent_group_demo(log: impl Fn(String) + Copy) -> Result<(), String> {
+    log("== persistent group demo ==".to_string());
+    let alice = make_identity(0xE1)?;
+    let bob = make_identity(0xE2)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+    let storage = LocalStorageGroupStateStorage;
+
+    // Clean any leftover state from a previous run so the test is
+    // reproducible across clicks.
+    let group_id: [u8; 16] = *b"lattice-persist1";
+    let _ = storage.delete_group(&group_id);
+
+    let mut alice_group =
+        create_group_with_storage(&alice, alice_psk.clone(), &group_id, storage.clone())
+            .map_err(|e| format!("create_group: {e}"))?;
+    let bob_kp = generate_key_package(&bob, bob_psk.clone())
+        .map_err(|e| format!("generate_key_package: {e}"))?;
+    let commit_output =
+        add_member(&mut alice_group, &bob_kp).map_err(|e| format!("add_member: {e}"))?;
+    let welcome = commit_output
+        .welcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no welcome".to_string())?;
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit: {e}"))?;
+    let mut bob_group =
+        process_welcome_with_storage(&bob, bob_psk.clone(), &welcome, storage.clone())
+            .map_err(|e| format!("process_welcome: {e}"))?;
+    log(format!(
+        "group created & joined — epoch {}",
+        alice_group.current_epoch()
+    ));
+
+    let ct = encrypt_application(&mut alice_group, b"persisted hello")
+        .map_err(|e| format!("alice encrypt: {e}"))?;
+    let pt = decrypt(&mut bob_group, &ct)
+        .map_err(|e| format!("bob decrypt: {e}"))?;
+    if pt.as_slice() != b"persisted hello" {
+        return Err("plaintext mismatch".into());
+    }
+    log(format!(
+        "encrypt/decrypt OK ({} bytes ciphertext)",
+        ct.len()
+    ));
+
+    let stored = storage
+        .stored_groups()
+        .map_err(|e| format!("stored_groups: {e}"))?;
+    log(format!(
+        "stored_groups index: {} entry/ies",
+        stored.len()
+    ));
+    let found = stored.iter().any(|gid| gid == &group_id);
+    if !found {
+        return Err("group_id missing from stored_groups index".into());
+    }
+    log("group_id found in localStorage index".to_string());
+
+    // Read back the raw state bytes so we can show their size.
+    use mls_rs_core::group::GroupStateStorage as _;
+    let raw = storage
+        .state(&group_id)
+        .map_err(|e| format!("storage.state: {e}"))?
+        .ok_or_else(|| "state missing".to_string())?;
+    log(format!(
+        "alice state snapshot in localStorage: {} bytes",
+        raw.len()
+    ));
+    if let Some(max_epoch) = storage
+        .max_epoch_id(&group_id)
+        .map_err(|e| format!("max_epoch_id: {e}"))?
+    {
+        log(format!("max persisted epoch_id: {max_epoch}"));
+    }
+
+    log("== M4 phase δ.3 (group state persistence) complete ==".to_string());
     Ok(())
 }
 

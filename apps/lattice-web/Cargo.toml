@@ -39,6 +39,7 @@ prost.workspace = true
 chacha20poly1305.workspace = true
 argon2.workspace = true
 rand.workspace = true
+zeroize.workspace = true
 
 # HTTP client + JSON for talking to a local lattice-server. gloo-net
 # wraps the browser Fetch API in an ergonomic future-based interface

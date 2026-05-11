@@ -15,6 +15,7 @@ mod capabilities;
 mod distrust;
 mod passkey;
 mod persist;
+mod storage;
 
 use leptos::prelude::*;
 
