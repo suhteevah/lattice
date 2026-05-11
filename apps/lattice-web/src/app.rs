@@ -16,7 +16,10 @@ use rand::rngs::OsRng;
 use lattice_crypto::credential::{
     ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
 };
+use lattice_crypto::aead::{AeadKey, AeadNonce, decrypt as aead_decrypt, encrypt as aead_encrypt};
 use lattice_crypto::hybrid_kex;
+use lattice_crypto::padding;
+use rand::RngCore;
 use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider};
 use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
@@ -140,6 +143,14 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
             }
         });
+    };
+
+    let attachment_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        match try_attachment_demo(append) {
+            Ok(()) => set_status.set("attachment demo OK".to_string()),
+            Err(e) => set_status.set(format!("attachment error: {e}")),
+        }
     };
 
     let cadence_demo = move |_| {
@@ -294,6 +305,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=server_backed_demo>"Server-backed demo"</button>
                     <button class="button" on:click=sealed_sender_demo>"Sealed-sender demo"</button>
                     <button class="button" on:click=cadence_demo>"Commit cadence demo"</button>
+                    <button class="button" on:click=attachment_demo>"Attachment demo"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -656,6 +668,67 @@ async fn try_server_backed_demo(
     ));
 
     log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
+}
+
+/// M5: encrypted, padded attachment round-trip. ROADMAP §M5 names
+/// "File + image attachments: encrypted, padded to upload buckets,
+/// ciphertext stored on home server" as a deliverable. This shows the
+/// crypto half end-to-end in WASM: random plaintext of varying sizes
+/// gets bucketed via `lattice_crypto::padding`, then sealed with
+/// ChaCha20-Poly1305. The server-storage half (upload + retention)
+/// hooks onto this same byte stream and lands as a separate phase.
+fn try_attachment_demo(log: impl Fn(String) + Copy) -> Result<(), String> {
+    log("== attachment demo ==".to_string());
+    log(format!(
+        "padding buckets: {:?}",
+        padding::BUCKETS
+    ));
+
+    // Probe a few size points to show bucket selection.
+    let probes: &[usize] = &[200, 1_000, 10_000, 60_000];
+    for &size in probes {
+        let mut payload = vec![0u8; size];
+        rand::thread_rng().fill_bytes(&mut payload);
+
+        let padded = padding::pad(&payload)
+            .map_err(|e| format!("pad {size}: {e}"))?;
+        log(format!(
+            "payload {size}B → padded {} B (bucket selected)",
+            padded.len()
+        ));
+
+        // Fresh ChaCha20-Poly1305 key + nonce per attachment. In M5
+        // proper, the key is HKDF'd from the group's MLS exporter
+        // secret + attachment id, but the encrypt/decrypt path is the
+        // same.
+        let mut key_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key_bytes);
+        let key = AeadKey::from_bytes(key_bytes);
+
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = AeadNonce(nonce_bytes);
+
+        let aad = b"lattice/attachment/v1";
+        let ciphertext = aead_encrypt(&key, nonce, aad, &padded)
+            .map_err(|e| format!("encrypt {size}: {e}"))?;
+        log(format!(
+            "  ciphertext: {} bytes (+16 Poly1305 tag over padded)",
+            ciphertext.len()
+        ));
+
+        let recovered_padded = aead_decrypt(&key, nonce, aad, &ciphertext)
+            .map_err(|e| format!("decrypt {size}: {e}"))?;
+        let recovered = padding::unpad(&recovered_padded)
+            .map_err(|e| format!("unpad {size}: {e}"))?;
+        if recovered != payload {
+            return Err(format!("attachment size {size} did not round-trip"));
+        }
+        log(format!("  round-trip: OK ({} bytes recovered)", recovered.len()));
+    }
+
+    log("== M5 attachment crypto path complete ==".to_string());
     Ok(())
 }
 
