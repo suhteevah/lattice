@@ -10,7 +10,16 @@
 //! so the swap-over is a refactor of the storage trait rather than
 //! a redesign.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::module_name_repetitions,
+    // *_b64 field-name suffix is intentional — it tells JSON consumers
+    // the value is base64-encoded.
+    clippy::struct_field_names,
+    // `load_snapshot` and `save_snapshot` linearly walk every store
+    // inline so the wire layout is obvious. Refactoring into helpers
+    // hurts locality.
+    clippy::too_many_lines,
+)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic,))]
 
 use std::collections::HashMap;
@@ -21,6 +30,9 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use rand_core::RngCore;
 use tokio::sync::RwLock;
+
+use prost::Message;
+use serde::{Deserialize, Serialize};
 
 use lattice_protocol::wire::{IdentityClaim, SealedEnvelope};
 
@@ -269,6 +281,332 @@ pub async fn commit_log(state: &ServerState, group_id: [u8; 16]) -> Vec<GroupCom
 /// Suppress the unused import warning when only some helpers are used.
 const _: fn(&SealedEnvelope) = |_| {};
 
+// ============================================================================
+// Snapshot — graceful-shutdown JSON dump + startup restore.
+//
+// On clean shutdown the server writes its full in-memory state to a JSON
+// file at `LATTICE__SNAPSHOT_PATH`. On startup, if that file exists, the
+// state is restored before the HTTP listener binds. Hard crashes (SIGKILL,
+// OOM, power loss) still lose any state since the last snapshot — sqlite
+// integration in the next M3 polish commit closes that gap.
+// ============================================================================
+
+#[derive(Serialize, Deserialize)]
+struct UserSnap {
+    user_id_b64: String,
+    /// Prost-encoded `IdentityClaim`, base64.
+    claim_b64: String,
+    registered_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KpSnap {
+    user_id_b64: String,
+    key_package_b64: String,
+    published_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CommitSnap {
+    group_id_b64: String,
+    epoch: u64,
+    commit_b64: String,
+    welcomes: Vec<WelcomeSnap>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WelcomeSnap {
+    joiner_user_id_b64: String,
+    mls_welcome_b64: String,
+    pq_payload_b64: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MessageSnap {
+    group_id_b64: String,
+    envelope_b64: String,
+    seq: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PeerSnap {
+    host: String,
+    base_url: String,
+    federation_pubkey_b64: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StateSnapshot {
+    /// Snapshot wire version. Bump on any breaking field rename.
+    snapshot_version: u32,
+    users: Vec<UserSnap>,
+    key_packages: Vec<KpSnap>,
+    commits: Vec<CommitSnap>,
+    messages: Vec<MessageSnap>,
+    peers: Vec<PeerSnap>,
+    next_seq: u64,
+}
+
+impl ServerState {
+    /// Serialize the entire in-memory state to JSON at `path`.
+    ///
+    /// Acquires read locks on all stores; safe to call concurrently
+    /// with reads, blocked by in-flight writes briefly.
+    ///
+    /// # Errors
+    ///
+    /// I/O failure (`SnapshotError::Io`) or serialization failure
+    /// (`SnapshotError::Codec`).
+    pub async fn save_snapshot(&self, path: &std::path::Path) -> Result<(), SnapshotError> {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let snap = StateSnapshot {
+            snapshot_version: 1,
+            users: self
+                .users
+                .read()
+                .await
+                .values()
+                .map(|u| UserSnap {
+                    user_id_b64: b64.encode(u.user_id),
+                    claim_b64: b64.encode(u.claim.encode_to_vec()),
+                    registered_at: u.registered_at,
+                })
+                .collect(),
+            key_packages: self
+                .key_packages
+                .read()
+                .await
+                .values()
+                .map(|kp| KpSnap {
+                    user_id_b64: b64.encode(kp.user_id),
+                    key_package_b64: b64.encode(&kp.key_package),
+                    published_at: kp.published_at,
+                })
+                .collect(),
+            commits: {
+                let mut acc = Vec::new();
+                for (gid, log) in self.groups.read().await.iter() {
+                    for entry in log {
+                        acc.push(CommitSnap {
+                            group_id_b64: b64.encode(gid),
+                            epoch: entry.epoch,
+                            commit_b64: b64.encode(&entry.commit),
+                            welcomes: entry
+                                .welcomes
+                                .iter()
+                                .map(|w| WelcomeSnap {
+                                    joiner_user_id_b64: b64.encode(w.joiner_user_id),
+                                    mls_welcome_b64: b64.encode(&w.mls_welcome),
+                                    pq_payload_b64: b64.encode(&w.pq_payload),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+                acc
+            },
+            messages: {
+                let mut acc = Vec::new();
+                for inbox in self.messages.read().await.values() {
+                    for m in inbox {
+                        acc.push(MessageSnap {
+                            group_id_b64: b64.encode(m.group_id),
+                            envelope_b64: b64.encode(&m.envelope),
+                            seq: m.seq,
+                        });
+                    }
+                }
+                acc
+            },
+            peers: self
+                .peers
+                .read()
+                .await
+                .values()
+                .map(|p| PeerSnap {
+                    host: p.host.clone(),
+                    base_url: p.base_url.clone(),
+                    federation_pubkey_b64: b64.encode(p.federation_pubkey),
+                })
+                .collect(),
+            next_seq: *self.next_seq.read().await,
+        };
+        let bytes = serde_json::to_vec_pretty(&snap).map_err(SnapshotError::codec)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(SnapshotError::Io)?;
+        }
+        std::fs::write(path, bytes).map_err(SnapshotError::Io)?;
+        tracing::info!(
+            path = %path.display(),
+            users = snap.users.len(),
+            key_packages = snap.key_packages.len(),
+            commits = snap.commits.len(),
+            messages = snap.messages.len(),
+            peers = snap.peers.len(),
+            "snapshot written"
+        );
+        Ok(())
+    }
+
+    /// Load a snapshot from `path` and populate the in-memory state.
+    /// Overwrites any current state (call before serving requests).
+    ///
+    /// # Errors
+    ///
+    /// `SnapshotError::Io` if the file can't be read,
+    /// `SnapshotError::Codec` on malformed JSON or field-length
+    /// mismatches.
+    pub async fn load_snapshot(&self, path: &std::path::Path) -> Result<(), SnapshotError> {
+        let bytes = std::fs::read(path).map_err(SnapshotError::Io)?;
+        let snap: StateSnapshot = serde_json::from_slice(&bytes).map_err(SnapshotError::codec)?;
+        if snap.snapshot_version != 1 {
+            return Err(SnapshotError::Codec(format!(
+                "unsupported snapshot version {}",
+                snap.snapshot_version
+            )));
+        }
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let decode_32 = |s: &str| -> Result<[u8; 32], SnapshotError> {
+            let v = b64.decode(s).map_err(SnapshotError::codec)?;
+            v.as_slice()
+                .try_into()
+                .map_err(|_| SnapshotError::Codec(format!("expected 32 bytes, got {}", v.len())))
+        };
+        let decode_16 = |s: &str| -> Result<[u8; 16], SnapshotError> {
+            let v = b64.decode(s).map_err(SnapshotError::codec)?;
+            v.as_slice()
+                .try_into()
+                .map_err(|_| SnapshotError::Codec(format!("expected 16 bytes, got {}", v.len())))
+        };
+
+        {
+            let mut users = self.users.write().await;
+            users.clear();
+            for u in &snap.users {
+                let user_id = decode_32(&u.user_id_b64)?;
+                let claim_bytes = b64.decode(&u.claim_b64).map_err(SnapshotError::codec)?;
+                let claim =
+                    IdentityClaim::decode(claim_bytes.as_slice()).map_err(SnapshotError::codec)?;
+                users.insert(
+                    user_id,
+                    RegisteredUser {
+                        user_id,
+                        claim,
+                        registered_at: u.registered_at,
+                    },
+                );
+            }
+        }
+        {
+            let mut kps = self.key_packages.write().await;
+            kps.clear();
+            for kp in &snap.key_packages {
+                let user_id = decode_32(&kp.user_id_b64)?;
+                let key_package =
+                    b64.decode(&kp.key_package_b64).map_err(SnapshotError::codec)?;
+                kps.insert(
+                    user_id,
+                    PublishedKeyPackage {
+                        user_id,
+                        key_package,
+                        published_at: kp.published_at,
+                    },
+                );
+            }
+        }
+        {
+            let mut groups = self.groups.write().await;
+            groups.clear();
+            for c in &snap.commits {
+                let gid = decode_16(&c.group_id_b64)?;
+                let mut welcomes = Vec::with_capacity(c.welcomes.len());
+                for w in &c.welcomes {
+                    welcomes.push(WelcomeForJoiner {
+                        joiner_user_id: decode_32(&w.joiner_user_id_b64)?,
+                        mls_welcome: b64
+                            .decode(&w.mls_welcome_b64)
+                            .map_err(SnapshotError::codec)?,
+                        pq_payload: b64
+                            .decode(&w.pq_payload_b64)
+                            .map_err(SnapshotError::codec)?,
+                    });
+                }
+                groups.entry(gid).or_default().push(GroupCommitEntry {
+                    epoch: c.epoch,
+                    commit: b64.decode(&c.commit_b64).map_err(SnapshotError::codec)?,
+                    welcomes,
+                });
+            }
+        }
+        {
+            let mut msgs = self.messages.write().await;
+            msgs.clear();
+            for m in &snap.messages {
+                let gid = decode_16(&m.group_id_b64)?;
+                let envelope =
+                    b64.decode(&m.envelope_b64).map_err(SnapshotError::codec)?;
+                msgs.entry(gid).or_default().push(StoredAppMessage {
+                    group_id: gid,
+                    envelope,
+                    seq: m.seq,
+                });
+            }
+        }
+        {
+            let mut peers = self.peers.write().await;
+            peers.clear();
+            for p in &snap.peers {
+                let pk_v = b64
+                    .decode(&p.federation_pubkey_b64)
+                    .map_err(SnapshotError::codec)?;
+                let pk: [u8; 32] = pk_v.as_slice().try_into().map_err(|_| {
+                    SnapshotError::Codec(format!(
+                        "peer pubkey length {} (expected 32)",
+                        pk_v.len()
+                    ))
+                })?;
+                peers.insert(
+                    p.host.clone(),
+                    FederationPeer {
+                        host: p.host.clone(),
+                        base_url: p.base_url.clone(),
+                        federation_pubkey: pk,
+                    },
+                );
+            }
+        }
+        *self.next_seq.write().await = snap.next_seq;
+        tracing::info!(
+            path = %path.display(),
+            users = snap.users.len(),
+            key_packages = snap.key_packages.len(),
+            commits = snap.commits.len(),
+            messages = snap.messages.len(),
+            peers = snap.peers.len(),
+            next_seq = snap.next_seq,
+            "snapshot restored"
+        );
+        Ok(())
+    }
+}
+
+/// Errors raised by snapshot save / load.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// File-system failure.
+    #[error("snapshot IO: {0}")]
+    Io(#[from] std::io::Error),
+    /// Codec failure (JSON / Prost / length mismatch).
+    #[error("snapshot codec: {0}")]
+    Codec(String),
+}
+
+impl SnapshotError {
+    fn codec<E: std::fmt::Display>(e: E) -> Self {
+        Self::Codec(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +686,90 @@ mod tests {
             .await
             .expect("present");
         assert_eq!(found.federation_pubkey, [0x11; 32]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_round_trip_preserves_state() {
+        let src = ServerState::new_test();
+        // Populate every store with at least one entry.
+        let uid = [0x42u8; 32];
+        register_user(
+            &src,
+            RegisteredUser {
+                user_id: uid,
+                claim: IdentityClaim::default(),
+                registered_at: 1700,
+            },
+        )
+        .await;
+        put_key_package(
+            &src,
+            PublishedKeyPackage {
+                user_id: uid,
+                key_package: vec![1, 2, 3, 4],
+                published_at: 1701,
+            },
+        )
+        .await;
+        let gid = [0x11u8; 16];
+        append_commit(
+            &src,
+            gid,
+            GroupCommitEntry {
+                epoch: 7,
+                commit: vec![0xAA, 0xBB],
+                welcomes: vec![WelcomeForJoiner {
+                    joiner_user_id: uid,
+                    mls_welcome: vec![0xCC; 8],
+                    pq_payload: vec![0xDD; 4],
+                }],
+            },
+        )
+        .await;
+        append_message(&src, gid, vec![0xEE; 16]).await;
+        upsert_peer(
+            &src,
+            FederationPeer {
+                host: "peer.example".into(),
+                base_url: "https://peer.example:4443".into(),
+                federation_pubkey: [0x99; 32],
+            },
+        )
+        .await;
+
+        // Snapshot to a temp file.
+        let tmp = std::env::temp_dir().join(format!(
+            "lattice-snap-test-{}.json",
+            std::process::id()
+        ));
+        src.save_snapshot(&tmp).await.expect("save");
+
+        // Restore into a fresh state and compare.
+        let dst = ServerState::new_test();
+        dst.load_snapshot(&tmp).await.expect("load");
+
+        assert!(dst.users.read().await.contains_key(&uid));
+        assert_eq!(
+            dst.key_packages.read().await.get(&uid).unwrap().key_package,
+            vec![1, 2, 3, 4]
+        );
+        let groups = dst.groups.read().await;
+        let log = groups.get(&gid).expect("group log");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].epoch, 7);
+        assert_eq!(log[0].welcomes[0].joiner_user_id, uid);
+        drop(groups);
+        let messages = dst.messages.read().await;
+        assert_eq!(messages.get(&gid).unwrap().len(), 1);
+        drop(messages);
+        let peers = dst.peers.read().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(
+            peers.get("peer.example").unwrap().federation_pubkey,
+            [0x99; 32]
+        );
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[tokio::test]

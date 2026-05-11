@@ -54,10 +54,30 @@ async fn main() -> anyhow::Result<()> {
         "federation identity loaded"
     );
 
-    // 5.b. Database (sqlx) — deferred to follow-up commit.
+    // 5.b. Snapshot restore — if a snapshot path is configured and the
+    // file exists, populate state from disk before binding the listener.
+    let snapshot_path = if cfg.snapshot_path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(&cfg.snapshot_path))
+    };
+    if let Some(p) = &snapshot_path {
+        if p.exists() {
+            match state.load_snapshot(p).await {
+                Ok(()) => info!(path = %p.display(), "state restored from snapshot"),
+                Err(e) => warn!(path = %p.display(), error = %e, "failed to restore snapshot — starting from empty state"),
+            }
+        } else {
+            info!(path = %p.display(), "no prior snapshot; starting from empty state");
+        }
+    } else {
+        warn!(
+            "no snapshot path configured (LATTICE__SNAPSHOT_PATH); state will not survive restart"
+        );
+    }
 
     // 6. HTTP listener
-    let app = lattice_server::app(state);
+    let app = lattice_server::app(state.clone());
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", cfg.server.bind_addr))?;
@@ -67,6 +87,14 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+
+    // 7. Snapshot save on graceful shutdown.
+    if let Some(p) = &snapshot_path {
+        match state.save_snapshot(p).await {
+            Ok(()) => info!(path = %p.display(), "state saved to snapshot"),
+            Err(e) => warn!(path = %p.display(), error = %e, "snapshot save failed"),
+        }
+    }
 
     info!("server shutdown complete");
     Ok(())
