@@ -28,7 +28,11 @@ use lattice_protocol::sealed_sender::{open_at_recipient, seal};
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 
 use crate::api;
+use crate::capabilities::Capabilities;
+use crate::passkey;
 use crate::persist;
+
+const PASSKEY_CREDENTIAL_LS_KEY: &str = "lattice/passkey/credential_id_b64url";
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -187,6 +191,34 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let create_passkey = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("creating passkey…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_create_passkey(log).await {
+                Ok(id_prefix) => set_status.set(format!(
+                    "passkey created (credential_id {id_prefix}…)"
+                )),
+                Err(e) => set_status.set(format!("passkey create error: {e}")),
+            }
+        });
+    };
+
+    let derive_passkey_kek = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("deriving PRF KEK…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_derive_passkey_kek(log).await {
+                Ok(kek_prefix) => {
+                    set_status.set(format!("PRF KEK derived ({kek_prefix}…)"));
+                }
+                Err(e) => set_status.set(format!("passkey PRF error: {e}")),
+            }
+        });
+    };
+
     let clear_identity = move |_| {
         set_log_lines.set(Vec::new());
         match persist::clear() {
@@ -204,6 +236,7 @@ pub fn App() -> impl IntoView {
                 <div class="status" role="status" aria-live="polite">
                     {move || status.get()}
                 </div>
+                <CapabilitiesPanel/>
                 <div class="button-row" role="group" aria-label="demo actions">
                     <button class="button" on:click=run_primitives>"Run primitives demo"</button>
                     <button class="button" on:click=run_mls>"Run MLS round-trip"</button>
@@ -214,6 +247,8 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
+                    <button class="button" on:click=create_passkey>"Create passkey"</button>
+                    <button class="button" on:click=derive_passkey_kek>"Derive PRF KEK"</button>
                     <button class="button" on:click=clear_identity>"Clear saved identity"</button>
                 </div>
                 <Show
@@ -746,6 +781,89 @@ fn try_save_identity(
         log("== M4 phase δ.1 complete ==".to_string());
     }
     Ok(user_id_b64.chars().take(12).collect::<String>())
+}
+
+/// Phase ε: register a passkey for the dev RP `localhost`, request
+/// the PRF extension, and stash the credential_id_b64url in
+/// localStorage for [`try_derive_passkey_kek`] to use later.
+///
+/// Returns the credential_id prefix the UI status surfaces.
+async fn try_create_passkey(log: impl Fn(String) + Copy) -> Result<String, String> {
+    log("== create passkey ==".to_string());
+    log("calling navigator.credentials.create with PRF extension".to_string());
+    let created = passkey::create_passkey("lattice-dev").await?;
+    log(format!(
+        "credential_id (b64url): {}",
+        created.credential_id_b64url
+    ));
+    log(format!("PRF extension supported: {}", created.prf_supported));
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let storage = window
+        .local_storage()
+        .map_err(|e| format!("localStorage: {e:?}"))?
+        .ok_or_else(|| "localStorage unavailable".to_string())?;
+    storage
+        .set_item(PASSKEY_CREDENTIAL_LS_KEY, &created.credential_id_b64url)
+        .map_err(|e| format!("save credential_id: {e:?}"))?;
+    log(format!(
+        "credential_id saved to localStorage[\"{PASSKEY_CREDENTIAL_LS_KEY}\"]"
+    ));
+    log("== M4 phase ε.1 complete ==".to_string());
+    Ok(created
+        .credential_id_b64url
+        .chars()
+        .take(12)
+        .collect::<String>())
+}
+
+/// Phase ε.2: run navigator.credentials.get to extract the PRF output
+/// for the saved credential. The 32-byte result is suitable as a KEK
+/// for an at-rest envelope (replaces the Argon2id-derived KEK from
+/// Phase δ.2 in the future v3 blob format).
+async fn try_derive_passkey_kek(log: impl Fn(String) + Copy) -> Result<String, String> {
+    log("== derive PRF KEK ==".to_string());
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let storage = window
+        .local_storage()
+        .map_err(|e| format!("localStorage: {e:?}"))?
+        .ok_or_else(|| "localStorage unavailable".to_string())?;
+    let credential_id_b64url = storage
+        .get_item(PASSKEY_CREDENTIAL_LS_KEY)
+        .map_err(|e| format!("read credential_id: {e:?}"))?
+        .ok_or_else(|| "no saved credential_id — create a passkey first".to_string())?;
+    log(format!("credential_id loaded: {credential_id_b64url}"));
+    let kek = passkey::evaluate_prf(&credential_id_b64url).await?;
+    let kek_b64 = B64.encode(kek);
+    log(format!("KEK (32 bytes): {kek_b64}"));
+    log("==> would now use this as ChaCha20-Poly1305 key for v3 persist blob".to_string());
+    log("== M4 phase ε.2 complete ==".to_string());
+    Ok(kek_b64.chars().take(12).collect::<String>())
+}
+
+/// Capability summary chip row. Shows green/grey indicators for
+/// WebAuthn passkey support (Phase ε prerequisite) and WebTransport
+/// availability (Phase γ.4 prerequisite). Probed once at component
+/// render — capabilities don't change without a page reload.
+#[component]
+fn CapabilitiesPanel() -> impl IntoView {
+    let caps = Capabilities::probe();
+    let row = |label: &'static str, enabled: bool| {
+        let badge_class = if enabled { "cap-on" } else { "cap-off" };
+        let badge_text = if enabled { "ready" } else { "n/a" };
+        view! {
+            <span class="cap-chip">
+                <span class={badge_class} aria-hidden="true"></span>
+                <span class="cap-label">{label}</span>
+                <span class="cap-badge">{badge_text}</span>
+            </span>
+        }
+    };
+    view! {
+        <div class="cap-row" aria-label="browser capabilities">
+            {row("WebAuthn passkeys", caps.webauthn && caps.credentials_container)}
+            {row("WebTransport", caps.webtransport)}
+        </div>
+    }
 }
 
 /// Pop a `window.prompt` to collect a passphrase. Returns `Ok(None)`

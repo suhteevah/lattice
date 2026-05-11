@@ -11,6 +11,8 @@
 
 mod api;
 mod app;
+mod capabilities;
+mod passkey;
 mod persist;
 
 use leptos::prelude::*;
