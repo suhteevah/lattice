@@ -92,6 +92,14 @@ LATTICE__SERVER__BIND_ADDR=127.0.0.1:4443          # localhost-only for
 LATTICE__FEDERATION_KEY_PATH=/var/lib/lattice/fed.key  # 32-byte raw seed;
                                                         # auto-generated
                                                         # on first start
+LATTICE__SNAPSHOT_PATH=/var/lib/lattice/state.json     # JSON dump of
+                                                        # in-memory state.
+                                                        # Restored at
+                                                        # startup,
+                                                        # written on
+                                                        # graceful shutdown.
+                                                        # Empty = no
+                                                        # persistence.
 LATTICE__DATABASE_URL=postgres://noop@localhost/noop   # unused in M3
                                                         # but required
                                                         # by typed config
@@ -99,6 +107,24 @@ RUST_LOG=lattice_server=info,axum=warn
 
 nohup ~/lattice/target/release/lattice-server > /var/log/lattice.log 2>&1 &
 ```
+
+## State persistence (clean restart)
+
+If `LATTICE__SNAPSHOT_PATH` points at a writable file, the server
+restores its in-memory state from there at startup and writes a
+fresh JSON dump on graceful shutdown (SIGTERM / SIGINT). All
+known stores are covered: registered users, published KeyPackages,
+group commit logs (including welcomes), application-message
+inbox + monotonic `seq`, federation peer registry.
+
+Hard crashes (SIGKILL, OOM, power loss) still lose any state
+since the last snapshot — sqlite/sqlx integration in the M3 polish
+backlog will close that gap. For the testbed, send SIGTERM
+(`kill <pid>` defaults to SIGTERM) and the server flushes to disk
+before exiting.
+
+A round-trip test in `crates/lattice-server/src/state.rs::tests::
+snapshot_round_trip_preserves_state` exercises every field.
 
 Verify:
 
