@@ -71,6 +71,18 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let key_package_round_trip = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("publishing key package…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_kp_round_trip(DEFAULT_SERVER_URL, log).await {
+                Ok(len) => set_status.set(format!("KP round-trip OK ({len} bytes)")),
+                Err(e) => set_status.set(format!("KP round-trip error: {e}")),
+            }
+        });
+    };
+
     view! {
         <div class="page">
             <div class="card">
@@ -81,6 +93,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=run_primitives>"Run primitives demo"</button>
                     <button class="button" on:click=run_mls>"Run MLS round-trip"</button>
                     <button class="button" on:click=register_server>"Register with server"</button>
+                    <button class="button" on:click=key_package_round_trip>"KP publish + fetch"</button>
                 </div>
                 <Show
                     when=move || !log_lines.get().is_empty()
@@ -290,6 +303,46 @@ async fn try_register_with_server(
     ));
     log("== M4 phase γ.1 complete ==".to_string());
     Ok(new_registration)
+}
+
+/// Phase γ.2: register Bob, then `POST /key_packages` with a
+/// freshly-generated `LatticeIdentity` KeyPackage, then
+/// `GET /key_packages/:user_id_b64url` to fetch the same bytes back.
+/// Proves the publish/fetch path round-trips intact.
+///
+/// We use a Bob identity (`0xBB`) to keep the user_ids in the server
+/// state distinct from the γ.1 Alice flow.
+async fn try_kp_round_trip(
+    server: &str,
+    log: impl Fn(String) + Copy,
+) -> Result<usize, String> {
+    log(format!("== KP round-trip against {server} =="));
+    let bob = make_identity(0xBB)?;
+    let psk_store = LatticePskStorage::new();
+    log(format!(
+        "user_id: {}",
+        B64.encode(bob.credential.user_id)
+    ));
+
+    log("POST /register …".to_string());
+    let new_registration = api::register(server, &bob).await?;
+    log(format!(
+        "registered (new_registration={new_registration})"
+    ));
+
+    log("POST /key_packages …".to_string());
+    let published_at = api::publish_key_package(server, &bob, &psk_store).await?;
+    log(format!("published_at: {published_at}"));
+
+    log(format!(
+        "GET /key_packages/{}…",
+        B64.encode(bob.credential.user_id)
+    ));
+    let kp_bytes = api::fetch_key_package(server, &bob.credential.user_id).await?;
+    log(format!("fetched {} bytes", kp_bytes.len()));
+
+    log("== M4 phase γ.2 complete ==".to_string());
+    Ok(kp_bytes.len())
 }
 
 /// Build a fresh `LatticeIdentity` from scratch — signature keypair via
