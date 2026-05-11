@@ -129,6 +129,30 @@ impl GroupHandle {
     pub fn current_epoch(&self) -> u64 {
         self.inner.context().epoch()
     }
+
+    /// Iterate every member's `(leaf_index, user_id)`. The user_id is
+    /// the 32-byte field of the `LatticeCredential` extracted from
+    /// each leaf. Useful for device-revocation flows that need to
+    /// find a particular leaf by user_id before calling
+    /// `remove_member`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a leaf credential fails to decode or isn't
+    /// a `LatticeCredential` (third-party credentials aren't yet
+    /// supported on the Lattice wire).
+    pub fn members(&self) -> Result<Vec<(u32, [u8; crate::credential::USER_ID_LEN])>> {
+        let mut out = Vec::new();
+        for m in self.inner.roster().members_iter() {
+            let cred = m.signing_identity.credential.as_custom().ok_or_else(|| {
+                Error::Mls("non-custom credential in roster".to_string())
+            })?;
+            let parsed = crate::credential::LatticeCredential::decode(cred.data())
+                .map_err(|e| Error::Mls(format!("decode leaf credential: {e}")))?;
+            out.push((m.index, parsed.user_id));
+        }
+        Ok(out)
+    }
 }
 
 /// Result of an outgoing commit. Holds the wire bytes the caller pushes
@@ -522,18 +546,56 @@ pub fn decrypt(group: &mut GroupHandle, ciphertext: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// Force a commit (rotates group keys + injects fresh PQ-PSK to every
-/// other member).
+/// Issue a Remove proposal against a specific leaf and commit it.
 ///
-/// In M2 we only support 1:1 groups, so "every other member" is one
-/// peer; for multi-member groups (M5) this will need to encapsulate to
-/// each member's `LatticeKemPubkey`. Currently returns an error if
-/// called on a non-1:1 group.
+/// Used by M5's device revocation flow: the group admin (or the
+/// owner of the device being lost/stolen, while they still have
+/// access) calls `remove_member(group, leaf_index)`. The resulting
+/// commit advances the group's epoch and rotates every active
+/// member's path secrets; the removed leaf's old epoch keys stop
+/// working after the next commit cycle.
+///
+/// No Welcome is produced (no new joiner). Existing members process
+/// the commit via `decrypt(group, commit_bytes)` to advance their
+/// local state.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mls`] on multi-member groups (deferred to M5) or
-/// any mls-rs failure.
+/// `Error::Mls` if `leaf_index` is invalid, mls-rs commit build
+/// fails, or the encode step fails.
+#[instrument(level = "debug", skip(group))]
+pub fn remove_member(group: &mut GroupHandle, leaf_index: u32) -> Result<CommitOutput> {
+    let commit_output = group
+        .inner
+        .commit_builder()
+        .remove_member(leaf_index)
+        .map_err(|e| Error::Mls(format!("remove_member({leaf_index}): {e:?}")))?
+        .build()
+        .map_err(|e| Error::Mls(format!("commit build (remove): {e:?}")))?;
+    let commit_bytes = commit_output
+        .commit_message
+        .mls_encode_to_vec()
+        .map_err(|e| Error::Mls(format!("encode remove-commit: {e:?}")))?;
+    Ok(CommitOutput {
+        commit: commit_bytes,
+        welcomes: Vec::new(),
+    })
+}
+
+/// Force a self-commit on the local group. mls-rs builds an Update
+/// path that rotates the ratchet (forward + post-compromise
+/// secrecy) without changing membership; no Welcome is produced.
+/// Used by M5's commit cadence scheduler.
+///
+/// 1:1 today — for multi-member groups (M5.5) this will need to
+/// encapsulate fresh PQ-PSK material to every other member's
+/// `LatticeKemPubkey` per D-04. Currently returns an error if called
+/// on a non-1:1 group.
+///
+/// # Errors
+///
+/// Returns [`Error::Mls`] on multi-member groups (deferred to M5.5)
+/// or any mls-rs failure.
 #[instrument(level = "debug", skip(group))]
 pub fn commit(group: &mut GroupHandle) -> Result<CommitOutput> {
     let member_count = group.inner.roster().members_iter().count();

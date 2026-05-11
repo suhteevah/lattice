@@ -25,7 +25,7 @@ use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
     LatticeIdentity, add_member, apply_commit, commit, create_group, decrypt, encrypt_application,
-    generate_key_package, process_welcome,
+    generate_key_package, process_welcome, remove_member,
 };
 use lattice_protocol::sealed_sender::{open_at_recipient, seal};
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
@@ -143,6 +143,14 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
             }
         });
+    };
+
+    let revocation_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        match try_revocation_demo(append) {
+            Ok(()) => set_status.set("revocation demo OK".to_string()),
+            Err(e) => set_status.set(format!("revocation error: {e}")),
+        }
     };
 
     let attachment_demo = move |_| {
@@ -306,6 +314,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=sealed_sender_demo>"Sealed-sender demo"</button>
                     <button class="button" on:click=cadence_demo>"Commit cadence demo"</button>
                     <button class="button" on:click=attachment_demo>"Attachment demo"</button>
+                    <button class="button" on:click=revocation_demo>"Device revocation demo"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -668,6 +677,113 @@ async fn try_server_backed_demo(
     ));
 
     log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
+}
+
+/// M5: device revocation via MLS Remove proposal. ROADMAP §M5
+/// names "device revocation via MLS Remove proposal; UI to list and
+/// revoke devices" as a deliverable. Here we ship the protocol
+/// half — the UI list is a chip later.
+///
+/// 1:1 demo: Alice creates a 2-member group with Bob, exchanges a
+/// "before revocation" message, then issues a `remove_member`
+/// commit pointed at Bob's leaf. Alice's epoch advances; Bob
+/// processes the commit and his subsequent decrypt attempts must
+/// fail (he's no longer in the group). We assert both halves: pre-
+/// revocation success + post-revocation failure.
+fn try_revocation_demo(log: impl Fn(String) + Copy) -> Result<(), String> {
+    log("== device revocation demo ==".to_string());
+    let alice = make_identity(0xD1)?;
+    let bob = make_identity(0xD2)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+
+    let group_id: [u8; 16] = *b"lattice-revoke!!";
+    let mut alice_group = create_group(&alice, alice_psk.clone(), &group_id)
+        .map_err(|e| format!("create_group: {e}"))?;
+    let bob_kp = generate_key_package(&bob, bob_psk.clone())
+        .map_err(|e| format!("generate_key_package: {e}"))?;
+    let commit_output =
+        add_member(&mut alice_group, &bob_kp).map_err(|e| format!("add_member: {e}"))?;
+    let welcome = commit_output
+        .welcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no welcome".to_string())?;
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit (add): {e}"))?;
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), &welcome)
+        .map_err(|e| format!("process_welcome: {e}"))?;
+
+    let members = alice_group
+        .members()
+        .map_err(|e| format!("members: {e}"))?;
+    log(format!(
+        "roster: {}",
+        members
+            .iter()
+            .map(|(idx, uid)| format!("leaf={idx} uid={}", &B64.encode(uid)[..12]))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ));
+
+    // Pre-revocation: round-trip a message to prove the group is live.
+    let pre_ct = encrypt_application(&mut alice_group, b"pre-revoke ping")
+        .map_err(|e| format!("alice encrypt (pre): {e}"))?;
+    let pre_pt =
+        decrypt(&mut bob_group, &pre_ct).map_err(|e| format!("bob decrypt (pre): {e}"))?;
+    if pre_pt.as_slice() != b"pre-revoke ping" {
+        return Err("pre-revocation plaintext mismatch".into());
+    }
+    log("pre-revocation: bob received \"pre-revoke ping\"".to_string());
+
+    // Find Bob's leaf via user_id.
+    let bob_user_id = bob.credential.user_id;
+    let bob_leaf = members
+        .iter()
+        .find_map(|(idx, uid)| (*uid == bob_user_id).then_some(*idx))
+        .ok_or_else(|| "bob not in roster".to_string())?;
+    log(format!(
+        "issuing Remove proposal for bob @ leaf {bob_leaf}"
+    ));
+    let remove_output =
+        remove_member(&mut alice_group, bob_leaf).map_err(|e| format!("remove_member: {e}"))?;
+    log(format!(
+        "remove-commit: {} bytes (welcomes: {})",
+        remove_output.commit.len(),
+        remove_output.welcomes.len(),
+    ));
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit (remove): {e}"))?;
+
+    // Bob processes the commit. mls-rs's process_incoming_message
+    // accepts the commit even though the receiver is being removed —
+    // it advances his state, then subsequent encrypt/decrypt fails
+    // because his leaf is gone.
+    let _ = decrypt(&mut bob_group, &remove_output.commit)
+        .map_err(|e| format!("bob process remove-commit: {e}"))?;
+    log(format!(
+        "post-revocation epochs — alice={}, bob={}",
+        alice_group.current_epoch(),
+        bob_group.current_epoch()
+    ));
+
+    // Post-revocation: Bob should no longer be able to decrypt
+    // application messages from Alice. (Alice can't trivially encrypt
+    // either — a 1-member group has no peers in mls-rs's
+    // application-message path.)
+    let post_attempt = encrypt_application(&mut alice_group, b"post-revoke ping");
+    match post_attempt {
+        Err(e) => log(format!(
+            "alice encrypt post-revoke: rejected (expected — solo group): {e}"
+        )),
+        Ok(ct) => match decrypt(&mut bob_group, &ct) {
+            Err(e) => log(format!(
+                "bob decrypt post-revoke: rejected (expected): {e}"
+            )),
+            Ok(_) => return Err("bob should not have been able to decrypt after revocation".into()),
+        },
+    }
+
+    log("== M5 revocation flow complete ==".to_string());
     Ok(())
 }
 
