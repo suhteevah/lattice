@@ -30,6 +30,7 @@ hex.workspace = true
 lattice-core = { path = "../../crates/lattice-core" }
 lattice-crypto = { path = "../../crates/lattice-crypto" }
 lattice-protocol = { path = "../../crates/lattice-protocol" }
+mls-rs.workspace = true
 mls-rs-core.workspace = true
 blake3.workspace = true
 

@@ -113,6 +113,12 @@ h1 {
     cursor: not-allowed;
 }
 
+.button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
 .log {
     margin-top: 1rem;
     padding: 0.75rem;

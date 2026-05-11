@@ -2274,6 +2274,7 @@ dependencies = [
  "lattice-crypto",
  "lattice-protocol",
  "leptos",
+ "mls-rs",
  "mls-rs-core",
  "tracing",
  "wasm-bindgen",
