@@ -9,6 +9,7 @@
 
 use base64::Engine;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 
 use lattice_crypto::credential::{
     ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
@@ -23,7 +24,14 @@ use lattice_crypto::mls::{
 };
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 
+use crate::api;
+
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+/// Default `lattice-server` endpoint for browser-side calls. Matches the
+/// `LATTICE_BIND_ADDR` Matt uses for local dev. Override at compile time
+/// later if we need to point at pixie / cnc.
+const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -51,6 +59,18 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let register_server = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("registering…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_register_with_server(DEFAULT_SERVER_URL, log).await {
+                Ok(new) => set_status.set(format!("register OK (new_registration={new})")),
+                Err(e) => set_status.set(format!("register error: {e}")),
+            }
+        });
+    };
+
     view! {
         <div class="page">
             <div class="card">
@@ -60,6 +80,7 @@ pub fn App() -> impl IntoView {
                 <div class="button-row">
                     <button class="button" on:click=run_primitives>"Run primitives demo"</button>
                     <button class="button" on:click=run_mls>"Run MLS round-trip"</button>
+                    <button class="button" on:click=register_server>"Register with server"</button>
                 </div>
                 <Show
                     when=move || !log_lines.get().is_empty()
@@ -243,6 +264,32 @@ fn try_run_mls_round_trip(log: impl Fn(String) + Copy) -> Result<(), String> {
 
     log("== M4 phase β complete ==".to_string());
     Ok(())
+}
+
+/// Build a fresh Alice identity in-browser, then call the lattice-server
+/// `/register` route and report success.
+///
+/// This is the M4 Phase γ minimum proof-of-life: that the browser can
+/// hit a live `lattice-server` over `gloo-net::http::Request` with CORS
+/// permitted, and that an identity built entirely in-WASM round-trips
+/// through the wire encoding.
+async fn try_register_with_server(
+    server: &str,
+    log: impl Fn(String) + Copy,
+) -> Result<bool, String> {
+    log(format!("== register against {server} =="));
+    let alice = make_identity(0xAA)?;
+    log(format!(
+        "user_id: {}",
+        B64.encode(alice.credential.user_id)
+    ));
+    log("POST /register …".to_string());
+    let new_registration = api::register(server, &alice).await?;
+    log(format!(
+        "server response: new_registration={new_registration}"
+    ));
+    log("== M4 phase γ.1 complete ==".to_string());
+    Ok(new_registration)
 }
 
 /// Build a fresh `LatticeIdentity` from scratch — signature keypair via

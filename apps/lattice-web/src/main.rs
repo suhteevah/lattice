@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod api;
 mod app;
 
 use leptos::prelude::*;

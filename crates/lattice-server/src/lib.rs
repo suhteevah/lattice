@@ -17,7 +17,19 @@ pub mod state;
 /// Exposed so integration tests can spin up the app in-process via
 /// `axum::serve` against a randomly-bound port.
 pub fn app(state: state::ServerState) -> axum::Router {
+    use tower_http::cors::{Any, CorsLayer};
     use tower_http::trace::TraceLayer;
+
+    // CORS for the browser client. We accept any origin in dev because
+    // Trunk serves the SPA on a different port than this server; in
+    // production the home server fronts both and same-origin makes this
+    // unnecessary. Wildcard origin with no credentials is the safe
+    // combination per the Fetch spec — we never set cookies, so there's
+    // no `Access-Control-Allow-Credentials` to leak.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     axum::Router::new()
         .merge(routes::health::router())
@@ -25,6 +37,7 @@ pub fn app(state: state::ServerState) -> axum::Router {
         .merge(routes::identity::router().with_state(state.clone()))
         .merge(routes::groups::router().with_state(state.clone()))
         .merge(routes::federation::router().with_state(state))
+        .layer(cors)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {

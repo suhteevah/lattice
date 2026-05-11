@@ -34,6 +34,14 @@ mls-rs.workspace = true
 mls-rs-core.workspace = true
 blake3.workspace = true
 
+# HTTP client + JSON for talking to a local lattice-server. gloo-net
+# wraps the browser Fetch API in an ergonomic future-based interface
+# that works inside Leptos's spawn_local task scope.
+gloo-net = { version = "0.6", features = ["http", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen-futures.workspace = true
+
 # Browser bindings used directly by the UI (logging to console,
 # accessing window, fetching).
 wasm-bindgen.workspace = true

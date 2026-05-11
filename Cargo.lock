@@ -2269,6 +2269,7 @@ dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
  "getrandom 0.4.2",
+ "gloo-net",
  "hex",
  "lattice-core",
  "lattice-crypto",
@@ -2276,8 +2277,11 @@ dependencies = [
  "leptos",
  "mls-rs",
  "mls-rs-core",
+ "serde",
+ "serde_json",
  "tracing",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

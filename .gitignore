@@ -54,3 +54,6 @@ federation.key
 
 scratch/
 
+# Local dev-server run dir (federation key, state snapshot, log)
+/.run/
+
