@@ -1,0 +1,50 @@
+{
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "$description": "Lattice typography tokens. Two weights only: 400 and 500.",
+  "$version": "0.1.0",
+
+  "fontFamilies": {
+    "sans":  { "$value": "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", "$type": "fontFamily" },
+    "serif": { "$value": "ui-serif, Georgia, 'Times New Roman', serif", "$type": "fontFamily" },
+    "mono":  { "$value": "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", "$type": "fontFamily" }
+  },
+
+  "fontWeights": {
+    "regular": { "$value": 400, "$type": "fontWeight" },
+    "medium":  { "$value": 500, "$type": "fontWeight", "$description": "Never use 600+. Looks heavy against lilac surfaces." }
+  },
+
+  "fontSizes": {
+    "xs":   { "$value": "11px", "$type": "dimension" },
+    "sm":   { "$value": "13px", "$type": "dimension" },
+    "base": { "$value": "15px", "$type": "dimension" },
+    "lg":   { "$value": "17px", "$type": "dimension" },
+    "xl":   { "$value": "20px", "$type": "dimension" },
+    "2xl":  { "$value": "24px", "$type": "dimension" },
+    "3xl":  { "$value": "30px", "$type": "dimension" }
+  },
+
+  "lineHeights": {
+    "tight":   { "$value": "1.25", "$type": "number" },
+    "normal":  { "$value": "1.5",  "$type": "number" },
+    "relaxed": { "$value": "1.7",  "$type": "number" }
+  },
+
+  "letterSpacing": {
+    "tight":  { "$value": "-0.01em", "$type": "dimension" },
+    "normal": { "$value": "0",       "$type": "dimension" },
+    "wide":   { "$value": "0.02em",  "$type": "dimension" }
+  },
+
+  "textStyles": {
+    "h1":          { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.medium}",  "fontSize": "{fontSizes.3xl}",  "lineHeight": "{lineHeights.tight}",  "letterSpacing": "{letterSpacing.tight}" }, "$type": "typography" },
+    "h2":          { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.medium}",  "fontSize": "{fontSizes.2xl}",  "lineHeight": "{lineHeights.tight}",  "letterSpacing": "{letterSpacing.tight}" }, "$type": "typography" },
+    "h3":          { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.medium}",  "fontSize": "{fontSizes.xl}",   "lineHeight": "{lineHeights.tight}",  "letterSpacing": "{letterSpacing.normal}" }, "$type": "typography" },
+    "body":        { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.regular}", "fontSize": "{fontSizes.base}", "lineHeight": "{lineHeights.relaxed}", "letterSpacing": "{letterSpacing.normal}" }, "$type": "typography" },
+    "body-small":  { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.regular}", "fontSize": "{fontSizes.sm}",   "lineHeight": "{lineHeights.normal}",  "letterSpacing": "{letterSpacing.normal}" }, "$type": "typography" },
+    "caption":     { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.regular}", "fontSize": "{fontSizes.xs}",   "lineHeight": "{lineHeights.normal}",  "letterSpacing": "{letterSpacing.wide}" }, "$type": "typography" },
+    "code":        { "$value": { "fontFamily": "{fontFamilies.mono}", "fontWeight": "{fontWeights.regular}", "fontSize": "{fontSizes.sm}",   "lineHeight": "{lineHeights.normal}",  "letterSpacing": "{letterSpacing.normal}" }, "$type": "typography" },
+    "message":     { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.regular}", "fontSize": "{fontSizes.base}", "lineHeight": "{lineHeights.normal}",  "letterSpacing": "{letterSpacing.normal}" }, "$type": "typography", "$description": "Chat message body." },
+    "username":    { "$value": { "fontFamily": "{fontFamilies.sans}", "fontWeight": "{fontWeights.medium}",  "fontSize": "{fontSizes.sm}",   "lineHeight": "{lineHeights.tight}",  "letterSpacing": "{letterSpacing.normal}" }, "$type": "typography" }
+  }
+}

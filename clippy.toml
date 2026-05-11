@@ -1,0 +1,4 @@
+# Per-project clippy tweaks. Most lint config lives in Cargo.toml
+# [workspace.lints.clippy].
+avoid-breaking-exported-api = false
+msrv = "1.85"

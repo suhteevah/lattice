@@ -1,0 +1,35 @@
+[package]
+name = "lattice-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lattice client core. Compiles to wasm32 for browser clients (V1) and native for desktop/mobile (V2)."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+lattice-crypto = { path = "../lattice-crypto" }
+lattice-protocol = { path = "../lattice-protocol" }
+lattice-storage = { path = "../lattice-storage" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["Window", "console", "Crypto"] }
+getrandom = { workspace = true, features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

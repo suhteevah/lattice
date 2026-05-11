@@ -1,0 +1,18 @@
+[package]
+name = "lattice-keytransparency"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "V1.5 placeholder — CONIKS-style append-only key transparency log for Lattice."
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+sha2.workspace = true
+blake3.workspace = true

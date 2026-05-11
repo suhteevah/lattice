@@ -1,0 +1,25 @@
+{
+  "$comment": "Production Content Security Policy for lattice-web. The host server emits this as the Content-Security-Policy response header. Keep in sync with vite.config.ts dev-server headers and index.html meta tag.",
+  "directives": {
+    "default-src": ["'self'"],
+    "script-src": ["'self'", "'wasm-unsafe-eval'"],
+    "style-src": ["'self'", "'unsafe-inline'"],
+    "img-src": ["'self'", "data:", "blob:"],
+    "connect-src": ["'self'", "wss:"],
+    "font-src": ["'self'"],
+    "object-src": ["'none'"],
+    "base-uri": ["'self'"],
+    "frame-ancestors": ["'none'"],
+    "form-action": ["'self'"],
+    "require-trusted-types-for": ["'script'"]
+  },
+  "headers": {
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Embedder-Policy": "require-corp",
+    "Cross-Origin-Resource-Policy": "same-origin"
+  }
+}

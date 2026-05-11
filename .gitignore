@@ -1,0 +1,58 @@
+# Rust
+/target/
+**/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Cargo registry artifacts
+.cargo/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.fleet/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Web
+apps/lattice-web/node_modules/
+apps/lattice-web/dist/
+apps/lattice-web/.vite/
+apps/lattice-web/*.tsbuildinfo
+
+# Node generally
+**/node_modules/
+npm-debug.log
+yarn-error.log
+
+# Federation keys (NEVER commit)
+federation.key
+*.pem
+*.key
+!**/scripts/*.key
+
+# Local databases
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Coverage
+/coverage/
+*.lcov
+*.profraw
+
+# Generated docs
+/docs/api/
+
+scratch/
+

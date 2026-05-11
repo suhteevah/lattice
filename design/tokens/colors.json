@@ -1,0 +1,98 @@
+{
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "$description": "Lattice design tokens — lilac-anchored, split-complementary palette. Dark-mode-first.",
+  "$version": "0.1.0",
+
+  "lilac": {
+    "$description": "Primary brand ramp. Use 400 as the brand-canonical value.",
+    "50":  { "$value": "#F2E8F2", "$type": "color" },
+    "100": { "$value": "#EAD8EA", "$type": "color" },
+    "200": { "$value": "#E0C8E0", "$type": "color" },
+    "300": { "$value": "#D4B4D4", "$type": "color" },
+    "400": { "$value": "#C8A2C8", "$type": "color", "$description": "Brand canonical." },
+    "500": { "$value": "#B38EB8", "$type": "color" },
+    "600": { "$value": "#9D7BA8", "$type": "color" },
+    "700": { "$value": "#6B4F8A", "$type": "color" },
+    "800": { "$value": "#4A3560", "$type": "color" },
+    "900": { "$value": "#2A1F3A", "$type": "color" },
+    "950": { "$value": "#18101E", "$type": "color" }
+  },
+
+  "sage": {
+    "$description": "Complementary accent. Success, confirmations, encrypted-state badges.",
+    "300": { "$value": "#C4DCC8", "$type": "color" },
+    "500": { "$value": "#A2C8A8", "$type": "color", "$description": "Brand canonical sage." },
+    "700": { "$value": "#5A8A60", "$type": "color" },
+    "900": { "$value": "#1F3A24", "$type": "color" }
+  },
+
+  "amber": {
+    "$description": "Analogous-warm accent. Warnings, timers, attention.",
+    "300": { "$value": "#F2DCB0", "$type": "color" },
+    "500": { "$value": "#E8C896", "$type": "color", "$description": "Brand canonical amber." },
+    "700": { "$value": "#A8854A", "$type": "color" },
+    "900": { "$value": "#4A3520", "$type": "color" }
+  },
+
+  "rose": {
+    "$description": "Split-complementary accent. Errors, danger, destructive actions.",
+    "300": { "$value": "#DCAEBC", "$type": "color" },
+    "500": { "$value": "#C88AA2", "$type": "color", "$description": "Brand canonical rose." },
+    "700": { "$value": "#8A4A60", "$type": "color" },
+    "900": { "$value": "#4A1F2E", "$type": "color" }
+  },
+
+  "slate": {
+    "$description": "Cool-analog accent. Secondary info, links in body copy, code blocks.",
+    "300": { "$value": "#B0C8DC", "$type": "color" },
+    "500": { "$value": "#8AB0C8", "$type": "color", "$description": "Brand canonical slate." },
+    "700": { "$value": "#4A6B8A", "$type": "color" },
+    "900": { "$value": "#1F2E4A", "$type": "color" }
+  },
+
+  "ink": {
+    "$description": "Neutrals. Dark-mode-first: 900-950 are app shell surfaces.",
+    "50":  { "$value": "#F8F5F8", "$type": "color", "$description": "Light-mode surface." },
+    "100": { "$value": "#EDE6ED", "$type": "color" },
+    "200": { "$value": "#D8CDD8", "$type": "color" },
+    "300": { "$value": "#B8A8B8", "$type": "color" },
+    "400": { "$value": "#9A8A9A", "$type": "color" },
+    "500": { "$value": "#8A7A8A", "$type": "color", "$description": "Mid neutral — body text on dark surface." },
+    "600": { "$value": "#6A5A6A", "$type": "color" },
+    "700": { "$value": "#4A3F50", "$type": "color" },
+    "800": { "$value": "#3A2F40", "$type": "color", "$description": "Elevated surface on dark." },
+    "900": { "$value": "#2A2330", "$type": "color", "$description": "Default dark surface." },
+    "950": { "$value": "#18141C", "$type": "color", "$description": "App background." }
+  },
+
+  "semantic": {
+    "$description": "Token aliases mapped to roles, theme-independent.",
+
+    "brand":             { "$value": "{lilac.400}",  "$type": "color" },
+    "brand-strong":      { "$value": "{lilac.600}",  "$type": "color" },
+    "brand-subtle":      { "$value": "{lilac.200}",  "$type": "color" },
+
+    "surface-app":       { "$value": "{ink.950}",    "$type": "color" },
+    "surface-default":   { "$value": "{ink.900}",    "$type": "color" },
+    "surface-elevated":  { "$value": "{ink.800}",    "$type": "color" },
+    "surface-overlay":   { "$value": "{ink.700}",    "$type": "color" },
+
+    "text-primary":      { "$value": "{ink.50}",     "$type": "color" },
+    "text-secondary":    { "$value": "{ink.300}",    "$type": "color" },
+    "text-tertiary":     { "$value": "{ink.500}",    "$type": "color" },
+    "text-on-brand":     { "$value": "{lilac.900}",  "$type": "color" },
+
+    "border-default":    { "$value": "{ink.700}",    "$type": "color" },
+    "border-strong":     { "$value": "{ink.500}",    "$type": "color" },
+    "border-focus":      { "$value": "{lilac.500}",  "$type": "color" },
+
+    "status-success":    { "$value": "{sage.500}",   "$type": "color" },
+    "status-warning":    { "$value": "{amber.500}",  "$type": "color" },
+    "status-danger":     { "$value": "{rose.500}",   "$type": "color" },
+    "status-info":       { "$value": "{slate.500}",  "$type": "color" },
+
+    "encrypted-badge":   { "$value": "{sage.500}",   "$type": "color", "$description": "Used wherever we surface E2EE state to the user." },
+    "self-bubble":       { "$value": "{lilac.700}",  "$type": "color" },
+    "peer-bubble":       { "$value": "{ink.800}",    "$type": "color" }
+  }
+}

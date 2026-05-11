@@ -1,0 +1,29 @@
+[package]
+name = "lattice-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Admin and developer CLI for Lattice. Used for the vertical-slice end-to-end test."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lattice"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+lattice-crypto = { path = "../lattice-crypto" }
+lattice-protocol = { path = "../lattice-protocol" }
+lattice-core = { path = "../lattice-core" }

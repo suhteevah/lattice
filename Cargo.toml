@@ -1,0 +1,136 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lattice-crypto",
+    "crates/lattice-protocol",
+    "crates/lattice-server",
+    "crates/lattice-core",
+    "crates/lattice-storage",
+    "crates/lattice-keytransparency",
+    "crates/lattice-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+authors = ["Matt Gates <matt@ridgecellrepair.com>"]
+repository = "https://github.com/suhteevah/lattice"
+homepage = "https://lattice.chat"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+
+# Tracing — verbose logging is mandatory across every crate
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+bytes = "1"
+
+# Post-quantum cryptography (NIST FIPS 203 / 204)
+# ml-dsa is still in release-candidate; pin explicitly until 0.1.0 ships.
+ml-kem = "0.2"
+ml-dsa = "=0.1.0-rc.11"
+# Classical primitives for hybrid mode
+x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+# AEAD
+chacha20poly1305 = "0.10"
+# Hashing & KDF
+sha2 = "0.10"
+blake3 = "1"
+hkdf = "0.12"
+argon2 = "0.5"
+# RNG
+rand = "0.8"
+rand_core = "0.6"
+# Zeroize sensitive material
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
+
+# MLS — group key agreement
+mls-rs = "0.45"
+mls-rs-core = "0.21"
+mls-rs-crypto-rustcrypto = "0.16"
+
+# QUIC transport
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+# Wire framing (Cap'n Proto via prost as a starting point — swap to capnp once
+# schema lands)
+prost = "0.13"
+prost-types = "0.13"
+
+# HTTP / server framework
+axum = { version = "0.8", features = ["macros", "ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "timeout"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "uuid", "chrono", "migrate"] }
+
+# Config
+config = "0.15"
+dotenvy = "0.15"
+
+# Validation
+validator = { version = "0.19", features = ["derive"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+base64 = "0.22"
+
+# WASM bindings (used by lattice-core when compiled to wasm32)
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+debug = true
