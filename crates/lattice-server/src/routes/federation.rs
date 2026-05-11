@@ -10,12 +10,7 @@
 //! contact via `.well-known/lattice/server`), and append into our
 //! local commit log so the joiner can fetch it.
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    routing::post,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -182,12 +177,9 @@ async fn inbox_handler(
                 "group_id length (expected 16)".into(),
             )
         })?;
-    let commit = b64.decode(&body.commit_b64).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("commit_b64: {e}"),
-        )
-    })?;
+    let commit = b64
+        .decode(&body.commit_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("commit_b64: {e}")))?;
 
     let mut welcomes = Vec::with_capacity(body.welcomes.len());
     for w in &body.welcomes {
@@ -285,12 +277,8 @@ async fn message_inbox_handler(
             format!("origin_pubkey length {} (expected 32)", pk_bytes_vec.len()),
         )
     })?;
-    let pubkey = VerifyingKey::from_bytes(&pk_bytes).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("origin_pubkey: {e}"),
-        )
-    })?;
+    let pubkey = VerifyingKey::from_bytes(&pk_bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("origin_pubkey: {e}")))?;
     let sig_bytes_vec = b64
         .decode(&body.signature_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("signature_b64: {e}")))?;
@@ -378,10 +366,7 @@ pub async fn push_message_to_peers(
         let target = url.clone();
         let client = state.federation_http.clone();
         let body = req.clone();
-        let endpoint = format!(
-            "{}/federation/message_inbox",
-            target.trim_end_matches('/')
-        );
+        let endpoint = format!("{}/federation/message_inbox", target.trim_end_matches('/'));
         tokio::spawn(async move {
             match client.post(&endpoint).json(&body).send().await {
                 Ok(resp) if resp.status().is_success() => {

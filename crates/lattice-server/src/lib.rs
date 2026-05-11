@@ -26,33 +26,33 @@ pub fn app(state: state::ServerState) -> axum::Router {
         .merge(routes::groups::router().with_state(state.clone()))
         .merge(routes::federation::router().with_state(state))
         .layer(
-        TraceLayer::new_for_http()
-            .make_span_with(|request: &axum::http::Request<_>| {
-                let request_id = uuid::Uuid::new_v4();
-                tracing::info_span!(
-                    "http_request",
-                    method = %request.method(),
-                    uri = %request.uri(),
-                    request_id = %request_id,
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    let request_id = uuid::Uuid::new_v4();
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        request_id = %request_id,
+                    )
+                })
+                .on_response(
+                    |response: &axum::http::Response<_>,
+                     latency: std::time::Duration,
+                     _span: &tracing::Span| {
+                        tracing::info!(
+                            status = response.status().as_u16(),
+                            latency_ms = latency.as_millis(),
+                            "Response sent",
+                        );
+                    },
                 )
-            })
-            .on_response(
-                |response: &axum::http::Response<_>,
-                 latency: std::time::Duration,
-                 _span: &tracing::Span| {
-                    tracing::info!(
-                        status = response.status().as_u16(),
-                        latency_ms = latency.as_millis(),
-                        "Response sent",
-                    );
-                },
-            )
-            .on_failure(
-                |error: tower_http::classify::ServerErrorsFailureClass,
-                 latency: std::time::Duration,
-                 _span: &tracing::Span| {
-                    tracing::error!(?error, latency_ms = latency.as_millis(), "Request failed");
-                },
-            ),
-    )
+                .on_failure(
+                    |error: tower_http::classify::ServerErrorsFailureClass,
+                     latency: std::time::Duration,
+                     _span: &tracing::Span| {
+                        tracing::error!(?error, latency_ms = latency.as_millis(), "Request failed");
+                    },
+                ),
+        )
 }

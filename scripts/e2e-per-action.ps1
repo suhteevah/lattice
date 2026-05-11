@@ -66,7 +66,7 @@ function Start-Lattice-Server {
         "LATTICE__SERVER__BIND_ADDR" = "127.0.0.1:$Port"
         "LATTICE__FEDERATION_KEY_PATH" = $KeyPath
         "LATTICE__DATABASE_URL" = "postgres://noop@localhost/noop"
-        "RUST_LOG" = "lattice_server=info,axum=warn"
+        "RUST_LOG" = "lattice_server=debug,axum=warn"
     }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $BinServer
@@ -132,7 +132,7 @@ try {
         ('send --server http://127.0.0.1:{0} --group-id "{1}" --message "{2}" --peer-server http://127.0.0.1:{3} --home "{4}"' `
             -f $PortA, $GroupId, ($Message -replace '"', '\"'), $PortB, $AliceDir) | Out-Null
 
-    Start-Sleep -Milliseconds 500  # let federation push land at B
+    Start-Sleep -Milliseconds 1500  # let federation message push land at B
 
     Write-Host "==> Bob receives from his own home server (B)" -ForegroundColor Magenta
     $recovered = (Invoke-Cli "bob recv" `

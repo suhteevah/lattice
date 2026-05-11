@@ -36,7 +36,6 @@
     // hurts the documentation more than it helps the rustdoc summary.
     clippy::too_long_first_doc_paragraph,
 )]
-
 // Test code in this module legitimately uses expect()/unwrap()/panic and
 // redundant clones for clarity per HANDOFF §7.
 #![cfg_attr(

@@ -11,6 +11,7 @@
 //! a redesign.
 
 #![allow(clippy::module_name_repetitions)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic,))]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -165,9 +166,12 @@ impl ServerState {
     #[must_use]
     pub fn new_test() -> Self {
         let mut seed = [0u8; 32];
-        OsRng
-            .try_fill_bytes(&mut seed)
-            .expect("OsRng never fails in normal operation");
+        // `OsRng` does not fail in normal operation; if it does we're
+        // in catastrophic OS state and aborting is the right move.
+        if let Err(e) = OsRng.try_fill_bytes(&mut seed) {
+            tracing::error!(error = %e, "OsRng failed in new_test; aborting");
+            std::process::abort();
+        }
         Self::new_with_federation_key(SigningKey::from_bytes(&seed))
     }
 }
@@ -340,7 +344,9 @@ mod tests {
             federation_pubkey: [0x11; 32],
         };
         upsert_peer(&state, peer.clone()).await;
-        let found = peer_by_host(&state, "home.example.com").await.expect("present");
+        let found = peer_by_host(&state, "home.example.com")
+            .await
+            .expect("present");
         assert_eq!(found.federation_pubkey, [0x11; 32]);
     }
 
@@ -354,7 +360,7 @@ mod tests {
                 gid,
                 GroupCommitEntry {
                     epoch,
-                    commit: vec![epoch as u8],
+                    commit: vec![u8::try_from(epoch & 0xFF).unwrap_or(0)],
                     welcomes: vec![],
                 },
             )

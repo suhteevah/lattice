@@ -5,6 +5,8 @@
 //! wrapped per D-08) is a follow-up — for now plain JSON sits on
 //! disk under user-owned permissions.
 
+#![allow(clippy::ptr_arg)]
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -88,10 +90,9 @@ impl CliIdentity {
     /// embedded fields don't pass length validation.
     pub fn load(home: &PathBuf) -> Result<Self> {
         let path = home.join("identity.json");
-        let bytes = fs::read(&path)
-            .with_context(|| format!("read identity from {}", path.display()))?;
-        let f: IdentityFile =
-            serde_json::from_slice(&bytes).context("parse identity.json")?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("read identity from {}", path.display()))?;
+        let f: IdentityFile = serde_json::from_slice(&bytes).context("parse identity.json")?;
 
         let user_id_v = B64.decode(&f.user_id_b64)?;
         let user_id: [u8; USER_ID_LEN] = user_id_v

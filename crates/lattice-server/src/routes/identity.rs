@@ -105,9 +105,12 @@ async fn publish_kp_handler(
             format!("user_id length {} (expected 32)", user_id_bytes.len()),
         )
     })?;
-    let key_package = b64
-        .decode(&body.key_package_b64)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("key_package_b64 decode: {e}")))?;
+    let key_package = b64.decode(&body.key_package_b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("key_package_b64 decode: {e}"),
+        )
+    })?;
 
     // Validate the user is registered before accepting a KP.
     if state.users.read().await.get(&user_id).is_none() {
@@ -153,9 +156,7 @@ async fn fetch_kp_handler(
     // standard first to keep clients simple.
     let user_id_bytes = b64
         .decode(&user_id_b64)
-        .or_else(|_| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&user_id_b64)
-        })
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&user_id_b64))
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("user_id_b64 decode: {e}")))?;
     let user_id: [u8; 32] = user_id_bytes.as_slice().try_into().map_err(|_| {
         (

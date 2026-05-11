@@ -184,16 +184,13 @@ async fn welcome_handler(
 
     let log = commit_log(&state, gid).await;
     // Find the latest commit entry that contains a welcome for this user.
-    let found = log
-        .iter()
-        .rev()
-        .find_map(|entry| {
-            entry
-                .welcomes
-                .iter()
-                .find(|w| w.joiner_user_id == user_id)
-                .map(|w| (entry.epoch, w.clone()))
-        });
+    let found = log.iter().rev().find_map(|entry| {
+        entry
+            .welcomes
+            .iter()
+            .find(|w| w.joiner_user_id == user_id)
+            .map(|w| (entry.epoch, w.clone()))
+    });
     let (epoch, w) = found.ok_or((
         StatusCode::NOT_FOUND,
         "no pending welcome for that user in this group".into(),
@@ -338,8 +335,12 @@ async fn issue_cert_handler(
         body.valid_until,
     );
     let mut bytes = Vec::new();
-    cert.encode(&mut bytes)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encode cert: {e}")))?;
+    cert.encode(&mut bytes).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode cert: {e}"),
+        )
+    })?;
     let b64 = base64::engine::general_purpose::STANDARD;
     Ok(Json(IssueCertResponse {
         cert_b64: b64.encode(&bytes),

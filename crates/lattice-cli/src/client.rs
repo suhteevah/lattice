@@ -165,12 +165,7 @@ pub fn cli_create_group(
 ) -> Result<()> {
     let kp_extensions = key_package_extensions(&identity.kem_keypair.pubkey())?;
     let mut group = client
-        .create_group_with_id(
-            group_id.to_vec(),
-            ExtensionList::new(),
-            kp_extensions,
-            None,
-        )
+        .create_group_with_id(group_id.to_vec(), ExtensionList::new(), kp_extensions, None)
         .map_err(|e| anyhow!("create_group: {e:?}"))?;
     group
         .write_to_storage()
@@ -325,8 +320,10 @@ pub fn cli_process_welcome(
         .map_err(|e| anyhow!("insert PSK: {e:?}"))?;
     // Sanity check that the PSK landed before mls-rs reads it.
     use mls_rs_core::psk::PreSharedKeyStorage;
-    let _: Option<PreSharedKey> =
-        stores.psk_store.get(&psk_id).map_err(|e| anyhow!("{e:?}"))?;
+    let _: Option<PreSharedKey> = stores
+        .psk_store
+        .get(&psk_id)
+        .map_err(|e| anyhow!("{e:?}"))?;
 
     let mls_msg =
         MlsMessage::mls_decode(&mut &*mls_welcome).map_err(|e| anyhow!("decode welcome: {e:?}"))?;

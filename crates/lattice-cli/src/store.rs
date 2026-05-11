@@ -17,6 +17,7 @@
 //! once and pass clones into the mls-rs `ClientBuilder` chain.
 
 #![allow(clippy::module_name_repetitions)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic,))]
 
 use std::fs;
 use std::io;

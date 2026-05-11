@@ -10,14 +10,14 @@
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::panic,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::too_many_lines,
+    clippy::items_after_statements
 )]
 
 use base64::Engine;
 use ed25519_dalek::SigningKey;
-use lattice_crypto::credential::{
-    ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
-};
+use lattice_crypto::credential::{ED25519_PK_LEN, LatticeCredential, USER_ID_LEN};
 use lattice_crypto::mls::{
     LatticeIdentity, add_member, apply_commit, cipher_suite::LATTICE_HYBRID_V1, create_group,
     encrypt_application, generate_key_package, leaf_node_kem::KemKeyPair, psk::LatticePskStorage,
@@ -254,16 +254,13 @@ async fn commit_welcome_message_round_trip_single_server() {
         .await
         .unwrap();
     let mls_welcome = B64.decode(w["mls_welcome_b64"].as_str().unwrap()).unwrap();
-    let pq_payload_bytes_back = B64
-        .decode(w["pq_payload_b64"].as_str().unwrap())
-        .unwrap();
+    let pq_payload_bytes_back = B64.decode(w["pq_payload_b64"].as_str().unwrap()).unwrap();
 
     // Bob reconstructs the LatticeWelcome and joins.
     use mls_rs::mls_rs_codec::MlsDecode;
-    let pq_payload = lattice_crypto::mls::welcome_pq::PqWelcomePayload::mls_decode(
-        &mut &*pq_payload_bytes_back,
-    )
-    .unwrap();
+    let pq_payload =
+        lattice_crypto::mls::welcome_pq::PqWelcomePayload::mls_decode(&mut &*pq_payload_bytes_back)
+            .unwrap();
     let lattice_welcome = lattice_crypto::mls::LatticeWelcome {
         mls_welcome,
         pq_payload,
@@ -337,8 +334,7 @@ async fn issue_cert_returns_valid_membership_cert() {
     let cert = lattice_protocol::wire::MembershipCert::decode(cert_bytes.as_slice()).unwrap();
 
     // The cert should round-trip a sealed-sender envelope verify.
-    let env = lattice_protocol::sealed_sender::seal(cert, &eph_sk, b"some inner".to_vec())
-        .unwrap();
+    let env = lattice_protocol::sealed_sender::seal(cert, &eph_sk, b"some inner".to_vec()).unwrap();
     lattice_protocol::sealed_sender::verify_at_router(
         &state.federation_sk.verifying_key(),
         &env,

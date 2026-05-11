@@ -9,7 +9,20 @@
 //! follow-up — for the M3 acceptance gate `demo` is sufficient.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::too_many_lines, clippy::large_futures)]
+#![allow(
+    clippy::too_many_lines,
+    clippy::large_futures,
+    // The CLI is one binary with many subcommand handlers; some have
+    // 6+ args. Naming them keeps the clap derive readable.
+    clippy::too_many_arguments,
+    clippy::items_after_statements,
+    // Many small pedantic-style issues in CLI prose are pure style;
+    // not worth chasing on per-action handlers.
+    clippy::struct_field_names,
+    clippy::ptr_arg,
+    clippy::format_push_string,
+    clippy::option_if_let_else,
+)]
 
 mod client;
 mod identity_file;
@@ -36,6 +49,10 @@ use lattice_crypto::mls::{
 };
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+/// URL-safe base64 (no padding) for values that appear in URL path
+/// segments — user_id, group_id. Standard base64 uses `/` which axum
+/// treats as a path separator.
+const B64_URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 #[derive(Debug, Parser)]
 #[command(name = "lattice", version, about = "Lattice CLI")]
@@ -195,15 +212,15 @@ fn make_identity(user_id_byte: u8) -> Result<LatticeIdentity> {
     })
 }
 
-async fn register(client: &reqwest::Client, server: &str, identity: &LatticeIdentity) -> Result<()> {
+async fn register(
+    client: &reqwest::Client,
+    server: &str,
+    identity: &LatticeIdentity,
+) -> Result<()> {
     register_raw(client, server, identity.credential.user_id).await
 }
 
-async fn register_raw(
-    client: &reqwest::Client,
-    server: &str,
-    user_id: [u8; 32],
-) -> Result<()> {
+async fn register_raw(client: &reqwest::Client, server: &str, user_id: [u8; 32]) -> Result<()> {
     let claim = lattice_protocol::wire::IdentityClaim::default();
     let mut claim_bytes = Vec::new();
     prost::Message::encode(&claim, &mut claim_bytes)?;
@@ -319,8 +336,7 @@ async fn run_demo(
     // === Alice creates a group locally and invites Bob ===
     let mut alice_group =
         create_group(&alice, alice_psk.clone(), &gid_bytes).map_err(|e| anyhow!("{e}"))?;
-    let commit_output =
-        add_member(&mut alice_group, &bob_kp_bytes).map_err(|e| anyhow!("{e}"))?;
+    let commit_output = add_member(&mut alice_group, &bob_kp_bytes).map_err(|e| anyhow!("{e}"))?;
     apply_commit(&mut alice_group).map_err(|e| anyhow!("{e}"))?;
     let welcome = commit_output
         .welcomes
@@ -394,8 +410,7 @@ async fn run_demo(
         mls_welcome,
         pq_payload,
     };
-    let mut bob_group =
-        process_welcome(&bob, bob_psk.clone(), &lw).map_err(|e| anyhow!("{e}"))?;
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), &lw).map_err(|e| anyhow!("{e}"))?;
     tracing::info!("Bob joined the group via federated Welcome");
 
     // === Alice encrypts and sends ===
@@ -410,7 +425,10 @@ async fn run_demo(
         .json()
         .await
         .context("send response decode")?;
-    tracing::info!(bytes = ct.len(), "Alice sent encrypted message via server A");
+    tracing::info!(
+        bytes = ct.len(),
+        "Alice sent encrypted message via server A"
+    );
 
     // For M3 simplicity: Bob fetches messages from server A directly
     // (the group's owning server). Cross-server message federation
@@ -482,7 +500,10 @@ async fn main() -> Result<()> {
             invitee_server,
             invitee_user_b64,
             home,
-        } => cli_create_and_invite(server, group_id, invitee_server, invitee_user_b64, home).await?,
+        } => {
+            cli_create_and_invite(server, group_id, invitee_server, invitee_user_b64, home)
+                .await?;
+        }
         Cmd::Accept {
             server,
             group_id,
@@ -517,7 +538,10 @@ fn resolve_home(arg: Option<PathBuf>) -> Result<PathBuf> {
 
 fn parse_group_id(s: &str) -> Result<[u8; 16]> {
     if s.len() != 16 {
-        return Err(anyhow!("group_id must be exactly 16 bytes (got {})", s.len()));
+        return Err(anyhow!(
+            "group_id must be exactly 16 bytes (got {})",
+            s.len()
+        ));
     }
     let mut out = [0u8; 16];
     out.copy_from_slice(s.as_bytes());
@@ -553,21 +577,22 @@ async fn cli_init(server: String, name: Option<String>, home: Option<PathBuf>) -
         credential,
         signature_secret: sk,
         kem_keypair,
-        display_name: name.unwrap_or_else(|| {
-            format!("user-{}", identity_file::hex_prefix(&user_id))
-        }),
+        display_name: name
+            .unwrap_or_else(|| format!("user-{}", identity_file::hex_prefix(&user_id))),
     };
     identity.save(&home)?;
     tracing::info!(
         home = %home.display(),
-        user_id_b64 = %B64.encode(user_id),
+        user_id_b64 = %B64_URL.encode(user_id),
         "identity created"
     );
 
     let stores = client::CliStores::open(&home)?;
     let mls_client = client::build_client(&identity, &stores)?;
 
-    let http = reqwest::Client::builder().user_agent("lattice-cli/0.1").build()?;
+    let http = reqwest::Client::builder()
+        .user_agent("lattice-cli/0.1")
+        .build()?;
     register_raw(&http, &server, identity.credential.user_id).await?;
     let kp_bytes = client::cli_generate_key_package(&mls_client, &identity)?;
     let resp: serde_json::Value = http
@@ -588,14 +613,16 @@ async fn cli_init(server: String, name: Option<String>, home: Option<PathBuf>) -
         kp_bytes = kp_bytes.len(),
         "init complete; identity registered, KP published"
     );
-    println!("{}", B64.encode(identity.credential.user_id));
+    // Print user_id in URL-safe base64 since callers (E2E scripts,
+    // human invocation) feed it back as a URL path segment.
+    println!("{}", B64_URL.encode(identity.credential.user_id));
     Ok(())
 }
 
 fn cli_whoami(home: Option<PathBuf>) -> Result<()> {
     let home = resolve_home(home)?;
     let identity = identity_file::CliIdentity::load(&home)?;
-    println!("{}", B64.encode(identity.credential.user_id));
+    println!("{}", B64_URL.encode(identity.credential.user_id));
     eprintln!("display_name: {}", identity.display_name);
     Ok(())
 }
@@ -613,7 +640,9 @@ async fn cli_create_and_invite(
     let mls_client = client::build_client(&identity, &stores)?;
     let gid = parse_group_id(&group_id)?;
 
-    let http = reqwest::Client::builder().user_agent("lattice-cli/0.1").build()?;
+    let http = reqwest::Client::builder()
+        .user_agent("lattice-cli/0.1")
+        .build()?;
 
     // Fetch invitee's KP from their home server.
     let resp: serde_json::Value = http
@@ -647,7 +676,7 @@ async fn cli_create_and_invite(
         .next()
         .ok_or_else(|| anyhow!("no welcome produced by add_member"))?;
 
-    let gid_b64 = B64.encode(gid);
+    let gid_b64 = B64_URL.encode(gid);
     let resp: serde_json::Value = http
         .post(format!("{server}/group/{gid_b64}/commit"))
         .json(&serde_json::json!({
@@ -684,7 +713,9 @@ async fn cli_accept(server: String, group_id: String, home: Option<PathBuf>) -> 
     let mls_client = client::build_client(&identity, &stores)?;
     let gid = parse_group_id(&group_id)?;
 
-    let http = reqwest::Client::builder().user_agent("lattice-cli/0.1").build()?;
+    let http = reqwest::Client::builder()
+        .user_agent("lattice-cli/0.1")
+        .build()?;
     let gid_b64 = B64.encode(gid);
     let user_b64 = B64.encode(identity.credential.user_id);
 
@@ -726,8 +757,10 @@ async fn cli_send(
     let gid = parse_group_id(&group_id)?;
 
     let ct = client::cli_encrypt(&mls_client, &gid, message.as_bytes())?;
-    let http = reqwest::Client::builder().user_agent("lattice-cli/0.1").build()?;
-    let gid_b64 = B64.encode(gid);
+    let http = reqwest::Client::builder()
+        .user_agent("lattice-cli/0.1")
+        .build()?;
+    let gid_b64 = B64_URL.encode(gid);
     let mut body = serde_json::json!({
         "envelope_b64": B64.encode(&ct),
         "origin_host": "cli.local",
@@ -767,15 +800,15 @@ async fn cli_recv(
     let mls_client = client::build_client(&identity, &stores)?;
     let gid = parse_group_id(&group_id)?;
 
-    let http = reqwest::Client::builder().user_agent("lattice-cli/0.1").build()?;
-    let gid_b64 = B64.encode(gid);
+    let http = reqwest::Client::builder()
+        .user_agent("lattice-cli/0.1")
+        .build()?;
+    let gid_b64 = B64_URL.encode(gid);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
     loop {
         let resp: serde_json::Value = http
-            .get(format!(
-                "{server}/group/{gid_b64}/messages?since={since}"
-            ))
+            .get(format!("{server}/group/{gid_b64}/messages?since={since}"))
             .send()
             .await
             .context("recv GET")?
