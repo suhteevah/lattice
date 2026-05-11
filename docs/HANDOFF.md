@@ -1,11 +1,16 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-10 (post-recovery + Phases A/B/C.1 shipped)
+**Last updated:** 2026-05-10 (M2 shipped — Phases A through H)
 **Owner:** Matt Gates (suhteevah)
-**Status:** Steps 1 + 2 complete; M1 shipped; M2 partway through. Six
-commits on `main` (local repo, no remote yet — `git log --oneline`):
+**Status:** Steps 1 + 2 complete; M1 shipped; **M2 shipped**. Eleven
+commits on `main` (local repo, no remote yet):
 
 ```
+2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
+6e6e32c feat(protocol): Phase F — sealed sender per D-05 (Option B)
+1490fdc feat(crypto): Phase D + E — MLS group ops + Alice/Bob integration test
+668edf9 feat(crypto): Phase C.2 — ML-KEM-768 LeafNode + Welcome custom extensions
+83601e6 docs(handoff): full M2 mid-flight snapshot for fresh-session pickup
 3d743c0 feat(crypto): Phase C.1 — per-epoch PSK id derivation + in-memory storage
 60550da chore(crypto): Phase F prep — remove dead sealed_sender stub + D-02 dead constants
 33121fc feat(crypto): Phase B — LatticeHybridCipherSuite (0xF000)
@@ -14,9 +19,20 @@ commits on `main` (local repo, no remote yet — `git log --oneline`):
 fe8868e chore: initialize repo at M1-shipped + M2-partial post-recovery state
 ```
 
-`cargo test -p lattice-crypto`: **69 tests pass.** Workspace builds
-zero-warning. The M2 vertical slice acceptance (Alice + Bob round-trip
-without a live server) is still ahead — see §6 and §13 below.
+`cargo test --workspace`: **109 tests pass** (90 lattice-crypto +
+19 lattice-protocol). `cargo clippy --workspace --all-targets --
+-D warnings`: clean. `cargo fmt --all -- --check`: clean. `cargo
+check -p lattice-core --target wasm32-unknown-unknown
+--features lattice-crypto/wasm`: clean.
+
+The M2 acceptance gate (Alice + Bob round-trip with PQ-PSK injection,
+no server) is met by `lattice-crypto::tests::mls_integration`.
+
+**Next milestone: M3 — Vertical slice (CLI E2E).** Two `lattice-server`
+instances on different ports, two `lattice-cli` clients across
+federation, "hello, lattice" delivered cross-server with QUIC + sqlx
+storage + server-side cert issuance. Matt has offered three nodes for
+M3 federation testing: pixie, cnc, kokonoe.
 
 ### Key M2 decisions taken this session
 
@@ -221,7 +237,7 @@ lattice/
 - [x] Pinned `ml-dsa = "=0.1.0-rc.11"` in workspace deps (was `"0.1"`, no
       matching stable release yet)
 
-### Done (M2 partial — 2026-05-10)
+### Done (M2 — 2026-05-10)
 
 **Phase A** (commit `02d2cf1`):
 - [x] `lattice-protocol::wire` — Prost messages for `HybridSignatureWire`,
@@ -269,91 +285,91 @@ lattice/
 - [x] 9 tests covering deterministic id, per-epoch uniqueness, byte
       layout, zero-epoch edge case, insert/get/remove/clone semantics
 
-### Not done — M2 remaining work
+### Done (M2 shipped 2026-05-10 — Phases C.2 through H)
 
-**Phase C.2 — ML-KEM-768 wired into LeafNode + Welcome custom extensions.**
-See §13 below for the design. New files expected:
-- `crates/lattice-crypto/src/mls/leaf_node_kem.rs` — custom LeafNode
-  extension `LatticeKemPubkey` (extension id `0xF002`) carrying an
-  ML-KEM-768 verifying key (1184 bytes) alongside the standard X25519
-  init key. Generated as part of KeyPackage creation; stored per-leaf.
-- `crates/lattice-crypto/src/mls/welcome_pq.rs` — `PqWelcomePayload`
-  (Welcome extension id `0xF003`) carrying the per-joiner ML-KEM
-  ciphertext (1088 bytes per FIPS 203). `seal_pq_secret(joiner_kem_pk)`
-  and `open_pq_secret(payload, our_kem_sk)` helpers.
-- Hooks: `LatticeHybridCipherSuite::signature_key_generate` does not
-  generate the ML-KEM keypair (signature ≠ KEM). The Phase D group-ops
-  wrapper generates ML-KEM keys when minting a KeyPackage and attaches
-  them to the LeafNode extensions.
+**Phase C.2** (commit `668edf9`):
+- [x] `lattice-crypto::mls::leaf_node_kem::LatticeKemPubkey` — MLS
+      extension id `0xF002` carrying ML-KEM-768 encapsulation key.
+- [x] `lattice-crypto::mls::leaf_node_kem::KemKeyPair` — per-device
+      ML-KEM-768 keypair with `Zeroizing` on the decap key.
+- [x] `lattice-crypto::mls::welcome_pq::PqWelcomePayload` — MLS
+      extension id `0xF003` for per-joiner ML-KEM ciphertext.
+- [x] `seal_pq_secret` / `open_pq_secret` ML-KEM-768 encap/decap
+      helpers operating on the wire types.
 
-**Phase D — Real `mls::{create_group, add_member, process_welcome,
-encrypt_application, decrypt, commit}` on top of `mls_rs::Group<C>`.**
-Currently stubs returning `Error::Mls("not implemented")`. Replace with
-real impls that:
-- Use `ClientBuilder` with `LatticeCryptoProvider` + `LatticeIdentityProvider`
-  + `LatticePskStorage` + the extension types `0xF002`/`0xF003`
-  registered.
-- `add_member`: encapsulate fresh ML-KEM secret to joiner's leaf KEM
-  pubkey, store in PSK storage under `psk_id_for_epoch(next_epoch)`,
-  `commit_builder().add_member(kp)?.add_psk(psk_id)?.build()`, attach
-  `PqWelcomePayload` to the Welcome.
-- `process_welcome`: read `PqWelcomePayload` from welcome extensions,
-  decapsulate, store PSK *before* calling `Client::join_group` (mls-rs
-  looks up the PSK synchronously during join).
-- All methods `#[instrument]`-d; call `group.write_to_storage()` after
-  every state mutation per the mls-rs research §6.1 footgun.
+**Phase D + E** (commit `1490fdc`):
+- [x] `lattice-crypto::mls::{create_group, generate_key_package,
+      add_member, process_welcome, encrypt_application, decrypt,
+      commit, apply_commit}` — real impls on top of `mls_rs::Group<C>`.
+- [x] `LatticeIdentity` bundle (credential + sig sk + KEM keypair +
+      InMemoryKeyPackageStorage).
+- [x] `GroupHandle` wrapping `mls_rs::Group` + PSK storage.
+- [x] `LatticeWelcome` bundling MLS Welcome bytes + PqWelcomePayload.
+- [x] Integration test `tests/mls_integration.rs` — 5 tests covering
+      Alice+Bob round-trip, in-order ratchet, tampered-message
+      rejection, deterministic PSK id matching, confused-deputy
+      identity rejection.
 
-**Phase E — Alice+Bob integration test.** `crates/lattice-crypto/tests/
-mls_integration.rs`. Acceptance per ROADMAP M2:
-- Alice creates group → invites Bob → both ratchet → both encrypt and
-  decrypt cross-direction app messages — no live server in the test.
-- Plus: forward secrecy across commit, cross-epoch PSK rotation,
-  tampered-message rejection.
+**Phase F** (commit `6e6e32c`):
+- [x] `lattice-protocol::sealed_sender::{issue_cert, seal,
+      verify_at_router, open_at_recipient}` per D-05.
+- [x] 10 tests covering round-trip, router-can't-decrypt-inner,
+      router-can't-identify-sender, tamper / expired / wrong-key /
+      mismatch rejection branches.
 
-**Phase F — Sealed sender per D-05 (Option B location).** New file
-`crates/lattice-protocol/src/sealed_sender.rs`. Functions:
-- `seal(cert: &MembershipCert, ephemeral_sk: &SigningKey, inner_ct: &[u8])
-  -> Result<SealedEnvelope>` — signs `canonical_envelope_bytes` with
-  `ephemeral_sk` (the key pair matching `cert.ephemeral_sender_pubkey`).
-- `verify_at_router(server_pk: &VerifyingKey, env: &SealedEnvelope)
-  -> Result<()>` — verifies `cert.server_sig` over canonical cert
-  bytes + `env.envelope_sig` over canonical envelope bytes. Routing
-  server uses this; does NOT decrypt inner.
-- `open_at_recipient(server_pk, env) -> Result<&[u8]>` — same verify,
-  returns inner ciphertext (recipient's MLS state decrypts that to
-  learn sender's `LeafNodeIndex`).
-- Canonical bytes builders using `mls-rs-codec` so the transcripts
-  are deterministic.
+**Phase G** (commit `2688b78`):
+- [x] `cargo fmt --all -- --check` clean.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] `cargo test --workspace` green: **109 tests**.
+- [x] `cargo check -p lattice-core --target wasm32-unknown-unknown
+      --features lattice-crypto/wasm` clean.
+- [x] Zero `todo!()` / `unimplemented!()` in lattice-crypto::mls::* or
+      lattice-protocol::sealed_sender.
+- [x] Workspace pedantic lint relaxations (doc_markdown, similar_names,
+      significant_drop_tightening) — documented in Cargo.toml.
+- [x] getrandom 0.2 + 0.4 wasm feature pinning + uuid wasm features
+      for clean WASM target compile.
 
-Integration test in `crates/lattice-protocol/tests/sealed_sender_
-integration.rs`: 3-party round trip (synthetic home server issues cert,
-sender seals, routing server verifies, recipient opens). Assert the
-routing server cannot determine sender identity from the envelope.
+### Not done — M3 (next milestone)
 
-**Phase G — Pre-commit gate green:** `.\scripts\test-all.ps1` (cargo
-test --workspace + clippy + fmt --check + audit). WASM check still
-green for `lattice-core`.
+**Goal:** ROADMAP §M3 acceptance — two `lattice-server` instances,
+two `lattice-cli` clients across federation, "hello, lattice"
+cross-server with full tracing.
 
-**Phase H — Ship M2:** move M2 to ROADMAP "Shipped" block, update
-HANDOFF §4 status header, update ROADMAP §Status.
+Concrete deliverables (ROADMAP §M3):
 
-### Not done — M3 and beyond
-- [ ] Server routes beyond `/health`: registration, MLS commit upload,
-      message fetch, federation gossip, server-side `MembershipCert`
-      issuance (M3)
+- [ ] `lattice-server` routes — `/register`, `/key_packages`,
+      `/group/{id}/commit`, `/group/{id}/messages`, WebTransport stub.
+- [ ] `lattice-server` federation gossip over QUIC, with replay
+      protection and signed federation auth (D-06 / D-07).
+- [ ] `lattice-server` Postgres schema + sqlx migrations
+      (`mls_key_packages`, `mls_group_state`, `mls_group_epochs`,
+      `pending_messages`). The "server never stores plaintext" rule is
+      enforced by a migration policy that fails CI if it adds a
+      plaintext message column.
+- [ ] `lattice-server::routes::issue_cert` — server-side
+      MembershipCert issuance per D-05. Uses
+      `lattice-protocol::sealed_sender::issue_cert` directly.
+- [ ] `lattice-cli` subcommands — `register`, `create-group`,
+      `invite`, `send`, `recv` (plus `--server-url` and
+      `--identity-path` flags).
+- [ ] `lattice-storage` native-only path: file-backed encrypted store
+      under argon2id-derived key (D-08).
+- [ ] sqlx-backed `KeyPackageStorage` + `GroupStateStorage` +
+      `PreSharedKeyStorage` impls (the in-memory ones ship in M2 for
+      tests).
+- [ ] Scripted e2e test in `scripts/` that brings up two servers,
+      registers two CLI clients, sends one message, exits 0 on
+      successful delivery.
+
+Federation testbed: **pixie + cnc + kokonoe** (offered by Matt
+2026-05-10) — three home servers across distinct boxes for realistic
+federation testing.
+
+### Not done — M4 and beyond
 - [ ] Cap'n Proto migration from interim Prost wire (M5)
-- [ ] Solid UI past the "Hello, Lattice" placeholder (M4)
-- [ ] First end-to-end vertical slice — two servers, two CLI clients,
-      "hello, lattice" cross-federation (see §6, M3)
-
-### Not done — M3 and beyond
-- [ ] Server routes beyond `/health`: registration, MLS commit upload,
-      message fetch, federation gossip, server-side `MembershipCert`
-      issuance (M3)
-- [ ] Cap'n Proto migration from interim Prost wire (M5)
-- [ ] Solid UI past the "Hello, Lattice" placeholder (M4)
-- [ ] First end-to-end vertical slice — two servers, two CLI clients,
-      "hello, lattice" cross-federation (see §6, M3)
+- [ ] Solid UI past the "Hello, Lattice" placeholder + WebAuthn /
+      passkey flow + IndexedDB store (M4)
 
 ---
 
@@ -534,10 +550,14 @@ notifications, moderation — is now in `DECISIONS.md` (see §2.5).
 
 ---
 
-## 12. Phase C.2 design notes (ML-KEM-768 on LeafNode + Welcome)
+## 12. M2 design notes — ML-KEM-768 on LeafNode + Welcome (shipped)
 
-Captured here so a fresh session can pick up Phase C.2 without
-re-deriving the design.
+Captured during Phase C.2 design and kept as a permanent reference for
+the construction. This is now SHIPPED in M2; the section is retained
+because the design rationale is non-obvious from reading the code
+alone (especially the choice between LeafNode and KeyPackage
+extension placement, which the code reflects but doesn't fully
+explain).
 
 ### Why ML-KEM-768 belongs on the LeafNode, not in the credential
 

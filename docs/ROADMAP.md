@@ -11,8 +11,8 @@ lands.
 
 | Field | Value |
 |---|---|
-| Current milestone | **M2 — MLS + sealed sender + protocol wire types** (not started) |
-| Last shipped | M1 — Crypto primitives (2026-05-10) |
+| Current milestone | **M3 — Vertical slice (CLI E2E)** (not started) |
+| Last shipped | M2 — MLS + sealed sender + wire types (2026-05-10) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 
@@ -28,8 +28,8 @@ the threats each milestone's mitigations defend against.
 |---|---|---|---|
 | M0 | Scaffold | `cargo check --workspace` green; docs in place | ✅ shipped 2026-05-10 |
 | M1 | Crypto primitives | identity + hybrid_kex + aead + padding tested green; no `todo!()` in those modules | ✅ shipped 2026-05-10 |
-| M2 | MLS + sealed sender | create-group/invite/send/recv work in unit tests with custom hybrid ciphersuite | ⬜ not started |
-| M3 | Vertical slice (CLI E2E) | HANDOFF §6 acceptance — two servers, two clients, "hello, lattice" across federation | ⬜ blocked on M2 |
+| M2 | MLS + sealed sender | create-group/invite/send/recv work in unit tests with custom hybrid ciphersuite | ✅ shipped 2026-05-10 |
+| M3 | Vertical slice (CLI E2E) | HANDOFF §6 acceptance — two servers, two clients, "hello, lattice" across federation | ⬜ not started |
 | M4 | Web client functional | passkey register → create DM → send → receive in two browser sessions | ⬜ blocked on M3 |
 | M5 | V1 feature complete | usable for daily small-group use; sealed sender on every DM; bug bounty open | ⬜ blocked on M4 |
 | M6 | V1.5 hardening | KT log + hidden membership + multi-server store-and-forward shipped | ⬜ blocked on M5 |
@@ -591,6 +591,99 @@ milestones so you can search by either axis.
 ---
 
 ## Shipped
+
+### M2 — MLS + sealed sender + wire types (2026-05-10)
+
+**Commits:** `fe8868e..2688b78` (11 commits on `main`).
+
+Deliverables landed:
+
+- `lattice-crypto::credential::LatticeCredential` (CredentialType
+  `0xF001`) — user_id + Ed25519 + ML-DSA-65 packed credential,
+  MLS-codec serialized.
+- `lattice-crypto::mls::identity_provider::LatticeIdentityProvider` —
+  `mls_rs_core::identity::IdentityProvider` impl. Validates
+  signing_identity / credential binding, reports user-level identity
+  (not device-level) so device rotation works via `valid_successor`.
+- `lattice-crypto::mls::cipher_suite::LatticeHybridCipherSuite` —
+  `CipherSuiteProvider` for ciphersuite `0xF000`
+  (`LATTICE_HYBRID_V1`), wrapping base `0x0003` for KDF/AEAD/HPKE/KEM
+  and overriding the four signature methods for packed hybrid
+  Ed25519+ML-DSA-65.
+- `lattice-crypto::mls::psk` — deterministic per-epoch `ExternalPskId`
+  derivation + in-memory `LatticePskStorage`.
+- `lattice-crypto::mls::leaf_node_kem` — `LatticeKemPubkey` MLS
+  extension (id `0xF002`) carrying an ML-KEM-768 encapsulation key,
+  plus per-device `KemKeyPair`. Attached at the KeyPackage level
+  (`pub` `extensions` field) since `KeyPackage::leaf_node` is
+  `pub(crate)` in mls-rs 0.55.
+- `lattice-crypto::mls::welcome_pq` — `PqWelcomePayload` MLS
+  extension (id `0xF003`) carrying a per-joiner ML-KEM ciphertext +
+  epoch, with `seal_pq_secret` / `open_pq_secret` helpers.
+- `lattice-crypto::mls` — high-level group ops: `create_group`,
+  `generate_key_package`, `add_member`, `process_welcome`,
+  `encrypt_application`, `decrypt`, `commit`, `apply_commit`.
+  `GroupHandle` wraps `mls_rs::Group<LatticeMlsConfig>` plus the
+  caller's PSK storage.
+- `lattice-protocol::wire` — Prost-encoded `HybridSignatureWire`,
+  `IdentityClaim`, `MembershipCert`, `SealedEnvelope`, `KeyPackage`,
+  `Welcome`, `Commit`, `ApplicationMessage` + encode/decode helpers.
+- `lattice-protocol::sig` — re-exports `HybridSignature` +
+  `HybridSignatureWire` per D-03.
+- `lattice-protocol::sealed_sender` — `seal` / `verify_at_router` /
+  `open_at_recipient` / `issue_cert` per D-05. Plain Ed25519
+  sign/verify (ed25519-dalek) over canonical Prost transcript bytes
+  derived from inline `MembershipCertTbs` / `SealedEnvelopeTbs`
+  structs.
+
+Acceptance met:
+
+- `cargo test --workspace`: **109 tests pass** (90 lattice-crypto + 19
+  lattice-protocol). Integration test
+  `lattice-crypto::tests::mls_integration` covers the M2 acceptance
+  gate: Alice creates group → Bob publishes KeyPackage → Alice adds
+  Bob (commit + PQ Welcome) → Alice applies commit → Bob joins via
+  Welcome → cross-direction "hello, lattice" / "hello, alice"
+  round-trip decrypts cleanly. Plus forward-secrecy, in-order
+  ratchet, tampered-message rejection, deterministic PSK id matching.
+- Sealed-sender 3-party tests confirm the routing server can verify
+  authenticity without learning sender identity.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --all -- --check`: clean.
+- `cargo check -p lattice-core --target wasm32-unknown-unknown
+  --features lattice-crypto/wasm`: clean.
+- Zero `todo!()` / `unimplemented!()` / `Error::*(_ not implemented)`
+  in `lattice-crypto::mls::*` or `lattice-protocol::sealed_sender`.
+
+Mitigations landed:
+
+- MLS forward + post-compromise secrecy via the standard MLS commit
+  ratchet, with the PQ secret folded in at each epoch via external
+  PSK (D-04 2026-05-10 amendment — see DECISIONS.md).
+- Sealed sender (skeleton, per M3 acceptance distinction) — routing
+  servers can verify member-authenticity without learning sender
+  identity. Universal-on-every-DM tightening is M5.
+- Wire envelope framing + version negotiation: `WIRE_VERSION = 1`
+  pinned in `lattice-protocol`.
+
+Decisions taken during M2:
+
+- **D-04 re-opened 2026-05-10** — PSK injection chosen over the
+  original `init_secret`-folding construction. Fork-mls-rs path
+  retained as M6 hardening fallback.
+- **D-05 implementation pointer** — types live in
+  `lattice-protocol::wire`, logic in `lattice-protocol::sealed_sender`
+  (per the Phase F architecture decision). The original
+  `lattice-crypto::sealed_sender` module was deleted as dead code
+  along with the dead `HKDF_SEALED_SENDER` /
+  `HKDF_SEALED_SENDER_MAC` D-02 constants (no inner-envelope key
+  derivation, no HMAC under D-05).
+- **Dep stack pinned to mls-rs 0.55 / mls-rs-core 0.27 /
+  mls-rs-crypto-rustcrypto 0.22 / mls-rs-codec 0.7.** Required to
+  resolve transitive version skew on `mls-rs-core` and
+  `mls-rs-codec` that left `CryptoProvider` and
+  `MlsCodecExtension` trait bounds unsatisfied across crate-version
+  boundaries.
 
 ### M1 — Crypto primitives (2026-05-10)
 
