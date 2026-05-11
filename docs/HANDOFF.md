@@ -1,11 +1,10 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 Phase α + β shipped — Leptos browser
-client running the full Alice↔Bob MLS round-trip entirely in WASM at
-`http://127.0.0.1:5173`)
+**Last updated:** 2026-05-11 (M4 α + β + γ.1 shipped — browser client
+registers with a live `lattice-server` over fetch + CORS)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1 + 2 complete; M1 shipped; M2 shipped; M3 federated
-bridge working three-node; **M4 Phases α + β shipped**. Thirteen+
+bridge working three-node; **M4 Phases α + β + γ.1 shipped**. Fourteen+
 commits on `main` (local repo, no remote yet):
 
 ```
@@ -494,14 +493,24 @@ Module additions:
 
 ### Not done — M4 polish (open for the browser-client deploy)
 
-- [ ] Phase γ: HTTP/WebTransport client wiring the same flow against
-      a live `lattice-server`. Two sub-tasks: (1) add `tower-http`
-      CORS to `lattice-server` so the browser can call it from a
-      different origin; (2) implement a `gloo-net::http`-based
-      adapter that POSTs to `/register`, `/key_packages`,
-      `/group/{id}/commit`, etc. — once both halves land, "Run MLS
-      round-trip" can talk to the real server instead of running both
-      ends in one tab.
+- [x] Phase γ.1 (shipped 2026-05-11): browser POSTs to a live
+      `lattice-server` `/register`. `tower-http::CorsLayer` wired
+      into `lattice_server::app()` (wildcard origin / methods /
+      headers; safe because we never set cookies). `gloo-net 0.6`
+      adapter at `apps/lattice-web/src/api.rs` mirrors the per-action
+      shape from `lattice-cli`. Verified live with two POSTs:
+      `new_registration=true` then `false` (deterministic user_id
+      `[0xAA; 32]`). `scripts/run-server-dev.ps1` spins up the server
+      on `127.0.0.1:8080` with run state under `J:\lattice\.run\`
+      (gitignored).
+- [ ] Phase γ.2: extend `api.rs` with `publish_kp`, `fetch_kp`,
+      `commit`, `welcome_for`, `publish_message`, `fetch_messages`,
+      `issue_cert`. Same per-route shape as `lattice-cli/src/main.rs`.
+- [ ] Phase γ.3: bind "Run MLS round-trip" to the real server path
+      — Alice + Bob each register, publish KeyPackages, exchange a
+      Welcome through the server, ratchet a message.
+- [ ] Phase γ.4: replace HTTP with WebTransport (`web-sys::WebTransport`)
+      per D-11; HTTP stays as the fallback.
 - [ ] Phase δ: IndexedDB-backed storage providers
       (`KeyPackageStorage`, `GroupStateStorage`, `PreSharedKeyStorage`)
       so the browser persists state across reloads. Pull `idb`
