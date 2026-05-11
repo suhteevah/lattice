@@ -1,0 +1,61 @@
+# systemd unit template for `lattice-server`.
+#
+# Substitute placeholders, then drop in `/etc/systemd/system/lattice.service`
+# (root) or `~/.config/systemd/user/lattice.service` (user-mode).
+#
+# Tested against Ubuntu 24.04 (pixie) and openSUSE Tumbleweed (cnc-server).
+#
+# Placeholders to replace:
+#   {{USER}}        — system user that owns the lattice install
+#   {{HOME}}        — that user's home directory (e.g. /home/lattice)
+#   {{BIND_ADDR}}   — `127.0.0.1:4443` for behind-tunnel, `0.0.0.0:4443` for public
+#   {{KEY_PATH}}    — full path to the 32-byte federation seed
+#   {{SNAP_PATH}}   — full path to the state-snapshot JSON file
+#
+# After install:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lattice
+#   sudo journalctl -u lattice -f
+
+[Unit]
+Description=Lattice federated messaging home server
+Documentation=https://github.com/suhteevah/lattice/blob/main/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+WorkingDirectory={{HOME}}/lattice
+
+# Environment: keep secrets in EnvironmentFile=/etc/lattice/env if you
+# prefer; the inline form here is easiest for a single deploy.
+Environment=LATTICE__SERVER__BIND_ADDR={{BIND_ADDR}}
+Environment=LATTICE__FEDERATION_KEY_PATH={{KEY_PATH}}
+Environment=LATTICE__SNAPSHOT_PATH={{SNAP_PATH}}
+Environment=LATTICE__DATABASE_URL=postgres://noop@localhost/noop
+Environment=RUST_LOG=lattice_server=info,axum=warn
+
+ExecStart={{HOME}}/lattice/target/release/lattice-server
+
+# SIGTERM triggers graceful shutdown which flushes the snapshot. Give it
+# 10 seconds before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Restart on crash. We snapshot on graceful shutdown only — a hard
+# crash will lose the most-recent state since the last snapshot, so
+# limit the restart loop to prevent storm.
+Restart=on-failure
+RestartSec=5
+
+# Light hardening — no network sandbox because we need outbound HTTP
+# for federation pushes. Add a more aggressive seccomp/CapabilityBoundingSet
+# story once the M5 hardening pass lands.
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
