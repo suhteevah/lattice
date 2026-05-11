@@ -1,16 +1,19 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 backlog closeout — α/β/γ.1-3/γ-polish/
-γ.4-detect/δ.1/δ.2/ε/ζ.1/ζ.2 shipped; only δ.3 (IDB MLS state) and
-the actual γ.4 transport swap remain.)
+**Last updated:** 2026-05-11 (M4 done + M5 partial — commit cadence,
+attachments, device revocation, federation distrust scoring, and
+SECURITY.md all shipped. Multi-member PSK rotation and Cap'n Proto
+deferred to focused sessions.)
 **Owner:** Matt Gates (suhteevah)
-**Status:** Steps 1 + 2 complete; M1/M2/M3 shipped; **M4 essentially
-done**. Browser tab is a full Lattice client: in-WASM MLS, server-
-backed Alice⇌Bob, sealed-sender envelopes (D-05), identity persistence
-with Argon2id-encrypted at-rest (D-08 / Phase δ.2), WebAuthn passkey
-ceremony with PRF KEK derivation (D-09 / Phase ε), a11y landmarks +
-ARIA, capability detection chips for WebAuthn + WebTransport. Twenty-
-one+ commits on `main`:
+**Status:** Steps 1+2; M1/M2/M3 shipped; **M4 done**; **M5 mostly
+shipped**. Browser tab is a full Lattice client: in-WASM MLS,
+server-backed Alice⇌Bob, sealed-sender envelopes (D-05), commit
+cadence (ratchet rotation), encrypted+padded attachment buckets,
+MLS Remove-proposal revocation, local-only federation distrust
+scoring (D-13), identity persistence with Argon2id-encrypted at-rest
+(D-08), v3 PRF-encrypted persistence (D-09 ε.2), WebAuthn passkey
+ceremony, a11y landmarks, capability chips. Twenty-six+ commits on
+`main`:
 
 ```
 2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
@@ -609,8 +612,49 @@ Module additions:
   Server-side: lift `lattice-server` from Axum/HTTP onto QUIC +
   HTTP/3 + WT (quinn + h3-webtransport). Big enough to be its own
   milestone.
-- **ε.2 — wire PRF KEK into persist blob v3.** Ceremony works,
-  KEK is derived; just needs the `persist.rs` v3 branch.
+
+### M5 progress (2026-05-11)
+
+- [x] **Commit cadence (1:1).** New `try_cadence_demo` in app.rs +
+      `commit()` doc restore in lattice-crypto. Alice⇌Bob 1:1 group,
+      4 self-commits between messages, both epochs advance 1→5 in
+      lockstep. Server-side cadence scheduler + cross-server
+      replication is the natural next step.
+- [x] **Attachment crypto path.** `try_attachment_demo` walks four
+      sizes through `lattice_crypto::padding` + `aead`. Buckets
+      `[256, 1024, 4096, 16384, 65536, 262144]`. Ciphertext =
+      bucket + 16 byte Poly1305 tag. AAD pinned to
+      `lattice/attachment/v1`. Server-side upload route + retention
+      hook (D-12) is the follow-up.
+- [x] **Device revocation.** New `mls::remove_member` +
+      `GroupHandle::members()` in lattice-crypto. UI button proves
+      pre-revoke ping succeeds, remove-commit fires (12112 bytes),
+      Alice's epoch advances to 2, Bob's decrypt of post-revoke
+      ciphertext fails with `EpochNotFound`.
+- [x] **Federation distrust scoring (D-13).** New
+      `apps/lattice-web/src/distrust.rs` — local-only `DistrustLedger`
+      in localStorage. TOFU-pin + `Verdict::{Trusted,Neutral,Distrusted}`
+      buckets at ±20. Verified live: pin → +5, violation → -50,
+      slow recovery via +1 Ok events. No gossip per D-13.
+- [x] **Sealed sender on every DM (D-05).** Already shipped in
+      M4 γ-polish.
+- [x] **Bug-bounty docs (D-14).** `SECURITY.md` at repo root —
+      disclosure channels, scope, what gets credited.
+- [ ] **Multi-member MLS groups (>2).** PSK rotation for existing
+      members is the hard part — current 1:1 path encapsulates the
+      PSK to one joiner's pubkey, but multi-joiner needs a shared
+      secret encapsulated to N pubkeys. Three options on the table:
+      (a) extend `PqWelcomePayload` with an HKDF-wrap of a single
+      group-level secret (wire change, version bump); (b) include
+      multiple external PSKs per commit, one per joiner (mls-rs
+      supports the API but the key-schedule semantics need
+      revisiting); (c) skip PQ-PSK for non-1:1 Update commits.
+      Decision deferred to a focused session.
+- [ ] **Cap'n Proto migration.** Replace Prost in
+      `lattice-protocol::wire` with `capnp`-generated types from
+      `.capnp` schemas. Touches every callsite; needs a careful
+      schema-evolution test plan since the protocol is pre-1.0 but
+      already in use by the M3 testbed.
 
 ### Not done — M4 and beyond
 - [ ] Cap'n Proto migration from interim Prost wire (M5)
