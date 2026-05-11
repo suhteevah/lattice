@@ -15,8 +15,9 @@ use lattice_crypto::mls::LatticeIdentity;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::welcome_pq::PqWelcomePayload;
 use lattice_crypto::mls::LatticeWelcome;
-use lattice_protocol::wire::{IdentityClaim, encode};
+use lattice_protocol::wire::{IdentityClaim, MembershipCert, SealedEnvelope, encode};
 use mls_rs_codec::{MlsDecode, MlsEncode};
+use prost::Message;
 use serde::Deserialize;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -434,4 +435,118 @@ pub async fn fetch_messages(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok((parsed.latest_seq, messages))
+}
+
+/// Mirror of `lattice_server::routes::well_known::ServerDescriptor`.
+/// We only consume the federation pubkey here — the wire_version /
+/// server_version fields are surfaced for logging.
+#[derive(Debug, Deserialize)]
+pub struct ServerDescriptor {
+    /// Wire protocol version supported by the server.
+    pub wire_version: u32,
+    /// Base64 of the server's Ed25519 federation pubkey. Sealed-sender
+    /// verification at the router (and at the recipient, per D-05)
+    /// reads this.
+    pub federation_pubkey_b64: String,
+    /// Server's reported version string.
+    pub server_version: String,
+}
+
+/// `GET /.well-known/lattice/server` — fetch the server descriptor.
+///
+/// # Errors
+///
+/// Network or non-2xx status; JSON parse failure.
+pub async fn fetch_descriptor(server: &str) -> Result<ServerDescriptor, String> {
+    let response = Request::get(&format!("{server}/.well-known/lattice/server"))
+        .send()
+        .await
+        .map_err(|e| format!("send fetch_descriptor: {e}"))?;
+    if !response.ok() {
+        return Err(format!(
+            "fetch_descriptor HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| format!("decode descriptor: {e}"))
+}
+
+/// Mirror of `lattice_server::routes::groups::IssueCertResponse`.
+#[derive(Debug, Deserialize)]
+struct IssueCertResponseWire {
+    cert_b64: String,
+}
+
+/// `POST /group/:gid/issue_cert` — request a sealed-sender membership
+/// cert binding `ephemeral_pubkey` to the current epoch for
+/// `valid_until` seconds. Decodes the server's Prost-encoded
+/// [`MembershipCert`] and returns it ready to feed into
+/// `lattice_protocol::sealed_sender::seal`.
+///
+/// # Errors
+///
+/// Network, non-2xx, base64, or Prost decode failures.
+pub async fn issue_cert(
+    server: &str,
+    group_id: &[u8; 16],
+    epoch: u64,
+    ephemeral_pubkey: &[u8; 32],
+    valid_until: i64,
+) -> Result<MembershipCert, String> {
+    let body = serde_json::json!({
+        "epoch": epoch,
+        "ephemeral_pubkey_b64": B64.encode(ephemeral_pubkey),
+        "valid_until": valid_until,
+    });
+    let response = Request::post(&format!(
+        "{server}/group/{}/issue_cert",
+        B64URL.encode(group_id)
+    ))
+    .json(&body)
+    .map_err(|e| format!("build issue_cert request: {e}"))?
+    .send()
+    .await
+    .map_err(|e| format!("send issue_cert: {e}"))?;
+    if !response.ok() {
+        return Err(format!(
+            "issue_cert HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+    let parsed: IssueCertResponseWire = response
+        .json()
+        .await
+        .map_err(|e| format!("decode issue_cert response: {e}"))?;
+    let cert_bytes = B64
+        .decode(&parsed.cert_b64)
+        .map_err(|e| format!("decode cert_b64: {e}"))?;
+    MembershipCert::decode(cert_bytes.as_slice())
+        .map_err(|e| format!("prost decode MembershipCert: {e}"))
+}
+
+/// Helper: Prost-encode a [`SealedEnvelope`] for transport.
+#[must_use]
+pub fn encode_sealed(envelope: &SealedEnvelope) -> Vec<u8> {
+    encode(envelope)
+}
+
+/// Helper: Prost-decode a [`SealedEnvelope`] from bytes pulled out of
+/// `/group/:gid/messages`.
+///
+/// # Errors
+///
+/// Returns the Prost decode error as a string.
+pub fn decode_sealed(bytes: &[u8]) -> Result<SealedEnvelope, String> {
+    SealedEnvelope::decode(bytes).map_err(|e| format!("prost decode SealedEnvelope: {e}"))
 }

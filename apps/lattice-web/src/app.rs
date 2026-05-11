@@ -8,8 +8,10 @@
 //! the M2 integration test exercise; here they run entirely in WASM.
 
 use base64::Engine;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use rand::rngs::OsRng;
 
 use lattice_crypto::credential::{
     ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
@@ -22,6 +24,7 @@ use lattice_crypto::mls::{
     LatticeIdentity, add_member, apply_commit, create_group, decrypt, encrypt_application,
     generate_key_package, process_welcome,
 };
+use lattice_protocol::sealed_sender::{open_at_recipient, seal};
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 
 use crate::api;
@@ -110,6 +113,18 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let sealed_sender_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("running sealed-sender demo…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_sealed_sender_demo(DEFAULT_SERVER_URL, log).await {
+                Ok(()) => set_status.set("sealed-sender OK".to_string()),
+                Err(e) => set_status.set(format!("sealed-sender error: {e}")),
+            }
+        });
+    };
+
     let save_identity = move |_| {
         set_log_lines.set(Vec::new());
         let log = append;
@@ -144,6 +159,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=register_server>"Register with server"</button>
                     <button class="button" on:click=key_package_round_trip>"KP publish + fetch"</button>
                     <button class="button" on:click=server_backed_demo>"Server-backed demo"</button>
+                    <button class="button" on:click=sealed_sender_demo>"Sealed-sender demo"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=clear_identity>"Clear saved identity"</button>
                 </div>
@@ -501,6 +517,148 @@ async fn try_server_backed_demo(
 
     log("== M4 phase γ.3 complete ==".to_string());
     Ok(())
+}
+
+/// Phase γ-polish: full Alice⇌Bob round-trip with D-05 sealed-sender
+/// envelopes. Alice asks the server for a membership cert binding her
+/// ephemeral Ed25519 pubkey to the group's current epoch, then wraps
+/// the MLS ciphertext in a `SealedEnvelope` whose envelope signature
+/// is checkable by the server (router can't ID the sender) and whose
+/// inner ciphertext is decryptable only by group members.
+async fn try_sealed_sender_demo(
+    server: &str,
+    log: impl Fn(String) + Copy,
+) -> Result<(), String> {
+    log(format!("== sealed-sender demo against {server} =="));
+    let alice = make_identity(0xCE)?;
+    let bob = make_identity(0xCF)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+    log(format!(
+        "alice user_id: {} / bob user_id: {}",
+        &B64.encode(alice.credential.user_id)[..12],
+        &B64.encode(bob.credential.user_id)[..12],
+    ));
+
+    log("== fetch server descriptor (server pubkey) ==".to_string());
+    let descriptor = api::fetch_descriptor(server).await?;
+    log(format!(
+        "server v{} wire v{}",
+        descriptor.server_version, descriptor.wire_version,
+    ));
+    let server_pk_bytes = B64
+        .decode(&descriptor.federation_pubkey_b64)
+        .map_err(|e| format!("decode federation_pubkey: {e}"))?;
+    let server_pk_array: [u8; 32] = server_pk_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("server pubkey length {}", server_pk_bytes.len()))?;
+    let server_verifying_key = VerifyingKey::from_bytes(&server_pk_array)
+        .map_err(|e| format!("parse server pubkey: {e}"))?;
+
+    log("== register both + bob publishes KP ==".to_string());
+    api::register(server, &alice).await?;
+    api::register(server, &bob).await?;
+    let _ = api::publish_key_package(server, &bob, &bob_psk).await?;
+
+    log("== alice creates group, adds bob, commits ==".to_string());
+    let bob_kp_bytes = api::fetch_key_package(server, &bob.credential.user_id).await?;
+    let group_id: [u8; 16] = *b"lattice-sealed-1";
+    let mut alice_group = create_group(&alice, alice_psk.clone(), &group_id)
+        .map_err(|e| format!("create_group: {e}"))?;
+    let commit_output =
+        add_member(&mut alice_group, &bob_kp_bytes).map_err(|e| format!("add_member: {e}"))?;
+    let welcome = commit_output
+        .welcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no welcome".to_string())?;
+    let _ = api::submit_commit(
+        server,
+        &group_id,
+        welcome.pq_payload.epoch,
+        &commit_output.commit,
+        &welcome,
+        &bob.credential.user_id,
+    )
+    .await?;
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit: {e}"))?;
+    let epoch = alice_group.current_epoch();
+    log(format!("alice epoch after commit: {epoch}"));
+
+    log("== alice generates ephemeral Ed25519 keypair ==".to_string());
+    let ephemeral_sk = SigningKey::generate(&mut OsRng);
+    let ephemeral_pk: [u8; 32] = ephemeral_sk.verifying_key().to_bytes();
+    log(format!("ephemeral pk: {}", &B64.encode(ephemeral_pk)[..12]));
+
+    log("== alice POSTs /group/:gid/issue_cert ==".to_string());
+    let valid_until = chrono_now_unix() + 3600;
+    let cert = api::issue_cert(server, &group_id, epoch, &ephemeral_pk, valid_until).await?;
+    log(format!(
+        "cert: epoch={}, valid_until={}, sig len={}",
+        cert.epoch,
+        cert.valid_until,
+        cert.server_sig.len(),
+    ));
+
+    log("== bob fetches welcome + joins ==".to_string());
+    let welcome_for_bob = api::fetch_welcome(server, &group_id, &bob.credential.user_id).await?;
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), &welcome_for_bob)
+        .map_err(|e| format!("process_welcome: {e}"))?;
+
+    log("== alice encrypts MLS msg + seals envelope ==".to_string());
+    let inner_ct = encrypt_application(&mut alice_group, b"hello, sealed sender")
+        .map_err(|e| format!("alice encrypt: {e}"))?;
+    log(format!("inner_ct: {} bytes", inner_ct.len()));
+    let envelope = seal(cert, &ephemeral_sk, inner_ct.clone())
+        .map_err(|e| format!("seal: {e:?}"))?;
+    let envelope_bytes = api::encode_sealed(&envelope);
+    log(format!("sealed envelope: {} bytes", envelope_bytes.len()));
+
+    log("== alice POSTs sealed envelope ==".to_string());
+    let _seq = api::publish_message(server, &group_id, &envelope_bytes).await?;
+
+    log("== bob fetches + opens at recipient ==".to_string());
+    let (_, messages) = api::fetch_messages(server, &group_id, 0).await?;
+    let first = messages
+        .first()
+        .ok_or_else(|| "no messages returned".to_string())?;
+    let recovered_envelope = api::decode_sealed(&first.envelope)?;
+    let inner_recovered =
+        open_at_recipient(&server_verifying_key, &recovered_envelope, chrono_now_unix())
+            .map_err(|e| format!("open_at_recipient: {e:?}"))?;
+    if inner_recovered != inner_ct.as_slice() {
+        return Err("inner_ciphertext mismatch after open_at_recipient".into());
+    }
+    log("inner ct round-trips intact".to_string());
+
+    log("== bob MLS-decrypts inner ==".to_string());
+    let plaintext = decrypt(&mut bob_group, inner_recovered)
+        .map_err(|e| format!("bob decrypt: {e}"))?;
+    if plaintext != b"hello, sealed sender" {
+        return Err(format!(
+            "bob recovered {:?}",
+            String::from_utf8_lossy(&plaintext)
+        ));
+    }
+    log(format!(
+        "bob recovered: {:?}",
+        String::from_utf8_lossy(&plaintext)
+    ));
+    log("== M4 phase γ-polish complete ==".to_string());
+    Ok(())
+}
+
+/// Best-effort current-time accessor for the browser. `chrono` doesn't
+/// compile cleanly to wasm32 without `js-sys` feature flags we
+/// haven't enabled, so we go through `js_sys::Date::now()` directly.
+/// Returns Unix seconds; sufficient resolution for sealed-sender cert
+/// expiry checks (D-05 recommends ≤ 1 hour windows anyway).
+fn chrono_now_unix() -> i64 {
+    let ms = js_sys::Date::now();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let secs = (ms / 1000.0) as i64;
+    secs
 }
 
 /// Phase δ.1: persist a freshly-built Alice identity in

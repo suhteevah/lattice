@@ -120,6 +120,17 @@ pub struct GroupHandle {
     kem_keypair: KemKeyPair,
 }
 
+impl GroupHandle {
+    /// Current MLS epoch of this group handle. Increments on every
+    /// successfully-applied commit. Sealed-sender membership certs
+    /// bind to a specific epoch (D-05), so callers issuing certs need
+    /// to read it here.
+    #[must_use]
+    pub fn current_epoch(&self) -> u64 {
+        self.inner.context().epoch()
+    }
+}
+
 /// Result of an outgoing commit. Holds the wire bytes the caller pushes
 /// to the network layer.
 #[derive(Clone, Debug)]
