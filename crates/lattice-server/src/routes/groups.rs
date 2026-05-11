@@ -60,6 +60,34 @@ pub struct CommitRequest {
     /// Per-joiner welcomes. Empty for self-commits / updates.
     #[serde(default)]
     pub welcomes: Vec<CommitWelcome>,
+    /// Origin host that the SUBMITTING client wants the server to
+    /// claim when forwarding this commit to remote peers. Used in
+    /// the federation push's signed `origin_host` field. Defaults to
+    /// the local server's own host if absent.
+    #[serde(default)]
+    pub origin_host: Option<String>,
+    /// Origin base URL (likewise for federation push). Defaults to a
+    /// blank string if absent.
+    #[serde(default)]
+    pub origin_base_url: Option<String>,
+    /// Routing hints: per-joiner home-server base URLs for joiners
+    /// hosted on other servers. The home server will federate-push
+    /// the commit + welcomes to each listed URL's /federation/inbox.
+    /// Local joiners (hosted by us) are inferred from `welcomes` and
+    /// not duplicated here.
+    #[serde(default)]
+    pub remote_routing: Vec<RemoteRoutingHint>,
+}
+
+/// One entry in [`CommitRequest::remote_routing`].
+#[derive(Debug, Deserialize, Clone)]
+pub struct RemoteRoutingHint {
+    /// Base64 32-byte user_id of the joiner who lives on a remote
+    /// server.
+    pub joiner_user_id_b64: String,
+    /// Base URL of that joiner's home server, including scheme +
+    /// optional port (e.g. `http://localhost:4444`).
+    pub home_server_base_url: String,
 }
 
 /// `POST /group/:gid/commit` response.
@@ -93,7 +121,7 @@ async fn commit_handler(
 
     let entry = GroupCommitEntry {
         epoch: body.epoch,
-        commit,
+        commit: commit.clone(),
         welcomes: welcomes.clone(),
     };
     append_commit(&state, gid, entry).await;
@@ -103,8 +131,30 @@ async fn commit_handler(
         group_prefix = ?&gid[..4],
         epoch = body.epoch,
         welcomes_accepted,
+        remote_routes = body.remote_routing.len(),
         "commit accepted"
     );
+
+    // Federation push: forward commit + the welcomes addressed to each
+    // remote joiner to that joiner's home server. We push the FULL
+    // welcome list per recipient (not just their slice) so peers see
+    // the same commit log we do — they filter locally on read.
+    if !body.remote_routing.is_empty() {
+        let origin_host = body.origin_host.clone().unwrap_or_default();
+        let origin_base_url = body.origin_base_url.clone().unwrap_or_default();
+        crate::routes::federation::push_to_peers(
+            &state,
+            gid,
+            body.epoch,
+            &commit,
+            &welcomes,
+            &body.remote_routing,
+            &origin_host,
+            &origin_base_url,
+        )
+        .await;
+    }
+
     Ok(Json(CommitResponse {
         epoch: body.epoch,
         welcomes_accepted,

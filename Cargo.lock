@@ -1811,10 +1811,17 @@ name = "lattice-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "hex",
  "lattice-core",
  "lattice-crypto",
  "lattice-protocol",
+ "mls-rs",
+ "mls-rs-codec",
+ "mls-rs-core",
+ "prost",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

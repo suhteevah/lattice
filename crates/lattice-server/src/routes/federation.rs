@@ -28,7 +28,7 @@ use crate::state::{
 
 /// `POST /federation/inbox` body. A peer server is forwarding a commit
 /// that mentions a user we host.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FederationInboxRequest {
     /// Origin host (the sending peer server's hostname).
     pub origin_host: String,
@@ -238,4 +238,75 @@ pub fn router() -> Router<ServerState> {
 #[must_use]
 pub fn canonical_inbox_bytes_for_test(req: &FederationInboxRequest) -> Vec<u8> {
     canonical_inbox_bytes(req)
+}
+
+/// Outbound federation push. Called from the `commit` handler when the
+/// commit body lists `remote_routing` entries.
+///
+/// For each routing hint, builds + signs a `FederationInboxRequest`,
+/// POSTs it to the peer's `/federation/inbox`. Logs (does not error)
+/// on peer failures — federation push is best-effort in M3; missed
+/// peers can pull-replicate later. Network errors are logged so an
+/// operator can see them in real time.
+pub async fn push_to_peers(
+    state: &ServerState,
+    gid: [u8; 16],
+    epoch: u64,
+    commit: &[u8],
+    welcomes: &[crate::state::WelcomeForJoiner],
+    routing: &[crate::routes::groups::RemoteRoutingHint],
+    origin_host: &str,
+    origin_base_url: &str,
+) {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut req = FederationInboxRequest {
+        origin_host: origin_host.to_string(),
+        origin_base_url: origin_base_url.to_string(),
+        origin_pubkey_b64: state.federation_pubkey_b64.clone(),
+        group_id_b64: b64.encode(gid),
+        epoch,
+        commit_b64: b64.encode(commit),
+        welcomes: welcomes
+            .iter()
+            .map(|w| crate::routes::groups::CommitWelcome {
+                joiner_user_id_b64: b64.encode(w.joiner_user_id),
+                mls_welcome_b64: b64.encode(&w.mls_welcome),
+                pq_payload_b64: b64.encode(&w.pq_payload),
+            })
+            .collect(),
+        signature_b64: String::new(),
+    };
+    let tbs = canonical_inbox_bytes(&req);
+    use ed25519_dalek::Signer;
+    let sig = state.federation_sk.sign(&tbs);
+    req.signature_b64 = b64.encode(sig.to_bytes());
+
+    for hint in routing {
+        let url = format!(
+            "{}/federation/inbox",
+            hint.home_server_base_url.trim_end_matches('/')
+        );
+        let client = state.federation_http.clone();
+        let body = req.clone();
+        let target = hint.home_server_base_url.clone();
+        // Fire-and-forget per peer; M3 doesn't queue retries. M5
+        // adds durable retry on top.
+        tokio::spawn(async move {
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(target = %target, "federation push delivered");
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        target = %target,
+                        status = resp.status().as_u16(),
+                        "federation push rejected"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(target = %target, error = %e, "federation push failed");
+                }
+            }
+        });
+    }
 }

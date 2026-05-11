@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 5. Federation key + in-memory state
-    let federation_sk = load_or_generate_federation_key()
+    let federation_sk = load_or_generate_federation_key(&cfg.federation_key_path)
         .context("failed to load or generate federation signing key")?;
     let state = lattice_server::state::ServerState::new_with_federation_key(federation_sk);
     info!(
@@ -72,31 +72,36 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load the federation signing key from `LATTICE_FEDERATION_KEY_PATH`
-/// if the file exists; otherwise generate a fresh one with `OsRng`
-/// and persist it. The file format is the 32-byte raw seed.
-fn load_or_generate_federation_key() -> anyhow::Result<SigningKey> {
-    let path = std::env::var("LATTICE_FEDERATION_KEY_PATH")
-        .ok()
-        .map(PathBuf::from);
-    if let Some(p) = &path {
+/// Load the federation signing key from `path` if the file exists;
+/// otherwise generate a fresh one with `OsRng` and persist it. The
+/// file format is the 32-byte raw seed.
+///
+/// Pass an empty path to use an ephemeral in-memory key (warning is
+/// logged — federation peers will see a new pubkey on every restart).
+fn load_or_generate_federation_key(path: &str) -> anyhow::Result<SigningKey> {
+    let p = if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    };
+    if let Some(p) = &p {
         if p.exists() {
             let bytes = std::fs::read(p)
                 .with_context(|| format!("read federation key from {}", p.display()))?;
-            let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                anyhow::anyhow!("federation key file is not exactly 32 bytes")
-            })?;
+            let seed: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("federation key file is not exactly 32 bytes"))?;
             info!(path = %p.display(), "loaded federation key from disk");
             return Ok(SigningKey::from_bytes(&seed));
         }
     }
-    // Generate fresh.
     let mut seed = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut seed)
         .context("OsRng failed to fill 32 bytes")?;
     let sk = SigningKey::from_bytes(&seed);
-    if let Some(p) = path {
+    if let Some(p) = p {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create dir {}", parent.display()))?;
@@ -106,7 +111,7 @@ fn load_or_generate_federation_key() -> anyhow::Result<SigningKey> {
         info!(path = %p.display(), "wrote freshly-generated federation key");
     } else {
         warn!(
-            "no LATTICE_FEDERATION_KEY_PATH set; using ephemeral in-memory key — \
+            "federation_key_path is empty; using ephemeral in-memory key — \
              federation peers will see a new pubkey on every restart"
         );
     }
