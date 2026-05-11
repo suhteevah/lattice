@@ -61,9 +61,12 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 subtle = "2"
 
 # MLS — group key agreement
-mls-rs = "0.45"
-mls-rs-core = "0.21"
-mls-rs-crypto-rustcrypto = "0.16"
+# Versions kept in lockstep — mls-rs-crypto-rustcrypto's mls-rs-core dep
+# must match the one mls-rs itself pulls in, otherwise CryptoProvider
+# trait impls live in a different crate version and bound checks fail.
+mls-rs = "0.55"
+mls-rs-core = "0.27"
+mls-rs-crypto-rustcrypto = "0.22"
 # MLS TLS-style codec (used by custom Credential / extension serialization)
 mls-rs-codec = "0.6"
 

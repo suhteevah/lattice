@@ -27,6 +27,7 @@
 // no-op bodies don't mutate — M2's real implementation will mutate state.
 #![allow(clippy::needless_pass_by_ref_mut)]
 
+pub mod cipher_suite;
 pub mod identity_provider;
 
 use tracing::instrument;

@@ -33,6 +33,12 @@ use zeroize::Zeroize;
 
 use crate::{Error, Result};
 
+/// Length of an Ed25519 signature in bytes.
+pub const ED25519_SIG_LEN: usize = 64;
+
+/// Length of an ML-DSA-65 signature in bytes (FIPS 204).
+pub const ML_DSA_65_SIG_LEN: usize = 3309;
+
 /// Public identity bundle published to the home server's key directory.
 #[derive(Clone, Debug)]
 pub struct IdentityPublicKey {
