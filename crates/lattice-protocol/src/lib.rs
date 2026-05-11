@@ -15,6 +15,7 @@
 // Test code legitimately uses expect()/unwrap()/panic per HANDOFF §7.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
+pub mod lattice_capnp;
 pub mod sealed_sender;
 pub mod sig;
 pub mod wire;

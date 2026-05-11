@@ -79,10 +79,13 @@ quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 
-# Wire framing (Cap'n Proto via prost as a starting point — swap to capnp once
-# schema lands)
+# Wire framing — Prost was the interim format used through M2/M3/M4.
+# Cap'n Proto schema landed in M5; both coexist until the wire-callsite
+# swap is finished, then Prost will be removed.
 prost = "0.13"
 prost-types = "0.13"
+capnp = "0.20"
+capnpc = "0.20"
 
 # HTTP / server framework
 axum = { version = "0.8", features = ["macros", "ws"] }

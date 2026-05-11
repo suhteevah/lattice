@@ -18,6 +18,7 @@ serde_bytes.workspace = true
 bytes.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+capnp.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
@@ -29,6 +30,9 @@ ed25519-dalek.workspace = true
 # Hybrid signature re-export per D-03; one-way dependency
 # (lattice-crypto never imports lattice-protocol).
 lattice-crypto = { path = "../lattice-crypto" }
+
+[build-dependencies]
+capnpc.workspace = true
 
 [dev-dependencies]
 rand = { workspace = true }
