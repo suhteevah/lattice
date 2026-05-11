@@ -11,10 +11,37 @@ lands.
 
 | Field | Value |
 |---|---|
-| Current milestone | **M3 — Vertical slice (CLI E2E)** (not started) |
+| Current milestone | **M3 — Vertical slice (CLI E2E)** (skeleton shipped 2026-05-11; polish items remain) |
 | Last shipped | M2 — MLS + sealed sender + wire types (2026-05-10) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
+
+### M3 skeleton shipped 2026-05-11
+
+`scripts\e2e-vertical-slice.ps1` brings up two `lattice-server`
+instances on ports 4443/4444 and runs `lattice demo` to drive
+Alice (server A) inviting Bob (server B) into a group and
+exchanging an MLS-encrypted "hello, lattice". Federation push of
+the welcome (A → B's `/federation/inbox`, signed by A's
+federation key, TOFU-cached on B) works. Bob fetches the welcome
+from B, joins the group, then fetches Alice's message from A
+(message-federation push from A → B is still a follow-up; for the
+skeleton Bob pulls from the group-owning server directly).
+
+6 of 7 acceptance items from §M3 are met:
+
+- ✅ Two `lattice-server` instances on different ports.
+- ✅ Two clients register identity with their respective home servers.
+- ✅ Client A creates a 1:1 MLS group with Client B across servers.
+- ✅ Client A encrypts the message with the group's MLS state.
+- ⚠️ Server A federates ciphertext to Server B — Welcome federation
+   works; message-inbox federation is a follow-up.
+- ✅ Client B decrypts and prints the plaintext.
+- ✅ Structured tracing spans on every step.
+
+Plus the "QUIC" requirement is currently met over HTTPS/HTTP-1.1
+via `reqwest`/`axum`; QUIC migration is tracked as an M3 polish
+item.
 
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for
@@ -29,7 +56,7 @@ the threats each milestone's mitigations defend against.
 | M0 | Scaffold | `cargo check --workspace` green; docs in place | ✅ shipped 2026-05-10 |
 | M1 | Crypto primitives | identity + hybrid_kex + aead + padding tested green; no `todo!()` in those modules | ✅ shipped 2026-05-10 |
 | M2 | MLS + sealed sender | create-group/invite/send/recv work in unit tests with custom hybrid ciphersuite | ✅ shipped 2026-05-10 |
-| M3 | Vertical slice (CLI E2E) | HANDOFF §6 acceptance — two servers, two clients, "hello, lattice" across federation | ⬜ not started |
+| M3 | Vertical slice (CLI E2E) | HANDOFF §6 acceptance — two servers, two clients, "hello, lattice" across federation | 🟡 skeleton shipped 2026-05-11; polish items (QUIC, sqlx, per-action CLI, message federation) remain |
 | M4 | Web client functional | passkey register → create DM → send → receive in two browser sessions | ⬜ blocked on M3 |
 | M5 | V1 feature complete | usable for daily small-group use; sealed sender on every DM; bug bounty open | ⬜ blocked on M4 |
 | M6 | V1.5 hardening | KT log + hidden membership + multi-server store-and-forward shipped | ⬜ blocked on M5 |

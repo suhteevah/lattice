@@ -1,6 +1,6 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-10 (M2 shipped — Phases A through H)
+**Last updated:** 2026-05-11 (M3 skeleton shipped — federated bridge works)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1 + 2 complete; M1 shipped; **M2 shipped**. Eleven
 commits on `main` (local repo, no remote yet):
@@ -330,41 +330,63 @@ lattice/
 - [x] getrandom 0.2 + 0.4 wasm feature pinning + uuid wasm features
       for clean WASM target compile.
 
-### Not done — M3 (next milestone)
+### Done (M3 skeleton — 2026-05-11)
 
-**Goal:** ROADMAP §M3 acceptance — two `lattice-server` instances,
-two `lattice-cli` clients across federation, "hello, lattice"
-cross-server with full tracing.
+**Phase I + J + K** (commit `f6535b1`):
+- [x] `lattice-server::state::ServerState` — Arc<RwLock<_>> in-memory
+      stores for registered users, published KeyPackages, group commit
+      log, message inbox, federation peer registry. Server's federation
+      Ed25519 signing key loaded from disk or generated fresh.
+- [x] Routes: `POST /register`, `POST /key_packages`,
+      `GET /key_packages/:user_id`, `POST /group/:gid/commit`,
+      `GET /group/:gid/welcome/:user_id`,
+      `POST + GET /group/:gid/messages`, `POST /group/:gid/issue_cert`,
+      `GET /.well-known/lattice/server`, `POST /federation/inbox`.
+- [x] 6 server-state unit tests + 5 routes-integration tests.
 
-Concrete deliverables (ROADMAP §M3):
+**Phase L + M + N** (commit `8b2f3e5`):
+- [x] Server-to-server federation push: commit handler signs canonical
+      TBS with federation_sk, POSTs to peer `/federation/inbox`.
+      TOFU pubkey pinning on the receive side.
+- [x] `lattice-cli demo` subcommand — single-process Alice+Bob
+      orchestrator. Real reqwest against two server URLs, real
+      lattice-crypto MLS state, real message round-trip. Exits non-zero
+      on any failure.
+- [x] `scripts\e2e-vertical-slice.ps1` — launches two
+      `lattice-server` instances, runs `lattice demo` against them,
+      asserts exit 0. **Verified passing 2026-05-11.**
 
-- [ ] `lattice-server` routes — `/register`, `/key_packages`,
-      `/group/{id}/commit`, `/group/{id}/messages`, WebTransport stub.
-- [ ] `lattice-server` federation gossip over QUIC, with replay
-      protection and signed federation auth (D-06 / D-07).
-- [ ] `lattice-server` Postgres schema + sqlx migrations
-      (`mls_key_packages`, `mls_group_state`, `mls_group_epochs`,
-      `pending_messages`). The "server never stores plaintext" rule is
-      enforced by a migration policy that fails CI if it adds a
-      plaintext message column.
-- [ ] `lattice-server::routes::issue_cert` — server-side
-      MembershipCert issuance per D-05. Uses
-      `lattice-protocol::sealed_sender::issue_cert` directly.
-- [ ] `lattice-cli` subcommands — `register`, `create-group`,
-      `invite`, `send`, `recv` (plus `--server-url` and
-      `--identity-path` flags).
-- [ ] `lattice-storage` native-only path: file-backed encrypted store
-      under argon2id-derived key (D-08).
-- [ ] sqlx-backed `KeyPackageStorage` + `GroupStateStorage` +
-      `PreSharedKeyStorage` impls (the in-memory ones ship in M2 for
-      tests).
-- [ ] Scripted e2e test in `scripts/` that brings up two servers,
-      registers two CLI clients, sends one message, exits 0 on
-      successful delivery.
+### Not done — M3 polish (open for the federation testbed deploy)
 
-Federation testbed: **pixie + cnc + kokonoe** (offered by Matt
-2026-05-10) — three home servers across distinct boxes for realistic
-federation testing.
+- [ ] **Per-action CLI subcommands with file-backed state.** `demo`
+      is single-process; real users want `register` then `invite`
+      then `send` as separate invocations. Needs file-backed
+      `GroupStateStorage` / `KeyPackageStorage` / `PreSharedKeyStorage`
+      impls. The mls-rs trait surface is small — ~30 lines each.
+- [ ] **Message-inbox federation push.** Currently Bob fetches
+      messages from server A (the group-owning server) directly. To
+      fully match "server A federates ciphertext to server B" Bob
+      should fetch from B and have server A push messages to B's
+      message-inbox endpoint. Endpoint + push helper need wiring
+      symmetric to the Welcome path.
+- [ ] **QUIC transport.** Currently HTTPS/HTTP/1.1 over `reqwest`/`axum`.
+      QUIC unlocks connection migration + multiplexing. `quinn` is
+      already a workspace dep; the server-side bind + client-side
+      transport adapter need writing.
+- [ ] **sqlx-backed storage providers.** Postgres schema +
+      migrations (`mls_key_packages`, `mls_group_state`,
+      `mls_group_epochs`, `pending_messages`, `federation_peers`)
+      plus storage-trait impls that wrap sqlx. The in-memory ones
+      stay for tests.
+- [ ] **Identity persistence (D-08).** argon2id-keyed
+      ChaCha20-Poly1305 file at `~/.lattice/identity` per D-08.
+- [ ] **`.well-known/lattice/server` signed descriptor (D-06).**
+      Currently returns the pubkey but doesn't sign the response.
+      Canonical-CBOR + Ed25519 signature is the actual D-06 contract.
+- [ ] **Federation testbed deploy.** Build for x86_64-unknown-linux-gnu,
+      deploy `lattice-server` binaries to pixie + cnc + kokonoe (Matt's
+      three nodes), run a cross-VPS `lattice demo` against the real
+      hosts.
 
 ### Not done — M4 and beyond
 - [ ] Cap'n Proto migration from interim Prost wire (M5)
