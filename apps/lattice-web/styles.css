@@ -108,6 +108,11 @@ h1 {
     border-color: rgba(200, 162, 200, 0.5);
 }
 
+.button:focus-visible {
+    outline: 2px solid var(--lattice-lilac-400);
+    outline-offset: 2px;
+}
+
 .button:disabled {
     opacity: 0.5;
     cursor: not-allowed;

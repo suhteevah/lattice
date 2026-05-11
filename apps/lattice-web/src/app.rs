@@ -131,12 +131,14 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <div class="page">
-            <div class="card">
-                <h1>"Lattice"</h1>
+        <main class="page">
+            <section class="card" aria-labelledby="lattice-heading">
+                <h1 id="lattice-heading">"Lattice"</h1>
                 <p class="tagline">"Post-quantum encrypted messaging. M4 in-browser preview."</p>
-                <div class="status">{move || status.get()}</div>
-                <div class="button-row">
+                <div class="status" role="status" aria-live="polite">
+                    {move || status.get()}
+                </div>
+                <div class="button-row" role="group" aria-label="demo actions">
                     <button class="button" on:click=run_primitives>"Run primitives demo"</button>
                     <button class="button" on:click=run_mls>"Run MLS round-trip"</button>
                     <button class="button" on:click=register_server>"Register with server"</button>
@@ -149,16 +151,16 @@ pub fn App() -> impl IntoView {
                     when=move || !log_lines.get().is_empty()
                     fallback=|| view! {}
                 >
-                    <pre class="log">
+                    <pre class="log" role="log" aria-live="polite" aria-label="demo output">
                         {move || log_lines.get().join("\n")}
                     </pre>
                 </Show>
-                <div class="footer">
-                    <span class="dot-sage"></span>
+                <footer class="footer">
+                    <span class="dot-sage" aria-hidden="true"></span>
                     <span class="muted">"End-to-end encrypted • PQ-hybrid"</span>
-                </div>
-            </div>
-        </div>
+                </footer>
+            </section>
+        </main>
     }
 }
 
