@@ -1,9 +1,11 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M3 skeleton shipped — federated bridge works)
+**Last updated:** 2026-05-11 (M4 Phase α shipped — Leptos browser
+client running PQ-hybrid crypto in-WASM at `http://127.0.0.1:5173`)
 **Owner:** Matt Gates (suhteevah)
-**Status:** Steps 1 + 2 complete; M1 shipped; **M2 shipped**. Eleven
-commits on `main` (local repo, no remote yet):
+**Status:** Steps 1 + 2 complete; M1 shipped; M2 shipped; M3 federated
+bridge working three-node; **M4 Phase α (browser preview) shipped**.
+Twelve+ commits on `main` (local repo, no remote yet):
 
 ```
 2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
@@ -121,7 +123,7 @@ These are not up for debate without an explicit re-open conversation.
 | V1 client surface | **Browser only** | Single client surface to polish; WASM crypto is mature; lowest onboarding friction. |
 | Wire format | **Cap'n Proto** (Prost interim) | Zero-copy decode, schema-evolution-friendly, ~10x faster than JSON. |
 | Transport | **QUIC / HTTP/3** | Connection migration, no head-of-line blocking, WebTransport in browsers. |
-| Language | **Rust** for all backend + client core; **Solid + Tailwind** for web UI. | Matt's stack. Single client core compiles to native (V2) and wasm32 (V1). |
+| Language | **Rust everywhere** — backend, client core, and web UI. Web UI is Leptos 0.8 (CSR) compiled to wasm32 via Trunk. No JS / TS / npm anywhere. | Matt's stack. Single client core compiles to native (V2) and wasm32 (V1). (Updated 2026-05-11 from prior "Solid + Tailwind" choice.) |
 | Identity at rest | **WebAuthn / passkeys** in V1; OS keychain in V2. | Hardware-backed where possible; degrade gracefully. |
 | License | **AGPL-3.0-or-later** | Forces forks/SaaS rehosts to share source. |
 
@@ -183,7 +185,7 @@ lattice/
 │   └── lattice-cli/                    # admin + dev tooling
 │
 ├── apps/
-│   └── lattice-web/                    # Solid + Tailwind + WASM core (V1 client)
+│   └── lattice-web/                    # Leptos + Trunk + WASM core (V1 client)
 │
 ├── design/
 │   ├── tokens/                         # colors.json / typography.json / spacing.json
@@ -423,10 +425,69 @@ Known issue:
       three nodes), run a cross-VPS `lattice demo` against the real
       hosts.
 
+### Done (M4 Phase α — 2026-05-11, browser preview)
+
+Per Matt's "Rust everywhere" directive, the Solid + Vite + Tailwind +
+TypeScript scaffold was replaced with a pure-Rust Leptos client.
+
+**Stack:**
+- Leptos 0.8 (CSR feature) for the UI — Solid-like signals in Rust.
+- Trunk 0.21 for build / dev-serve / asset hashing / SRI emit.
+- wasm-bindgen 0.2.121 (pinned in `Trunk.toml`) for the bridge.
+- Hand-written CSS in `apps/lattice-web/styles.css`, sourced from
+  `design/tokens/`. No Tailwind.
+- `lattice-core`, `lattice-crypto`, `lattice-protocol` imported as
+  regular Rust crates; they compile to `wasm32-unknown-unknown`
+  alongside the UI.
+
+**What runs in the browser:**
+- `lattice_core::init()` boots tracing + the panic hook on page load
+  and the UI shows `lattice-core v0.1.0 ready` from the const.
+- "Run crypto demo" button exercises hybrid signature (Ed25519 +
+  ML-DSA-65) and hybrid KEM (X25519 + ML-KEM-768) entirely client-side.
+  Live numbers verified against the demo log lines:
+    - sig pk: 1984 bytes (32 ed25519 + 1952 ml-dsa)
+    - sig: 3373 bytes, `verify: OK`
+    - kem pk: 1216 bytes (32 x25519 + 1184 ml-kem)
+    - ct: 1120 bytes (32 x25519 eph + 1088 ml-kem ct)
+    - `secrets agree: true` after encap/decap round-trip.
+- WASM artifact is 803 KB (debug); release build pending.
+
+**Build infrastructure changes:**
+- New `apps/lattice-web/scripts/serve.ps1` loads `vcvars64.bat` from
+  Visual Studio 2022 Build Tools so cargo can compile host-target
+  proc-macros. Without it `link.exe` resolves to Git's stub and every
+  build script (`serde`, `getrandom`, `wasm-bindgen-shared`, ...) fails.
+- New `.cargo/config.toml` at the workspace root pins
+  `[target.x86_64-pc-windows-msvc] linker = "link.exe"`. The user-level
+  config sets `linker = "lld-link"` which is not on PATH (only the
+  gcc-flavor wrapper at `<sysroot>/lib/rustlib/.../bin/gcc-ld/` is
+  bundled in stable and it mis-handles rustc's `-flavor link`).
+- `apps/lattice-web/index.html` no longer carries a CSP `<meta>` tag.
+  Trunk injects an inline bootstrap module with a per-request nonce
+  that any static CSP would block; production CSP is enforced by the
+  home server via `csp.json`-derived headers.
+
+### Not done — M4 polish (open for the browser-client deploy)
+
+- [ ] Phase β: real group/DM UI — create-group / invite / send / recv
+      wired through the same `lattice-crypto::mls` API the CLI uses.
+- [ ] Phase γ: WebTransport client (`web-sys::WebTransport`) hitting
+      the lattice-server federation/message endpoints from the
+      browser.
+- [ ] Phase δ: IndexedDB-backed storage providers
+      (`KeyPackageStorage`, `GroupStateStorage`, `PreSharedKeyStorage`)
+      so the browser persists state across reloads.
+- [ ] Phase ε: WebAuthn passkey flow (D-09 — PRF / passphrase+badge /
+      refuse three-tier).
+- [ ] Phase ζ: a11y pass — keyboard nav, focus rings, ARIA roles,
+      Lighthouse ≥ 95.
+- [ ] Production CSP verification (`scripts/verify-csp.ps1`) updated
+      for the Trunk-generated asset hashes — current script was written
+      against the old Vite-bundle layout.
+
 ### Not done — M4 and beyond
 - [ ] Cap'n Proto migration from interim Prost wire (M5)
-- [ ] Solid UI past the "Hello, Lattice" placeholder + WebAuthn /
-      passkey flow + IndexedDB store (M4)
 
 ---
 
@@ -458,12 +519,12 @@ cargo test --workspace
 # WASM target verification (lattice-core only)
 cargo check -p lattice-core --target wasm32-unknown-unknown
 
-# Lattice-web dev server
+# Lattice-web dev server (Leptos + Trunk, pure Rust — no npm)
 cd apps\lattice-web
-npm install
-npm run dev                            # vite at http://localhost:5173
-npm run build                          # static bundle + SRI pinning
-.\scripts\verify-csp.ps1               # confirms CSP policy is intact
+.\scripts\serve.ps1                    # trunk serve at http://127.0.0.1:5173
+.\scripts\serve.ps1 -NoAutoReload      # disable file watch
+trunk build --release                  # static bundle into dist/ + SRI
+.\..\..\scripts\verify-csp.ps1         # confirms CSP / SRI hashes (host server only)
 ```
 
 Environment variables are documented in each crate's `.env.example`. The

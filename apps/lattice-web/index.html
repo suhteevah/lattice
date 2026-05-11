@@ -1,22 +1,23 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
-      Production CSP is served by the host server (see csp.json). The meta
-      tag below is a belt-and-suspenders fallback that mirrors the policy
-      so even mis-configured hosts get a baseline.
+      CSP is NOT set via meta tag. Trunk injects an inline bootstrap
+      module with a per-request nonce, so a static meta CSP cannot
+      allowlist it. Production CSP is emitted by the home server as a
+      `Content-Security-Policy` HTTP header, computed from the actual
+      built bundle's SHA-384 hashes (see `csp.json` and
+      `scripts/verify-csp.ps1`). The header-based policy is strict:
+      no `'unsafe-inline'`, no `'unsafe-eval'`, allowlisted origins.
     -->
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
-    />
     <meta name="referrer" content="no-referrer" />
     <title>Lattice</title>
+    <link data-trunk rel="rust" data-bin="lattice-web" />
+    <link data-trunk rel="css" href="styles.css" />
   </head>
-  <body class="bg-ink-950 text-ink-50 font-sans">
+  <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

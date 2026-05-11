@@ -1,0 +1,41 @@
+[package]
+name = "lattice-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lattice browser client — Leptos UI compiled to wasm32."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lattice-web"
+path = "src/main.rs"
+
+[dependencies]
+# Leptos client-side rendering. `csr` feature enables the
+# `mount_to_body` API that boots the app inside the browser.
+leptos = { version = "0.8", features = ["csr"] }
+console_error_panic_hook = "0.1"
+tracing.workspace = true
+base64.workspace = true
+hex.workspace = true
+
+# Direct Rust deps on the lattice workspace — the Leptos UI calls
+# `lattice-core` (and indirectly `lattice-crypto`) without going
+# through the wasm-bindgen FFI. Both compile to wasm32 the same as
+# lattice-web does.
+lattice-core = { path = "../../crates/lattice-core" }
+lattice-crypto = { path = "../../crates/lattice-crypto" }
+lattice-protocol = { path = "../../crates/lattice-protocol" }
+mls-rs-core.workspace = true
+blake3.workspace = true
+
+# Browser bindings used directly by the UI (logging to console,
+# accessing window, fetching).
+wasm-bindgen.workspace = true
+web-sys = { workspace = true, features = ["Window", "console"] }
+getrandom = { workspace = true, features = ["js"] }
+getrandom_04 = { workspace = true }

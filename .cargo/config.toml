@@ -1,0 +1,12 @@
+# Workspace-level cargo overrides. Lives here (not in the user's
+# `~/.cargo/config.toml`) so the lattice repo is self-contained.
+#
+# The user-level cargo config sets `linker = "lld-link"` for
+# `x86_64-pc-windows-msvc`. That executable name is not on PATH —
+# the stable toolchain only ships a gcc-flavor `lld-link.exe` under
+# `<sysroot>/lib/rustlib/<host>/bin/gcc-ld/`, which mis-parses
+# rustc's `-flavor link` argument. Use the MSVC `link.exe` shipped
+# with Visual Studio Build Tools 2022 instead — `scripts/serve.ps1`
+# loads `vcvars64.bat` so it's on PATH for both `trunk` and `cargo`.
+[target.x86_64-pc-windows-msvc]
+linker = "link.exe"

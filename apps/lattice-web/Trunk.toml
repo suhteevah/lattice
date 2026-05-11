@@ -1,0 +1,29 @@
+# Trunk build config for lattice-web.
+
+[build]
+# Vendor releases of trunk default release builds to the workspace
+# `target/` dir. We pin the dist output to `apps/lattice-web/dist/`
+# so it sits next to the source instead of polluting the workspace
+# target.
+dist = "dist"
+public_url = "/"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 5173
+
+# Production CSP is emitted by the home server in front of the
+# static bundle (see `csp.json` + `scripts/verify-csp.ps1`), computed
+# from the actual built bundle's SHA-384 hashes. We deliberately do
+# NOT set Content-Security-Policy here for the dev server: Trunk
+# injects an inline bootstrap module with a per-request nonce that
+# any static CSP would block. Other security headers stay in place.
+[serve.headers]
+Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+X-Content-Type-Options = "nosniff"
+Referrer-Policy = "no-referrer"
+Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+[tools]
+# Pin tool versions for reproducible builds across machines.
+wasm_bindgen = "0.2.121"

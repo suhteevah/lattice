@@ -4,8 +4,12 @@
 **/*.rs.bk
 Cargo.lock.bak
 
-# Cargo registry artifacts
-.cargo/
+# Cargo registry / credentials cache. The workspace-level
+# `.cargo/config.toml` (linker override for Windows) IS tracked —
+# only the registry cache subdirs are ignored.
+.cargo/registry/
+.cargo/credentials*
+.cargo/.crates*.toml
 
 # IDE
 .vscode/
@@ -24,16 +28,10 @@ desktop.ini
 .env.*.local
 !.env.example
 
-# Web
-apps/lattice-web/node_modules/
+# Web (lattice-web is Rust + Leptos via Trunk — no JS toolchain)
 apps/lattice-web/dist/
-apps/lattice-web/.vite/
-apps/lattice-web/*.tsbuildinfo
-
-# Node generally
-**/node_modules/
-npm-debug.log
-yarn-error.log
+apps/lattice-web/trunk-serve*.log
+apps/lattice-web/trunk-serve*.err.log
 
 # Federation keys (NEVER commit)
 federation.key

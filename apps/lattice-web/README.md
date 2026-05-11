@@ -2,32 +2,53 @@
 
 The Lattice browser client.
 
-- **Framework:** Solid 1.9 + Vite 5
-- **Styling:** Tailwind, themed from `../../design/tokens/`
-- **Core logic:** `lattice-core` compiled to `wasm32-unknown-unknown`,
-  loaded on app boot
-- **Security posture:** strict CSP, SRI on every asset, no `unsafe-eval`
+- **Framework:** [Leptos](https://leptos.dev) 0.8 (CSR), compiled to
+  `wasm32-unknown-unknown` via [Trunk](https://trunkrs.dev/) 0.21.
+- **Toolchain:** pure Rust — no `npm`, no `node`, no TypeScript build.
+- **Styling:** hand-written CSS in `styles.css`, hooked to the lilac /
+  ink / sage design tokens at `../../design/tokens/`.
+- **Crypto:** the same `lattice-core` / `lattice-crypto` /
+  `lattice-protocol` crates the server uses are imported directly and
+  compiled to WASM alongside the UI.
+- **Security posture:** strict CSP (header-based in prod via
+  `csp.json`), SRI on every asset via Trunk's hashed-filename output,
+  no `unsafe-eval`.
 
 ## Commands
 
+```powershell
+# One-shot helpers from this directory
+.\scripts\serve.ps1                # trunk serve at http://127.0.0.1:5173
+.\scripts\serve.ps1 -NoAutoReload  # disable file watching
+
+# Or invoke trunk directly (requires VC++ env loaded yourself)
+trunk serve
+trunk build --release
 ```
-npm install
-npm run dev          # vite dev server at localhost:5173
-npm run build        # production bundle into dist/, with SRI pinning
-npm run preview      # serve the production bundle
-npm run typecheck    # tsc --noEmit
-npm run verify-csp   # CI gate on CSP / SRI consistency
-```
+
+`scripts/serve.ps1` loads `vcvars64.bat` from the Visual Studio 2022
+Build Tools so MSVC `link.exe` is on PATH for cargo's build scripts.
+Without it cargo can't compile host-target proc-macros under WSL-free
+Windows. See `..\..\.cargo\config.toml` for the linker override.
 
 ## Security knobs
 
-- **CSP:** dev-server policy is in `vite.config.ts`. Production policy is
-  in `csp.json` — served as a header by the host server. Both are
-  mirror-checked by `scripts/verify-csp.mjs`. Add a domain in **all three
-  places** or CI fails.
-- **SRI:** `scripts/sri-pin.mjs` runs after `vite build` and rewrites
-  `dist/index.html` so every script and stylesheet carries a
-  `sha384-…` integrity attribute. The build fails loudly if a hash
-  can't be computed.
-- **No `unsafe-eval`:** verified by `verify-csp.mjs`. WASM is loaded via
-  `'wasm-unsafe-eval'` which is narrower and intentional.
+- **CSP:** dev-server policy is intentionally NOT set (Trunk injects an
+  inline bootstrap module with a per-request nonce that any static CSP
+  would block). Production CSP lives in `csp.json` and is served as a
+  `Content-Security-Policy` HTTP header by the home server in front of
+  `dist/`. The header is verified by `..\..\scripts\verify-csp.ps1`.
+- **SRI:** Trunk emits hashed asset filenames and `sha384-…`
+  `integrity=` attributes on every `<script>` / `<link>` it generates.
+  The production server checks them via `verify-csp.ps1`.
+- **No `unsafe-eval`:** WASM is loaded via `'wasm-unsafe-eval'` which
+  is narrower and intentional.
+
+## Migration note (2026-05)
+
+Earlier scaffolding used Solid + Vite + Tailwind + TypeScript. Per the
+"Rust everywhere" project directive, the client was rebuilt in Leptos
+during M4 Phase α. The previous JS/TS toolchain (package.json,
+vite.config.ts, tsconfig.json, tailwind.config.ts, src/App.tsx,
+src/main.tsx, src/styles.css, scripts/sri-pin.mjs,
+scripts/verify-csp.mjs, scripts/build-wasm.ps1) is gone.
