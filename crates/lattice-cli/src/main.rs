@@ -378,20 +378,29 @@ async fn run_demo(
         "Alice posted commit; A federation-pushed to B"
     );
 
-    // Give the spawn-pushed federation request a moment to land at B.
-    // M3 ships best-effort fire-and-forget pushes; M5 adds retry/queue.
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    // === Bob fetches his welcome from server B ===
+    // Poll for the federation push to land at B. M3 ships best-effort
+    // fire-and-forget pushes from server A; the push latency depends
+    // on the federation transport (loopback HTTP is sub-ms; tunneled
+    // HTTP over SSH can be 200ms+; cross-continent WAN can be 1s+).
+    // Wait up to 10s, polling every 100ms.
     let bob_b64 = B64.encode(bob.credential.user_id);
-    let resp: serde_json::Value = client
-        .get(format!("{server_b}/group/{gid_b64}/welcome/{bob_b64}"))
-        .send()
-        .await
-        .context("welcome GET from server B")?
-        .json()
-        .await
-        .context("welcome response decode")?;
+    let welcome_url = format!("{server_b}/group/{gid_b64}/welcome/{bob_b64}");
+    let mut resp: Option<serde_json::Value> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let r = client
+            .get(&welcome_url)
+            .send()
+            .await
+            .context("welcome GET from server B")?;
+        if r.status().is_success() {
+            resp = Some(r.json().await.context("welcome response decode")?);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let resp =
+        resp.ok_or_else(|| anyhow!("welcome did not land at server B within 10s"))?;
     let mls_welcome = B64.decode(
         resp["mls_welcome_b64"]
             .as_str()

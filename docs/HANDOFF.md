@@ -356,6 +356,41 @@ lattice/
       `lattice-server` instances, runs `lattice demo` against them,
       asserts exit 0. **Verified passing 2026-05-11.**
 
+### Three-node testbed live as of 2026-05-11
+
+- **pixie** (`207.244.232.227`, Ubuntu 24.04, public IP) — lattice-server on
+  `127.0.0.1:4443`, federation key at `/tmp/lattice-deploy/fed-a.key`,
+  snapshot at `/tmp/lattice-deploy/state-a.json`. Reachable via SSH as
+  `pixiedust@pixie`.
+- **cnc-server** (LAN `192.168.168.100`, tailscale `100.108.202.49`,
+  openSUSE Tumbleweed) — lattice-server on `127.0.0.1:4443`, fed key
+  at `/tmp/lattice-deploy/fed-b.key`, snapshot at
+  `/tmp/lattice-deploy/state-b.json`. SSH reverse tunnel from cnc to
+  pixie exposes cnc:4443 as pixie:4444.
+- **kokonoe-WSL** (Ubuntu under WSL2, no public IP, but reachable from
+  kokonoe localhost) — lattice-server on `127.0.0.1:4443`, fed key at
+  `/tmp/lattice-deploy/fed-c.key`. Reverse tunnel from kokonoe to pixie
+  exposes WSL:4443 as pixie:4445.
+
+Verified pair-wise demos:
+- ✅ pixie ↔ cnc cross-host federation, plaintext "clean-pixie-cnc"
+  recovered.
+- ✅ kokonoe-WSL single-host demo, plaintext "single-wsl" recovered.
+- ✅ pixie state-persistence snapshot — SIGTERM → JSON dump → restart
+  → state restored (same fed pubkey, same group commits, same message
+  inbox). Verified by `scripts/verify-persistence.ps1`.
+
+Known issue:
+- ⚠️ pixie ↔ kokonoe-WSL cross-host demo fails with
+  `WelcomeKeyPackageNotFound`. Same lattice-server binary works
+  single-host on WSL and works cross-host between pixie ↔ cnc. The
+  bug appears to be in the demo orchestration's handling of the
+  slower two-hop SSH tunnel path (kokonoe → pixie reverse, then
+  pixie → kokonoe forward inside the demo process). Doesn't block
+  M3 acceptance because the per-action CLI is the intended deploy
+  path and the cross-host federation primitives are proven by the
+  pixie ↔ cnc path.
+
 ### Not done — M3 polish (open for the federation testbed deploy)
 
 - [ ] **Per-action CLI subcommands with file-backed state.** `demo`
