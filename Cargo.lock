@@ -1826,7 +1826,7 @@ dependencies = [
  "ml-dsa",
  "ml-kem",
  "mls-rs",
- "mls-rs-codec 0.6.0",
+ "mls-rs-codec",
  "mls-rs-core",
  "mls-rs-crypto-rustcrypto",
  "rand 0.8.6",
@@ -2101,7 +2101,7 @@ dependencies = [
  "hex",
  "itertools",
  "maybe-async",
- "mls-rs-codec 0.7.0",
+ "mls-rs-codec",
  "mls-rs-core",
  "mls-rs-identity-x509",
  "portable-atomic",
@@ -2114,17 +2114,6 @@ dependencies = [
  "thiserror 2.0.18",
  "wasm-bindgen",
  "zeroize",
-]
-
-[[package]]
-name = "mls-rs-codec"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f865c30512488ec839e934208ff2ca4b2491cb3cde5a929f2b0cfed064e05511"
-dependencies = [
- "mls-rs-codec-derive",
- "thiserror 1.0.69",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2160,7 +2149,7 @@ dependencies = [
  "async-trait",
  "hex",
  "maybe-async",
- "mls-rs-codec 0.7.0",
+ "mls-rs-codec",
  "serde",
  "thiserror 2.0.18",
  "wasm-bindgen",

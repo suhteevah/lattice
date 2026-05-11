@@ -29,7 +29,9 @@
 
 pub mod cipher_suite;
 pub mod identity_provider;
+pub mod leaf_node_kem;
 pub mod psk;
+pub mod welcome_pq;
 
 use tracing::instrument;
 

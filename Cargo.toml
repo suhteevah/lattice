@@ -67,8 +67,11 @@ subtle = "2"
 mls-rs = "0.55"
 mls-rs-core = "0.27"
 mls-rs-crypto-rustcrypto = "0.22"
-# MLS TLS-style codec (used by custom Credential / extension serialization)
-mls-rs-codec = "0.6"
+# MLS TLS-style codec (used by custom Credential / extension serialization).
+# Must match the version mls-rs-core re-exports as `mls_rs_core::mls_rs_codec`,
+# otherwise the `MlsCodecExtension` trait bounds resolve through a different
+# crate version and our derives "don't implement MlsEncode/MlsDecode".
+mls-rs-codec = "0.7"
 
 # QUIC transport
 quinn = "0.11"
