@@ -196,6 +196,44 @@ impl KemKeyPair {
             decapsulation_key: Zeroizing::new(dk),
         }
     }
+
+    /// Public accessor for the decapsulation key bytes, intended for
+    /// callers that need to persist the keypair (e.g. CLI identity
+    /// files). Callers must store the returned bytes under appropriate
+    /// at-rest protection — the bytes themselves leave the `Zeroizing`
+    /// wrapper.
+    #[must_use]
+    pub fn decapsulation_key_persist(&self) -> &[u8] {
+        &self.decapsulation_key
+    }
+
+    /// Public raw-bytes constructor for loading a persisted keypair.
+    /// Validates lengths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ek` or `dk` are the wrong length. The caller is
+    /// expected to have just loaded these bytes from a persisted
+    /// `decapsulation_key_persist()` + `encapsulation_key_bytes()`
+    /// pair, so wrong lengths indicate file corruption — abort.
+    #[must_use]
+    pub fn from_raw_bytes_public(ek: Vec<u8>, dk: Vec<u8>) -> Self {
+        assert_eq!(
+            ek.len(),
+            ML_KEM_768_EK_LEN,
+            "ek length {} != expected {}",
+            ek.len(),
+            ML_KEM_768_EK_LEN
+        );
+        assert_eq!(
+            dk.len(),
+            ML_KEM_768_DK_LEN,
+            "dk length {} != expected {}",
+            dk.len(),
+            ML_KEM_768_DK_LEN
+        );
+        Self::from_raw_bytes_inner(ek, dk)
+    }
 }
 
 impl Drop for KemKeyPair {

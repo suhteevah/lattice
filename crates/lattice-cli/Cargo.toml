@@ -29,10 +29,12 @@ hex.workspace = true
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
-# Direct MLS deps for the demo flow.
+# Direct MLS deps for the demo flow + file-backed storage providers.
 mls-rs.workspace = true
 mls-rs-core.workspace = true
 mls-rs-codec.workspace = true
+zeroize.workspace = true
+blake3.workspace = true
 
 lattice-crypto = { path = "../lattice-crypto" }
 lattice-protocol = { path = "../lattice-protocol" }
