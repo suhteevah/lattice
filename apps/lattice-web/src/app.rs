@@ -39,18 +39,30 @@ const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
 
 #[component]
 pub fn App() -> impl IntoView {
-    let boot_status = match persist::load() {
-        Ok(Some(identity)) => format!(
-            "lattice-core v{} ready · restored identity {}…",
-            lattice_core::VERSION,
-            &B64.encode(identity.credential.user_id)[..12]
-        ),
-        Ok(None) => format!(
+    let boot_status = match persist::probe() {
+        Ok(persist::BlobShape::None) => format!(
             "lattice-core v{} ready · no saved identity",
             lattice_core::VERSION
         ),
+        Ok(persist::BlobShape::Plaintext) => match persist::load(None) {
+            Ok(Some(identity)) => format!(
+                "lattice-core v{} ready · restored identity {}…",
+                lattice_core::VERSION,
+                &B64.encode(identity.credential.user_id)[..12]
+            ),
+            Ok(None) => format!("lattice-core v{} ready", lattice_core::VERSION),
+            Err(e) => format!(
+                "lattice-core v{} ready · load error: {e}",
+                lattice_core::VERSION
+            ),
+        },
+        Ok(persist::BlobShape::Encrypted) => format!(
+            "lattice-core v{} ready · encrypted identity present (click \
+             \"Load encrypted\" to unlock)",
+            lattice_core::VERSION
+        ),
         Err(e) => format!(
-            "lattice-core v{} ready · persist load error: {e}",
+            "lattice-core v{} ready · probe error: {e}",
             lattice_core::VERSION
         ),
     };
@@ -128,11 +140,50 @@ pub fn App() -> impl IntoView {
     let save_identity = move |_| {
         set_log_lines.set(Vec::new());
         let log = append;
-        match try_save_identity(log) {
+        match try_save_identity(log, None) {
             Ok(user_id_prefix) => {
                 set_status.set(format!("saved identity {user_id_prefix}…"));
             }
             Err(e) => set_status.set(format!("save error: {e}")),
+        }
+    };
+
+    let save_encrypted = move |_| {
+        set_log_lines.set(Vec::new());
+        let log = append;
+        match prompt_passphrase("Set passphrase to encrypt the identity at rest") {
+            Ok(Some(pw)) => match try_save_identity(log, Some(&pw)) {
+                Ok(user_id_prefix) => {
+                    set_status.set(format!("saved encrypted identity {user_id_prefix}…"));
+                }
+                Err(e) => set_status.set(format!("save error: {e}")),
+            },
+            Ok(None) => set_status.set("save cancelled".to_string()),
+            Err(e) => set_status.set(format!("prompt error: {e}")),
+        }
+    };
+
+    let load_encrypted = move |_| {
+        set_log_lines.set(Vec::new());
+        let log = append;
+        match prompt_passphrase("Enter passphrase to decrypt the saved identity") {
+            Ok(Some(pw)) => match persist::load(Some(&pw)) {
+                Ok(Some(identity)) => {
+                    log("== loaded encrypted identity ==".to_string());
+                    log(format!(
+                        "user_id: {}",
+                        B64.encode(identity.credential.user_id)
+                    ));
+                    set_status.set(format!(
+                        "loaded identity {}…",
+                        &B64.encode(identity.credential.user_id)[..12]
+                    ));
+                }
+                Ok(None) => set_status.set("no saved identity".to_string()),
+                Err(e) => set_status.set(format!("load error: {e}")),
+            },
+            Ok(None) => set_status.set("load cancelled".to_string()),
+            Err(e) => set_status.set(format!("prompt error: {e}")),
         }
     };
 
@@ -161,6 +212,8 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=server_backed_demo>"Server-backed demo"</button>
                     <button class="button" on:click=sealed_sender_demo>"Sealed-sender demo"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
+                    <button class="button" on:click=save_encrypted>"Save encrypted"</button>
+                    <button class="button" on:click=load_encrypted>"Load encrypted"</button>
                     <button class="button" on:click=clear_identity>"Clear saved identity"</button>
                 </div>
                 <Show
@@ -661,26 +714,51 @@ fn chrono_now_unix() -> i64 {
     secs
 }
 
-/// Phase δ.1: persist a freshly-built Alice identity in
-/// `window.localStorage` under `lattice/identity/v1`. Reload the page
-/// after clicking this and the boot status will show
-/// `restored identity <user_id_prefix>…`.
+/// Phase δ.1 / δ.2: persist a freshly-built Alice identity in
+/// `window.localStorage` under `lattice/identity/v1`. With
+/// `passphrase = None` writes the v1 plaintext blob; with `Some(pw)`
+/// writes the v2 Argon2id-keyed ChaCha20-Poly1305 envelope around the
+/// secret fields.
 ///
-/// Returns the user_id prefix the UI status surfaces. The blob is
-/// plaintext for now — see `persist.rs` for the at-rest threat
-/// model.
-fn try_save_identity(log: impl Fn(String) + Copy) -> Result<String, String> {
-    log("== save identity ==".to_string());
+/// Returns the user_id prefix the UI status surfaces.
+fn try_save_identity(
+    log: impl Fn(String) + Copy,
+    passphrase: Option<&str>,
+) -> Result<String, String> {
+    let header = if passphrase.is_some() {
+        "save encrypted identity"
+    } else {
+        "save identity"
+    };
+    log(format!("== {header} =="));
     let alice = make_identity(0xAA)?;
     let user_id_b64 = B64.encode(alice.credential.user_id);
     log(format!("user_id: {user_id_b64}"));
-    let bytes_written = persist::save(&alice)?;
+    let bytes_written = persist::save(&alice, passphrase)?;
+    let kind = if passphrase.is_some() { "v2" } else { "v1" };
     log(format!(
-        "wrote {bytes_written} bytes to localStorage[\"lattice/identity/v1\"]"
+        "wrote {bytes_written} bytes ({kind}) to localStorage[\"lattice/identity/v1\"]"
     ));
     log("reload the page to verify restore".to_string());
-    log("== M4 phase δ.1 complete ==".to_string());
+    if passphrase.is_some() {
+        log("== M4 phase δ.2 complete ==".to_string());
+    } else {
+        log("== M4 phase δ.1 complete ==".to_string());
+    }
     Ok(user_id_b64.chars().take(12).collect::<String>())
+}
+
+/// Pop a `window.prompt` to collect a passphrase. Returns `Ok(None)`
+/// if the user dismissed the dialog; `Ok(Some(text))` otherwise.
+/// Browser support is universal but it's a blocking modal — fine for
+/// dev, not production UX.
+fn prompt_passphrase(message: &str) -> Result<Option<String>, String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    match window.prompt_with_message(message) {
+        Ok(Some(s)) => Ok(Some(s)),
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("prompt: {e:?}")),
+    }
 }
 
 /// Build a fresh `LatticeIdentity` from scratch — signature keypair via
