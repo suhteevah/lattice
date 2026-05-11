@@ -11,6 +11,7 @@
 
 mod api;
 mod app;
+mod persist;
 
 use leptos::prelude::*;
 

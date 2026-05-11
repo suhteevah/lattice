@@ -25,6 +25,7 @@ use lattice_crypto::mls::{
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 
 use crate::api;
+use crate::persist;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -35,8 +36,22 @@ const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (status, set_status) =
-        signal::<String>(format!("lattice-core v{} ready", lattice_core::VERSION));
+    let boot_status = match persist::load() {
+        Ok(Some(identity)) => format!(
+            "lattice-core v{} ready · restored identity {}…",
+            lattice_core::VERSION,
+            &B64.encode(identity.credential.user_id)[..12]
+        ),
+        Ok(None) => format!(
+            "lattice-core v{} ready · no saved identity",
+            lattice_core::VERSION
+        ),
+        Err(e) => format!(
+            "lattice-core v{} ready · persist load error: {e}",
+            lattice_core::VERSION
+        ),
+    };
+    let (status, set_status) = signal::<String>(boot_status);
     let (log_lines, set_log_lines) = signal::<Vec<String>>(Vec::new());
 
     let append = move |line: String| {
@@ -95,6 +110,26 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let save_identity = move |_| {
+        set_log_lines.set(Vec::new());
+        let log = append;
+        match try_save_identity(log) {
+            Ok(user_id_prefix) => {
+                set_status.set(format!("saved identity {user_id_prefix}…"));
+            }
+            Err(e) => set_status.set(format!("save error: {e}")),
+        }
+    };
+
+    let clear_identity = move |_| {
+        set_log_lines.set(Vec::new());
+        match persist::clear() {
+            Ok(true) => set_status.set("cleared saved identity".to_string()),
+            Ok(false) => set_status.set("no saved identity to clear".to_string()),
+            Err(e) => set_status.set(format!("clear error: {e}")),
+        }
+    };
+
     view! {
         <div class="page">
             <div class="card">
@@ -107,6 +142,8 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=register_server>"Register with server"</button>
                     <button class="button" on:click=key_package_round_trip>"KP publish + fetch"</button>
                     <button class="button" on:click=server_backed_demo>"Server-backed demo"</button>
+                    <button class="button" on:click=save_identity>"Save identity"</button>
+                    <button class="button" on:click=clear_identity>"Clear saved identity"</button>
                 </div>
                 <Show
                     when=move || !log_lines.get().is_empty()
@@ -462,6 +499,28 @@ async fn try_server_backed_demo(
 
     log("== M4 phase γ.3 complete ==".to_string());
     Ok(())
+}
+
+/// Phase δ.1: persist a freshly-built Alice identity in
+/// `window.localStorage` under `lattice/identity/v1`. Reload the page
+/// after clicking this and the boot status will show
+/// `restored identity <user_id_prefix>…`.
+///
+/// Returns the user_id prefix the UI status surfaces. The blob is
+/// plaintext for now — see `persist.rs` for the at-rest threat
+/// model.
+fn try_save_identity(log: impl Fn(String) + Copy) -> Result<String, String> {
+    log("== save identity ==".to_string());
+    let alice = make_identity(0xAA)?;
+    let user_id_b64 = B64.encode(alice.credential.user_id);
+    log(format!("user_id: {user_id_b64}"));
+    let bytes_written = persist::save(&alice)?;
+    log(format!(
+        "wrote {bytes_written} bytes to localStorage[\"lattice/identity/v1\"]"
+    ));
+    log("reload the page to verify restore".to_string());
+    log("== M4 phase δ.1 complete ==".to_string());
+    Ok(user_id_b64.chars().take(12).collect::<String>())
 }
 
 /// Build a fresh `LatticeIdentity` from scratch — signature keypair via
