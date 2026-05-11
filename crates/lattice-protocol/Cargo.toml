@@ -21,6 +21,15 @@ prost-types.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
+# Sealed-sender uses plain Ed25519 sign/verify per D-05 (Option B,
+# 2026-05-10) over canonically-encoded transcript bytes. No
+# Lattice-specific crypto primitive; direct dep on ed25519-dalek.
+ed25519-dalek.workspace = true
+
 # Hybrid signature re-export per D-03; one-way dependency
 # (lattice-crypto never imports lattice-protocol).
 lattice-crypto = { path = "../lattice-crypto" }
+
+[dev-dependencies]
+rand = { workspace = true }
+rand_core = { workspace = true }

@@ -18,6 +18,7 @@
     allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)
 )]
 
+pub mod sealed_sender;
 pub mod sig;
 pub mod wire;
 

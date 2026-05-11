@@ -1860,9 +1860,12 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chrono",
+ "ed25519-dalek",
  "lattice-crypto",
  "prost",
  "prost-types",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
  "serde",
  "serde_bytes",
  "thiserror 2.0.18",
