@@ -187,6 +187,26 @@ impl KemKeyPair {
     }
 }
 
+impl KemKeyPair {
+    /// `pub(crate)` accessor for the raw decapsulation key bytes. Used
+    /// by [`super::KemKeyPair::duplicate`] inside this crate; not part
+    /// of the public API because exposing the secret bytes by reference
+    /// invites accidental copying past the `Zeroizing` wrapper.
+    pub(crate) fn decapsulation_key_inner(&self) -> &[u8] {
+        &self.decapsulation_key
+    }
+
+    /// `pub(crate)` raw-bytes constructor. Used by
+    /// [`super::KemKeyPair::duplicate`]; bypasses RNG so the caller
+    /// must have obtained the bytes from a previous `generate` call.
+    pub(crate) fn from_raw_bytes_inner(ek: Vec<u8>, dk: Vec<u8>) -> Self {
+        Self {
+            encapsulation_key: ek,
+            decapsulation_key: Zeroizing::new(dk),
+        }
+    }
+}
+
 impl Drop for KemKeyPair {
     fn drop(&mut self) {
         // `decapsulation_key: Zeroizing<Vec<u8>>` zeroes itself.

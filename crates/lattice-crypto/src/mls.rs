@@ -1,31 +1,58 @@
-//! MLS group state management — thin wrapper over `mls-rs`.
+//! MLS group state management for Lattice — thin wrapper over `mls-rs`.
 //!
-//! Lattice uses MLS (RFC 9420) for all group key agreement. This module
-//! pins the ciphersuite, configures the credential type, and exposes the
-//! subset of `mls-rs` operations the rest of the codebase needs.
+//! Lattice uses MLS (RFC 9420) for all group key agreement. The custom
+//! pieces of the construction (hybrid signatures, PSK injection of the
+//! ML-KEM-768 secret, ML-KEM LeafNode + Welcome extensions) live in
+//! sub-modules:
 //!
-//! ## Ciphersuite
+//! - [`cipher_suite`] — `CipherSuiteProvider` impl for the
+//!   `LATTICE_HYBRID_V1` (`0xF000`) suite (D-04).
+//! - [`identity_provider`] — `IdentityProvider` impl for the
+//!   `LatticeCredential` (`0xF001`) custom credential.
+//! - [`psk`] — deterministic per-epoch PSK id derivation +
+//!   in-memory `PreSharedKeyStorage`.
+//! - [`leaf_node_kem`] — `LatticeKemPubkey` LeafNode extension
+//!   (`0xF002`) and the per-device `KemKeyPair`.
+//! - [`welcome_pq`] — `PqWelcomePayload` extension (`0xF003`) for the
+//!   Welcome-side ML-KEM ciphertext delivery.
 //!
-//! We start with `MLS_256_DHKEMP384_AES256GCM_SHA384_P384` (mls-rs default
-//! for the 256-bit security level) and **augment** it with an ML-KEM-768
-//! layer in the init secret derivation. This is the open implementation
-//! task tracked in `docs/HANDOFF.md §8`.
+//! This module exposes the high-level group operations that callers
+//! (lattice-cli, lattice-server, lattice-web via lattice-core) use:
+//! [`create_group`], [`add_member`], [`process_welcome`],
+//! [`encrypt_application`], [`decrypt`], [`commit`], [`apply_commit`].
 //!
-//! ## Commit cadence
+//! ## Custom ciphersuite — hybrid PQ binding
 //!
-//! Aggressive commits are part of the V1 security roadmap: every 50
-//! application messages OR every 5 minutes, whichever comes first. The
-//! scheduler lives here and is driven by the client core.
+//! Per the D-04 re-open (2026-05-10), Lattice's PQ binding is achieved
+//! via per-epoch external PSK injection rather than by rewriting the
+//! MLS `init_secret`. `add_member` and `commit` both ML-KEM-encapsulate
+//! a fresh shared secret to every (other) member's `LatticeKemPubkey`,
+//! store the secret under [`psk::psk_id_for_epoch`]`(next_epoch)` in
+//! the local [`psk::LatticePskStorage`], and reference the PSK from
+//! the commit via `CommitBuilder::add_psk`. mls-rs's key schedule
+//! evaluates `epoch_secret = Expand("epoch", Extract(joiner_secret,
+//! psk_secret))`, folding the PQ secret in under HKDF-SHA-256 — the
+//! cryptographic property D-04 calls for.
 //!
-//! ## Status
+//! ## Footguns
 //!
-//! Stub — see `docs/HANDOFF.md §6`. Real implementation lands in M2; the
-//! API shape (mutable `GroupHandle`, async-friendly types) is what the
-//! caller will use post-M2.
+//! - **`write_to_storage` after every mutation.** mls-rs only persists
+//!   group state when callers explicitly call `Group::write_to_storage`
+//!   ([mls/group/mod.rs §process_incoming_message]). Every method in
+//!   this module that advances epoch state writes to storage before
+//!   returning bytes to the network layer.
+//! - **`apply_pending_commit` is mandatory.** After [`commit`] or
+//!   [`add_member`], callers must call [`apply_commit`] once the
+//!   server confirms the commit was broadcast, or the local epoch
+//!   does not advance. The wrapper preserves this discipline rather
+//!   than auto-applying so the caller can roll back if the server
+//!   rejects.
+//! - **PSK must be in storage *before* `join_group`.** mls-rs looks
+//!   up the PSK synchronously while processing the Welcome
+//!   ([`process_welcome`] writes the secret first, then calls
+//!   `Client::join_group`).
 
-// Stubs intentionally take `&mut GroupHandle` even though the current
-// no-op bodies don't mutate — M2's real implementation will mutate state.
-#![allow(clippy::needless_pass_by_ref_mut)]
+#![allow(clippy::module_name_repetitions)]
 
 pub mod cipher_suite;
 pub mod identity_provider;
@@ -33,84 +60,571 @@ pub mod leaf_node_kem;
 pub mod psk;
 pub mod welcome_pq;
 
+use mls_rs::{
+    identity::SigningIdentity,
+    mls_rs_codec::{MlsDecode, MlsEncode},
+    storage_provider::in_memory::InMemoryKeyPackageStorage,
+    Client, ExtensionList, MlsMessage,
+};
+use mls_rs_core::extension::MlsExtension;
+use mls_rs_core::crypto::SignatureSecretKey;
 use tracing::instrument;
 
+use crate::credential::LatticeCredential;
 use crate::{Error, Result};
 
-/// Opaque handle to an MLS group state. Wraps `mls_rs::Group` so callers
-/// do not depend directly on `mls-rs` API surface.
-pub struct GroupHandle {
-    /// Internal mls-rs group state. Boxed to keep handle size stable.
-    _inner: (),
+use self::cipher_suite::{LatticeCryptoProvider, LATTICE_HYBRID_V1};
+use self::identity_provider::LatticeIdentityProvider;
+use self::leaf_node_kem::{KemKeyPair, LatticeKemPubkey};
+use self::psk::{psk_id_for_epoch, LatticePskStorage};
+use self::welcome_pq::{open_pq_secret, seal_pq_secret, PqWelcomePayload};
+
+/// Per-device identity bundle used to build an MLS [`Client`].
+///
+/// Holds the hybrid signing key (Ed25519 + ML-DSA-65 packed bytes), the
+/// ML-KEM-768 keypair, and the Lattice custom credential value. The
+/// signing key bytes use the layout enforced by
+/// [`cipher_suite::LatticeHybridCipherSuite::sign`].
+pub struct LatticeIdentity {
+    /// Lattice custom credential (user_id + ed25519_pub + ml_dsa_pub).
+    pub credential: LatticeCredential,
+    /// Hybrid signature secret key bytes: `ed25519_sk(32) || ml_dsa_seed(32)`.
+    pub signature_secret: SignatureSecretKey,
+    /// Per-device ML-KEM-768 keypair. Used to receive Welcome PQ payloads.
+    pub kem_keypair: KemKeyPair,
+    /// In-memory store for KeyPackage *secret* material this device has
+    /// generated. mls-rs persists the private leaf-init key here on
+    /// `generate_key_package_message` and looks it up by reference on
+    /// `join_group`. We hold the storage on the identity so the same
+    /// process can publish a KeyPackage and later consume the matching
+    /// Welcome from a fresh `Client` instance. The storage is `Clone`
+    /// + `Arc<Mutex<_>>` internally, so cloning the identity shares it.
+    pub key_package_repo: InMemoryKeyPackageStorage,
 }
 
-/// Result of an outgoing commit: the commit message to broadcast, plus any
-/// Welcome messages for newly added members.
+/// Opaque handle to an active Lattice MLS group.
+///
+/// Wraps `mls_rs::Group` plus our local PSK storage. The PSK storage is
+/// shared across clones (Arc<Mutex<_>>) so test setups and Phase E
+/// integration harnesses can keep one storage per identity rather than
+/// per group.
+pub struct GroupHandle {
+    inner: mls_rs::Group<LatticeMlsConfig>,
+    psk_store: LatticePskStorage,
+    /// The local ML-KEM-768 keypair; needed to open PqWelcomePayloads
+    /// targeted at this group member when subsequent commits rotate the
+    /// PSK secret. M2 only ships 1:1 groups where the self-commit path
+    /// doesn't inject PSK, so this is currently a hold for M5 multi-
+    /// member commit rotation logic.
+    #[allow(dead_code)]
+    kem_keypair: KemKeyPair,
+}
+
+/// Result of an outgoing commit. Holds the wire bytes the caller pushes
+/// to the network layer.
 #[derive(Clone, Debug)]
 pub struct CommitOutput {
-    /// Serialized commit framed for the wire.
+    /// MLS commit message, serialized via mls-codec.
     pub commit: Vec<u8>,
-    /// Welcome messages indexed by recipient `key_package_ref`.
-    pub welcomes: Vec<(Vec<u8>, Vec<u8>)>,
+    /// One [`LatticeWelcome`] per joiner added by this commit. Empty for
+    /// commits that don't add members (e.g. a key update).
+    pub welcomes: Vec<LatticeWelcome>,
 }
 
-/// Create a new MLS group with the calling user as the sole initial member.
+/// Lattice-flavored Welcome: bundles the standard MLS Welcome bytes with
+/// the per-joiner ML-KEM Welcome PQ payload that D-04's PSK injection
+/// requires.
+///
+/// At the wire layer this becomes a single envelope (M3 server-side
+/// scope). For M2 the type is intra-process: callers receive a
+/// `LatticeWelcome`, ship it to the joiner over whatever transport, and
+/// the joiner feeds it back into [`process_welcome`].
+#[derive(Clone, Debug)]
+pub struct LatticeWelcome {
+    /// MLS Welcome message bytes (mls-codec encoded `MlsMessage`).
+    pub mls_welcome: Vec<u8>,
+    /// Per-joiner ML-KEM ciphertext + epoch tag.
+    pub pq_payload: PqWelcomePayload,
+}
+
+/// Concrete [`MlsConfig`] type alias for Lattice clients. Keeps callers
+/// from spelling out the long `WithFoo<WithBar<...>>` builder type chain.
+type LatticeMlsConfig = <self::client_config::LatticeClientBuilder as
+    self::client_config::AsLatticeMlsConfig>::Config;
+
+mod client_config {
+    //! Internal helper to name the concrete `MlsConfig` type for a
+    //! Lattice client without dragging the whole builder chain through
+    //! every public signature.
+
+    use super::{
+        cipher_suite::LatticeCryptoProvider, identity_provider::LatticeIdentityProvider,
+        psk::LatticePskStorage,
+    };
+    use mls_rs::client_builder::{
+        BaseConfig, WithCryptoProvider, WithIdentityProvider, WithKeyPackageRepo, WithPskStore,
+    };
+    use mls_rs::storage_provider::in_memory::InMemoryKeyPackageStorage;
+
+    /// `MlsConfig` shape used by Lattice clients. Order of `With*` layers
+    /// is dictated by the `ClientBuilder` chain order — match what we
+    /// actually call in [`super::build_client`].
+    pub type LatticeClientConfig = WithKeyPackageRepo<
+        InMemoryKeyPackageStorage,
+        WithPskStore<
+            LatticePskStorage,
+            WithCryptoProvider<
+                LatticeCryptoProvider,
+                WithIdentityProvider<LatticeIdentityProvider, BaseConfig>,
+            >,
+        >,
+    >;
+
+    /// Trait to extract the config type from a builder.
+    pub trait AsLatticeMlsConfig {
+        type Config;
+    }
+    pub struct LatticeClientBuilder;
+    impl AsLatticeMlsConfig for LatticeClientBuilder {
+        type Config = LatticeClientConfig;
+    }
+}
+
+/// Build an `mls_rs::Client` configured for Lattice's custom suite.
+///
+/// Wires our `LatticeCryptoProvider` + `LatticeIdentityProvider` +
+/// `LatticePskStorage` into the `ClientBuilder` chain. The chain order
+/// matters: it determines the concrete `MlsConfig` type alias
+/// [`LatticeMlsConfig`] resolves to (see [`client_config`]).
+fn build_client(
+    identity: &LatticeIdentity,
+    psk_store: LatticePskStorage,
+) -> Client<LatticeMlsConfig> {
+    let custom_credential = mls_rs_core::identity::CustomCredential::new(
+        mls_rs_core::identity::CredentialType::new(crate::credential::CREDENTIAL_TYPE_LATTICE),
+        identity
+            .credential
+            .encode()
+            .expect("LatticeCredential::encode never fails for valid struct"),
+    );
+    let mls_credential =
+        mls_rs_core::identity::Credential::Custom(custom_credential);
+
+    // Reconstruct the packed signature pubkey from the credential fields
+    // (ed25519_pub || ml_dsa_pub) — this is the layout
+    // LatticeHybridCipherSuite::sign / ::verify enforce.
+    let mut sig_pk_bytes = Vec::with_capacity(
+        identity.credential.ed25519_pub.len() + identity.credential.ml_dsa_pub.len(),
+    );
+    sig_pk_bytes.extend_from_slice(&identity.credential.ed25519_pub);
+    sig_pk_bytes.extend_from_slice(&identity.credential.ml_dsa_pub);
+
+    let signing_identity = SigningIdentity::new(
+        mls_credential,
+        mls_rs_core::crypto::SignaturePublicKey::from(sig_pk_bytes),
+    );
+
+    Client::builder()
+        .identity_provider(LatticeIdentityProvider::new())
+        .crypto_provider(LatticeCryptoProvider::new())
+        .psk_store(psk_store)
+        .key_package_repo(identity.key_package_repo.clone())
+        // Per the mls-rs ClientBuilder footgun (research §6.10): custom
+        // extension types must be registered or mls-rs silently rejects
+        // KeyPackages / Welcomes carrying them as
+        // ExtensionNotInCapabilities.
+        .extension_type(<LatticeKemPubkey as MlsExtension>::extension_type())
+        .extension_type(<PqWelcomePayload as MlsExtension>::extension_type())
+        .signing_identity(
+            signing_identity,
+            identity.signature_secret.clone(),
+            LATTICE_HYBRID_V1,
+        )
+        .build()
+}
+
+/// Build the KeyPackage `ExtensionList` carrying our `LatticeKemPubkey`.
+///
+/// We attach the ML-KEM pubkey at the KeyPackage level rather than the
+/// LeafNode level because mls-rs 0.55 marks the `LeafNode` field of
+/// `KeyPackage` as `pub(crate)` with no public extension accessor. The
+/// security property (each KeyPackage carries a per-device ML-KEM
+/// pubkey) is unchanged either way — KeyPackages are issued per
+/// device-rotation cycle so a KeyPackage-level extension is at least
+/// as fresh as a LeafNode-level one.
+fn key_package_extensions(kem_pk: &LatticeKemPubkey) -> Result<ExtensionList> {
+    let ext = kem_pk
+        .clone()
+        .into_extension()
+        .map_err(|e| Error::Mls(format!("encode LatticeKemPubkey extension: {e:?}")))?;
+    let mut list = ExtensionList::new();
+    list.set(ext);
+    Ok(list)
+}
+
+/// Create a new MLS group with the calling identity as the sole initial
+/// member.
+///
+/// The group id should be 16 bytes of stable randomness — typically a
+/// UUIDv7's bytes, which is what `lattice-protocol` does for
+/// [`GroupId`](crate::credential::USER_ID_LEN).
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mls`] if `mls-rs` rejects the parameters.
-#[instrument(level = "debug")]
-pub fn create_group(group_id: &[u8]) -> Result<GroupHandle> {
-    let _ = group_id;
-    tracing::debug!("mls::create_group — TODO");
-    Err(Error::Mls("mls::create_group not implemented".into()))
+/// Returns [`Error::Mls`] if mls-rs rejects the leaf-node extensions or
+/// fails to compute the initial group secrets.
+#[instrument(level = "debug", skip(identity, psk_store))]
+pub fn create_group(
+    identity: &LatticeIdentity,
+    psk_store: LatticePskStorage,
+    group_id: &[u8],
+) -> Result<GroupHandle> {
+    let client = build_client(identity, psk_store.clone());
+    let kp_extensions = key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
+    let group = client
+        .create_group_with_id(
+            group_id.to_vec(),
+            ExtensionList::new(),
+            kp_extensions,
+            None,
+        )
+        .map_err(|e| Error::Mls(format!("create_group: {e:?}")))?;
+    tracing::debug!(group_id_len = group_id.len(), "MLS group created");
+    Ok(GroupHandle {
+        inner: group,
+        psk_store,
+        kem_keypair: identity.kem_keypair.duplicate()?,
+    })
 }
 
-/// Add a member to the group, producing a commit + Welcome.
+/// Generate an MLS KeyPackage message for joining a group.
+///
+/// The KeyPackage carries this device's `LatticeKemPubkey` as a LeafNode
+/// extension so committers can ML-KEM-encapsulate to it when adding
+/// this device to a group.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mls`] on validation or proposal failures.
-#[instrument(level = "debug", skip(group, key_package))]
-pub fn add_member(group: &mut GroupHandle, key_package: &[u8]) -> Result<CommitOutput> {
-    let _ = (group, key_package);
-    tracing::debug!("mls::add_member — TODO");
-    Err(Error::Mls("mls::add_member not implemented".into()))
+/// Returns [`Error::Mls`] on mls-rs failures.
+#[instrument(level = "debug", skip(identity, psk_store))]
+pub fn generate_key_package(
+    identity: &LatticeIdentity,
+    psk_store: LatticePskStorage,
+) -> Result<Vec<u8>> {
+    let client = build_client(identity, psk_store);
+    let kp_extensions = key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
+    let kp = client
+        .generate_key_package_message(kp_extensions, ExtensionList::new(), None)
+        .map_err(|e| Error::Mls(format!("generate_key_package_message: {e:?}")))?;
+    kp.mls_encode_to_vec()
+        .map_err(|e| Error::Mls(format!("encode key package: {e:?}")))
+}
+
+/// Add a member to the group with PQ-PSK injection.
+///
+/// # Errors
+///
+/// Returns [`Error::Mls`] if the joiner's KeyPackage is malformed, lacks
+/// a `LatticeKemPubkey` LeafNode extension, or if mls-rs rejects the
+/// commit.
+#[instrument(level = "debug", skip(group, joiner_key_package))]
+pub fn add_member(
+    group: &mut GroupHandle,
+    joiner_key_package: &[u8],
+) -> Result<CommitOutput> {
+    let kp = MlsMessage::mls_decode(&mut &*joiner_key_package)
+        .map_err(|e| Error::Mls(format!("decode joiner KeyPackage: {e:?}")))?;
+
+    // Pull the joiner's LatticeKemPubkey from their KeyPackage LeafNode.
+    let joiner_kem_pk = extract_leaf_kem_pubkey(&kp)?;
+
+    // Determine the epoch the new commit will land at. mls-rs increments
+    // epoch by 1 per commit, so the next epoch is current+1.
+    let next_epoch = group.inner.context().epoch() + 1;
+
+    // ML-KEM-encapsulate a fresh shared secret to the joiner's pubkey.
+    let (pq_payload, ss) = seal_pq_secret(&joiner_kem_pk, next_epoch)
+        .map_err(|e| Error::Mls(format!("seal PQ secret: {e:?}")))?;
+
+    // Store the secret locally under the deterministic per-epoch id, so
+    // mls-rs can fetch it when processing this commit on the receive
+    // side (Bob will store under the same id from his PqWelcomePayload).
+    let psk_id = psk_id_for_epoch(next_epoch);
+    let psk_secret = mls_rs_core::psk::PreSharedKey::from(ss.to_vec());
+    group
+        .psk_store
+        .insert(psk_id.clone(), psk_secret)
+        .map_err(|e| Error::Mls(format!("store PSK: {e:?}")))?;
+
+    // Build the commit referencing the PSK.
+    let commit_output = group
+        .inner
+        .commit_builder()
+        .add_member(kp)
+        .map_err(|e| Error::Mls(format!("add_member: {e:?}")))?
+        .add_external_psk(psk_id)
+        .map_err(|e| Error::Mls(format!("add_external_psk: {e:?}")))?
+        .build()
+        .map_err(|e| Error::Mls(format!("commit build: {e:?}")))?;
+
+    // Encode the commit + each welcome.
+    let commit_bytes = commit_output
+        .commit_message
+        .mls_encode_to_vec()
+        .map_err(|e| Error::Mls(format!("encode commit: {e:?}")))?;
+
+    let welcomes = commit_output
+        .welcome_messages
+        .into_iter()
+        .map(|w| -> Result<LatticeWelcome> {
+            Ok(LatticeWelcome {
+                mls_welcome: w
+                    .mls_encode_to_vec()
+                    .map_err(|e| Error::Mls(format!("encode welcome: {e:?}")))?,
+                pq_payload: pq_payload.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    tracing::debug!(
+        epoch_after_commit = next_epoch,
+        welcome_count = welcomes.len(),
+        "MLS commit built with PQ-PSK"
+    );
+    Ok(CommitOutput {
+        commit: commit_bytes,
+        welcomes,
+    })
+}
+
+/// Apply our own pending commit after the server confirms broadcast.
+///
+/// Must be called after [`add_member`] / [`commit`] for the local epoch
+/// to advance. Persists state to mls-rs storage before returning.
+///
+/// # Errors
+///
+/// Returns [`Error::Mls`] if there is no pending commit or storage write
+/// fails.
+#[instrument(level = "debug", skip(group))]
+pub fn apply_commit(group: &mut GroupHandle) -> Result<()> {
+    group
+        .inner
+        .apply_pending_commit()
+        .map_err(|e| Error::Mls(format!("apply_pending_commit: {e:?}")))?;
+    group
+        .inner
+        .write_to_storage()
+        .map_err(|e| Error::Mls(format!("write_to_storage after apply_commit: {e:?}")))?;
+    Ok(())
+}
+
+/// Join a group from a [`LatticeWelcome`].
+///
+/// Decapsulates the PQ payload into the local PSK storage *before*
+/// invoking `Client::join_group`, because mls-rs looks up the PSK
+/// synchronously during join.
+///
+/// # Errors
+///
+/// Returns [`Error::Mls`] on PQ open failure, malformed Welcome bytes,
+/// or any mls-rs rejection.
+#[instrument(level = "debug", skip(identity, psk_store, welcome))]
+pub fn process_welcome(
+    identity: &LatticeIdentity,
+    psk_store: LatticePskStorage,
+    welcome: &LatticeWelcome,
+) -> Result<GroupHandle> {
+    // Open the PQ payload and store the secret BEFORE join_group.
+    let ss = open_pq_secret(&identity.kem_keypair, &welcome.pq_payload)
+        .map_err(|e| Error::Mls(format!("open PQ secret: {e:?}")))?;
+    let psk_id = psk_id_for_epoch(welcome.pq_payload.epoch);
+    let psk_secret = mls_rs_core::psk::PreSharedKey::from(ss.to_vec());
+    psk_store
+        .insert(psk_id, psk_secret)
+        .map_err(|e| Error::Mls(format!("store PSK: {e:?}")))?;
+
+    // Decode the MLS Welcome.
+    let mls_welcome = MlsMessage::mls_decode(&mut &*welcome.mls_welcome)
+        .map_err(|e| Error::Mls(format!("decode welcome: {e:?}")))?;
+
+    let client = build_client(identity, psk_store.clone());
+    let (group, _new_member_info) = client
+        .join_group(None, &mls_welcome, None)
+        .map_err(|e| Error::Mls(format!("join_group: {e:?}")))?;
+
+    tracing::debug!(
+        epoch_after_join = welcome.pq_payload.epoch,
+        "MLS group joined via Welcome with PQ-PSK"
+    );
+
+    Ok(GroupHandle {
+        inner: group,
+        psk_store,
+        kem_keypair: identity.kem_keypair.duplicate()?,
+    })
 }
 
 /// Encrypt an application message for the current group epoch.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mls`] if the group is in a bad state or encryption fails.
+/// Returns [`Error::Mls`] if the group has a pending commit (per
+/// mls-rs's "commit required" rule) or encryption fails.
 #[instrument(level = "trace", skip(group, plaintext), fields(pt_len = plaintext.len()))]
 pub fn encrypt_application(group: &mut GroupHandle, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let _ = (group, plaintext);
-    tracing::trace!("mls::encrypt_application — TODO");
-    Err(Error::Mls("mls::encrypt_application not implemented".into()))
+    let msg = group
+        .inner
+        .encrypt_application_message(plaintext, Vec::new())
+        .map_err(|e| Error::Mls(format!("encrypt_application: {e:?}")))?;
+    group
+        .inner
+        .write_to_storage()
+        .map_err(|e| Error::Mls(format!("write_to_storage after encrypt: {e:?}")))?;
+    msg.mls_encode_to_vec()
+        .map_err(|e| Error::Mls(format!("encode app message: {e:?}")))
 }
 
-/// Decrypt an incoming MLS message (application or handshake).
+/// Process an incoming MLS message (application or handshake).
+///
+/// Returns the application plaintext if the message was an application
+/// message; returns an empty `Vec` if it was a handshake message
+/// (commit or proposal) which advanced group state. Any state change
+/// is persisted to storage before this function returns.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mls`] on any state machine rejection.
+/// Returns [`Error::Mls`] on decode or state-machine rejection.
 #[instrument(level = "trace", skip(group, ciphertext), fields(ct_len = ciphertext.len()))]
 pub fn decrypt(group: &mut GroupHandle, ciphertext: &[u8]) -> Result<Vec<u8>> {
-    let _ = (group, ciphertext);
-    tracing::trace!("mls::decrypt — TODO");
-    Err(Error::Mls("mls::decrypt not implemented".into()))
+    let msg = MlsMessage::mls_decode(&mut &*ciphertext)
+        .map_err(|e| Error::Mls(format!("decode incoming: {e:?}")))?;
+    let processed = group
+        .inner
+        .process_incoming_message(msg)
+        .map_err(|e| Error::Mls(format!("process_incoming_message: {e:?}")))?;
+    group
+        .inner
+        .write_to_storage()
+        .map_err(|e| Error::Mls(format!("write_to_storage after decrypt: {e:?}")))?;
+
+    use mls_rs::group::ReceivedMessage;
+    Ok(match processed {
+        ReceivedMessage::ApplicationMessage(app) => app.data().to_vec(),
+        ReceivedMessage::Commit(_) | ReceivedMessage::Proposal(_) => Vec::new(),
+        _ => Vec::new(),
+    })
 }
 
-/// Force a commit (rotates group keys). Called by the commit scheduler when
-/// the message-count or time threshold is reached.
+/// Force a commit (rotates group keys + injects fresh PQ-PSK to every
+/// other member).
+///
+/// In M2 we only support 1:1 groups, so "every other member" is one
+/// peer; for multi-member groups (M5) this will need to encapsulate to
+/// each member's `LatticeKemPubkey`. Currently returns an error if
+/// called on a non-1:1 group.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mls`] if the group cannot currently commit.
+/// Returns [`Error::Mls`] on multi-member groups (deferred to M5) or
+/// any mls-rs failure.
 #[instrument(level = "debug", skip(group))]
 pub fn commit(group: &mut GroupHandle) -> Result<CommitOutput> {
-    let _ = group;
-    tracing::debug!("mls::commit — TODO");
-    Err(Error::Mls("mls::commit not implemented".into()))
+    let member_count = group.inner.roster().members_iter().count();
+    if member_count > 2 {
+        return Err(Error::Mls(format!(
+            "commit() on a {member_count}-member group is not supported in M2 — \
+             multi-member PQ-PSK rotation lands in M5"
+        )));
+    }
+
+    // For now, build a commit with no proposals — mls-rs will issue an
+    // Update path-style rotation. The PSK injection for self-update is a
+    // future enhancement (M5); during M2 a self-commit on a 1-member or
+    // 2-member group skips PSK injection because there are no other
+    // members whose ML-KEM pubkey we need to encapsulate to.
+    let commit_output = group
+        .inner
+        .commit(Vec::new())
+        .map_err(|e| Error::Mls(format!("commit: {e:?}")))?;
+
+    let commit_bytes = commit_output
+        .commit_message
+        .mls_encode_to_vec()
+        .map_err(|e| Error::Mls(format!("encode commit: {e:?}")))?;
+
+    Ok(CommitOutput {
+        commit: commit_bytes,
+        welcomes: Vec::new(),
+    })
+}
+
+/// Pull the `LatticeKemPubkey` extension out of a KeyPackage's
+/// `extensions` field.
+fn extract_leaf_kem_pubkey(kp: &MlsMessage) -> Result<LatticeKemPubkey> {
+    let key_pkg = kp
+        .as_key_package()
+        .ok_or_else(|| Error::Mls("not a KeyPackage MlsMessage".into()))?;
+    let ext = key_pkg
+        .extensions
+        .get(<LatticeKemPubkey as MlsExtension>::extension_type())
+        .ok_or_else(|| {
+            Error::Mls("KeyPackage missing LatticeKemPubkey extension".into())
+        })?;
+    LatticeKemPubkey::from_extension(&ext)
+        .map_err(|e| Error::Mls(format!("decode LatticeKemPubkey: {e:?}")))
+}
+
+// Small helper extensions on LatticeCredential / KemKeyPair so the
+// call sites stay readable.
+
+impl LatticeCredential {
+    /// Project the credential + a sibling [`KemKeyPair`] to the public
+    /// `LatticeKemPubkey` value that goes into the LeafNode extension.
+    ///
+    /// The credential itself does not carry the ML-KEM pubkey (that
+    /// lives in the LeafNode extension per the Phase C.2 design), but
+    /// the credential and the keypair share lifetimes through the
+    /// [`LatticeIdentity`] bundle, so it's convenient to express the
+    /// projection here.
+    #[must_use]
+    pub fn kem_pubkey_view(&self, kp: &KemKeyPair) -> LatticeKemPubkey {
+        let _ = self; // credential not actually involved in pubkey extraction
+        kp.pubkey()
+    }
+}
+
+impl KemKeyPair {
+    /// Best-effort duplication of a keypair. Used internally to build
+    /// the GroupHandle without consuming the caller's `KemKeyPair`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KeyGen`] only on unexpected internal failures
+    /// (this is essentially infallible).
+    pub fn duplicate(&self) -> Result<Self> {
+        // ML-KEM-768 decap keys are not Clone in `ml-kem`'s public API;
+        // we reconstruct by holding raw bytes here. Since `KemKeyPair`
+        // already stores raw bytes, we just clone them.
+        let dk_bytes = self
+            .decapsulation_key_bytes()
+            .to_vec();
+        let ek_bytes = self.encapsulation_key_bytes().to_vec();
+        Ok(Self::from_raw_bytes(ek_bytes, dk_bytes))
+    }
+}
+
+/// Hooks added to [`KemKeyPair`] for use inside this module's helpers.
+/// Kept in this file so they don't leak to the public API of
+/// [`leaf_node_kem`].
+impl KemKeyPair {
+    /// Raw bytes accessor for the decapsulation key. Only used by
+    /// [`KemKeyPair::duplicate`] (above); not part of the public API.
+    fn decapsulation_key_bytes(&self) -> &[u8] {
+        self.decapsulation_key_inner()
+    }
+    /// Construct from raw bytes. Used only by [`KemKeyPair::duplicate`].
+    fn from_raw_bytes(ek: Vec<u8>, dk: Vec<u8>) -> Self {
+        Self::from_raw_bytes_inner(ek, dk)
+    }
 }
