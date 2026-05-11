@@ -130,6 +130,12 @@ enum Cmd {
         /// Plaintext message.
         #[arg(long)]
         message: String,
+        /// Peer home server URLs to federation-push the message to,
+        /// one per remote member. The server will sign the push and
+        /// POST it to each URL's `/federation/message_inbox`. Empty
+        /// means no federation (local-only groups).
+        #[arg(long = "peer-server")]
+        peer_servers: Vec<String>,
         /// Override the default `<home>` directory.
         #[arg(long, env = "LATTICE_HOME_DIR")]
         home: Option<PathBuf>,
@@ -486,8 +492,9 @@ async fn main() -> Result<()> {
             server,
             group_id,
             message,
+            peer_servers,
             home,
-        } => cli_send(server, group_id, message, home).await?,
+        } => cli_send(server, group_id, message, peer_servers, home).await?,
         Cmd::Recv {
             server,
             group_id,
@@ -709,6 +716,7 @@ async fn cli_send(
     server: String,
     group_id: String,
     message: String,
+    peer_servers: Vec<String>,
     home: Option<PathBuf>,
 ) -> Result<()> {
     let home = resolve_home(home)?;
@@ -720,9 +728,22 @@ async fn cli_send(
     let ct = client::cli_encrypt(&mls_client, &gid, message.as_bytes())?;
     let http = reqwest::Client::builder().user_agent("lattice-cli/0.1").build()?;
     let gid_b64 = B64.encode(gid);
+    let mut body = serde_json::json!({
+        "envelope_b64": B64.encode(&ct),
+        "origin_host": "cli.local",
+        "origin_base_url": server,
+    });
+    if !peer_servers.is_empty() {
+        body["remote_routing"] = serde_json::Value::Array(
+            peer_servers
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+    }
     let resp: serde_json::Value = http
         .post(format!("{server}/group/{gid_b64}/messages"))
-        .json(&serde_json::json!({ "envelope_b64": B64.encode(&ct) }))
+        .json(&body)
         .send()
         .await
         .context("send POST")?

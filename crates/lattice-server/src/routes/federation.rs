@@ -229,8 +229,173 @@ async fn inbox_handler(
     Ok(Json(FederationInboxResponse { accepted: true }))
 }
 
+/// `POST /federation/message_inbox` body. Peer-server forwards an
+/// application-message envelope addressed to a group whose members
+/// we host.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FederationMessageInboxRequest {
+    /// Origin host (the sending peer server's hostname).
+    pub origin_host: String,
+    /// Origin host's base URL.
+    pub origin_base_url: String,
+    /// Origin host's federation pubkey, base64 32-byte.
+    pub origin_pubkey_b64: String,
+    /// Base64 16-byte group_id.
+    pub group_id_b64: String,
+    /// Base64 envelope bytes.
+    pub envelope_b64: String,
+    /// Base64 Ed25519 signature over the canonical TBS.
+    pub signature_b64: String,
+}
+
+fn canonical_message_inbox_bytes(req: &FederationMessageInboxRequest) -> Vec<u8> {
+    use prost::Message;
+    #[derive(Message)]
+    struct Tbs {
+        #[prost(string, tag = "1")]
+        origin_host: String,
+        #[prost(string, tag = "2")]
+        origin_base_url: String,
+        #[prost(bytes = "vec", tag = "3")]
+        group_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "4")]
+        envelope: Vec<u8>,
+    }
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tbs = Tbs {
+        origin_host: req.origin_host.clone(),
+        origin_base_url: req.origin_base_url.clone(),
+        group_id: b64.decode(&req.group_id_b64).unwrap_or_default(),
+        envelope: b64.decode(&req.envelope_b64).unwrap_or_default(),
+    };
+    tbs.encode_to_vec()
+}
+
+async fn message_inbox_handler(
+    State(state): State<ServerState>,
+    Json(body): Json<FederationMessageInboxRequest>,
+) -> Result<Json<FederationInboxResponse>, (StatusCode, String)> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let pk_bytes_vec = b64
+        .decode(&body.origin_pubkey_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("origin_pubkey_b64: {e}")))?;
+    let pk_bytes: [u8; 32] = pk_bytes_vec.as_slice().try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("origin_pubkey length {} (expected 32)", pk_bytes_vec.len()),
+        )
+    })?;
+    let pubkey = VerifyingKey::from_bytes(&pk_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("origin_pubkey: {e}"),
+        )
+    })?;
+    let sig_bytes_vec = b64
+        .decode(&body.signature_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("signature_b64: {e}")))?;
+    let sig_bytes: [u8; 64] = sig_bytes_vec.as_slice().try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("signature length {} (expected 64)", sig_bytes_vec.len()),
+        )
+    })?;
+    let sig = Signature::from_bytes(&sig_bytes);
+
+    let tbs = canonical_message_inbox_bytes(&body);
+    pubkey
+        .verify(&tbs, &sig)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "signature failed".into()))?;
+
+    if let Some(cached) = peer_by_host(&state, &body.origin_host).await {
+        if cached.federation_pubkey != pk_bytes {
+            return Err((StatusCode::FORBIDDEN, "peer pubkey mismatch".into()));
+        }
+    } else {
+        upsert_peer(
+            &state,
+            FederationPeer {
+                host: body.origin_host.clone(),
+                base_url: body.origin_base_url.clone(),
+                federation_pubkey: pk_bytes,
+            },
+        )
+        .await;
+    }
+
+    let gid_vec = b64
+        .decode(&body.group_id_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("group_id_b64: {e}")))?;
+    let group_id: [u8; 16] = gid_vec.as_slice().try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("group_id length {} (expected 16)", gid_vec.len()),
+        )
+    })?;
+    let envelope = b64
+        .decode(&body.envelope_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("envelope_b64: {e}")))?;
+    crate::state::append_message(&state, group_id, envelope).await;
+    tracing::info!(
+        origin = %body.origin_host,
+        group_prefix = ?&group_id[..4],
+        "federation message push accepted"
+    );
+    Ok(Json(FederationInboxResponse { accepted: true }))
+}
+
 pub fn router() -> Router<ServerState> {
-    Router::new().route("/federation/inbox", post(inbox_handler))
+    Router::new()
+        .route("/federation/inbox", post(inbox_handler))
+        .route("/federation/message_inbox", post(message_inbox_handler))
+}
+
+/// Outbound message-federation push. Called from
+/// `POST /group/:gid/messages` when the body lists `remote_routing`.
+pub async fn push_message_to_peers(
+    state: &ServerState,
+    gid: [u8; 16],
+    envelope: &[u8],
+    peer_base_urls: &[String],
+    origin_host: &str,
+    origin_base_url: &str,
+) {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut req = FederationMessageInboxRequest {
+        origin_host: origin_host.to_string(),
+        origin_base_url: origin_base_url.to_string(),
+        origin_pubkey_b64: state.federation_pubkey_b64.clone(),
+        group_id_b64: b64.encode(gid),
+        envelope_b64: b64.encode(envelope),
+        signature_b64: String::new(),
+    };
+    let tbs = canonical_message_inbox_bytes(&req);
+    use ed25519_dalek::Signer;
+    let sig = state.federation_sk.sign(&tbs);
+    req.signature_b64 = b64.encode(sig.to_bytes());
+
+    for url in peer_base_urls {
+        let target = url.clone();
+        let client = state.federation_http.clone();
+        let body = req.clone();
+        let endpoint = format!(
+            "{}/federation/message_inbox",
+            target.trim_end_matches('/')
+        );
+        tokio::spawn(async move {
+            match client.post(&endpoint).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(target = %target, "federation message push delivered");
+                }
+                Ok(resp) => {
+                    tracing::warn!(target = %target, status = resp.status().as_u16(), "federation message push rejected");
+                }
+                Err(e) => {
+                    tracing::warn!(target = %target, error = %e, "federation message push failed");
+                }
+            }
+        });
+    }
 }
 
 /// Exposed for tests that want to compute the same canonical bytes the

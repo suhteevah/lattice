@@ -211,6 +211,20 @@ async fn welcome_handler(
 pub struct PublishMessageRequest {
     /// Base64 sealed envelope or raw MLS application message bytes.
     pub envelope_b64: String,
+    /// Federation routing: each entry is the base URL of a peer
+    /// server hosting one of this group's members. The server will
+    /// federate-push the message to each peer's
+    /// `/federation/message_inbox` so recipients can fetch from
+    /// their own home server.
+    #[serde(default)]
+    pub remote_routing: Vec<String>,
+    /// Submitter's claimed origin host (signed into the federation
+    /// push). Defaults to empty.
+    #[serde(default)]
+    pub origin_host: Option<String>,
+    /// Submitter's claimed origin base URL.
+    #[serde(default)]
+    pub origin_base_url: Option<String>,
 }
 
 /// `POST /group/:gid/messages` response.
@@ -227,7 +241,21 @@ async fn publish_message_handler(
 ) -> Result<Json<PublishMessageResponse>, (StatusCode, String)> {
     let gid: [u8; 16] = decode_b64(&gid_b64)?;
     let envelope = decode_b64_vec(&body.envelope_b64)?;
-    let seq = append_message(&state, gid, envelope).await;
+    let seq = append_message(&state, gid, envelope.clone()).await;
+
+    if !body.remote_routing.is_empty() {
+        let origin_host = body.origin_host.clone().unwrap_or_default();
+        let origin_base_url = body.origin_base_url.clone().unwrap_or_default();
+        crate::routes::federation::push_message_to_peers(
+            &state,
+            gid,
+            &envelope,
+            &body.remote_routing,
+            &origin_host,
+            &origin_base_url,
+        )
+        .await;
+    }
     Ok(Json(PublishMessageResponse { seq }))
 }
 

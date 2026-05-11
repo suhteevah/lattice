@@ -127,15 +127,17 @@ try {
         ('accept --server http://127.0.0.1:{0} --group-id "{1}" --home "{2}"' `
             -f $PortB, $GroupId, $BobDir) | Out-Null
 
-    Write-Host "==> Alice sends a message via Server A" -ForegroundColor Magenta
+    Write-Host "==> Alice sends a message via Server A (fed-push to Server B)" -ForegroundColor Magenta
     Invoke-Cli "alice send" `
-        ('send --server http://127.0.0.1:{0} --group-id "{1}" --message "{2}" --home "{3}"' `
-            -f $PortA, $GroupId, ($Message -replace '"', '\"'), $AliceDir) | Out-Null
+        ('send --server http://127.0.0.1:{0} --group-id "{1}" --message "{2}" --peer-server http://127.0.0.1:{3} --home "{4}"' `
+            -f $PortA, $GroupId, ($Message -replace '"', '\"'), $PortB, $AliceDir) | Out-Null
 
-    Write-Host "==> Bob receives" -ForegroundColor Magenta
+    Start-Sleep -Milliseconds 500  # let federation push land at B
+
+    Write-Host "==> Bob receives from his own home server (B)" -ForegroundColor Magenta
     $recovered = (Invoke-Cli "bob recv" `
         ('recv --server http://127.0.0.1:{0} --group-id "{1}" --timeout 5 --home "{2}"' `
-            -f $PortA, $GroupId, $BobDir)).Trim()
+            -f $PortB, $GroupId, $BobDir)).Trim()
     Write-Host "recovered = $recovered" -ForegroundColor Yellow
 
     if ($recovered -eq $Message) {
