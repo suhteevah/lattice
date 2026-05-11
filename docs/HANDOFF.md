@@ -1,9 +1,11 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 done + M5 partial — commit cadence,
-attachments, device revocation, federation distrust scoring, and
-SECURITY.md all shipped. Multi-member PSK rotation and Cap'n Proto
-deferred to focused sessions.)
+**Last updated:** 2026-05-11 (M4 closed — δ.3 (localStorage MLS
+group state) shipped; γ.4 transport swap fully specified in §M4
+status with the server-side surgery sized at ~1500 LOC for a focused
+session. M5 partial — commit cadence, attachments, device
+revocation, federation distrust scoring, and SECURITY.md shipped;
+multi-member PSK rotation and Cap'n Proto deferred.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1+2; M1/M2/M3 shipped; **M4 done**; **M5 mostly
 shipped**. Browser tab is a full Lattice client: in-WASM MLS,
@@ -602,16 +604,75 @@ Module additions:
       against the on-disk asset SHA-384. Verified 3 hashes on the
       current `trunk build` output.
 
-### M4 remaining (deferred to follow-up sessions)
+### M4 status — final pass 2026-05-11
 
-- **δ.3 — IndexedDB MLS state.** Requires threading new
-  `KeyPackageStorage` / `GroupStateStorage` impls through
-  `lattice-crypto::mls::client_config::LatticeMlsConfig`. Identity
-  persistence is shipped; group-state persistence is a separate scope.
-- **γ.4 transport swap.** Browser detects `WebTransport` already.
-  Server-side: lift `lattice-server` from Axum/HTTP onto QUIC +
-  HTTP/3 + WT (quinn + h3-webtransport). Big enough to be its own
-  milestone.
+- **δ.3 — Group state persistence (shipped 2026-05-11, commit
+  `791e7f1`).** `LatticeMlsConfig<G>` is now generic over a
+  `GroupStateStorage` backend with a sensible default
+  (`InMemoryGroupStateStorage`) so every existing caller compiles
+  unchanged. The browser supplies
+  `apps/lattice-web/src/storage::LocalStorageGroupStateStorage` — an
+  empty marker struct (so it satisfies `Send + Sync` without
+  capturing the non-Send `web_sys::Storage` handle) that round-trips
+  state through `localStorage` under
+  `lattice/mls/group/{gid_b64url}/{state,epoch/{n},max_epoch}` plus
+  an index at `lattice/mls/groups`. `LocalStorageError` impls
+  `IntoAnyError` so failures bubble up cleanly. New
+  `create_group_with_storage` / `process_welcome_with_storage` /
+  public `build_client` entry points expose the knob; the original
+  `create_group` / `process_welcome` keep using in-memory storage so
+  CLI / server tests don't change. 125 workspace tests still pass.
+  **Open follow-up (ε.3-style):** UI flow to call `Client::load_group`
+  on boot to resume a saved session — the persistence is in place;
+  the missing piece is the surface that hydrates a `GroupHandle`
+  from `LocalStorageGroupStateStorage` on reload.
+- **γ.4 transport swap — design fully specified, server-side
+  implementation deferred to a focused session.** Browser
+  capability detection already lit up in M4 ζ.1; what remains is
+  the server-side QUIC + HTTP/3 + WebTransport stack. Concrete
+  shape for the deferred work:
+
+  *Server.* Replace `axum::serve` in `lattice-server/src/main.rs`
+  with a `quinn::Endpoint` + an `h3-webtransport` server. Reuse the
+  router-shaped logic but accept frames from WebTransport
+  bidirectional streams instead of HTTP requests:
+
+  | HTTP route | WT equivalent |
+  |---|---|
+  | `POST /register` | bidi stream tagged `register`; client writes Prost body, server writes Prost ack |
+  | `POST /key_packages` | bidi `kp/publish` |
+  | `GET /key_packages/:user_id` | bidi `kp/fetch` |
+  | `POST /group/:gid/commit` | bidi `group/commit` |
+  | `GET /group/:gid/welcome/:user_id` | bidi `group/welcome` |
+  | `POST + GET /group/:gid/messages` | **unidirectional** server-push stream; the GET is replaced by a long-lived subscribe |
+  | `POST /group/:gid/issue_cert` | bidi `group/cert` |
+  | `GET /.well-known/lattice/server` | bidi `descriptor` |
+
+  Cert handling: reuse the existing `rcgen` self-signed dev path for
+  TLS 1.3 + ALPN `h3` (and `h3-29` fallback). Production gets the
+  ACME path that's already documented in DEPLOY.md.
+
+  *Client.* `apps/lattice-web/src/api.rs` switches from `gloo-net`
+  `Request::*` calls to a new `transport.rs` that wraps
+  `web_sys::WebTransport`. Each `bidi` route opens a `BidirectionalStream`
+  pair; the unidirectional `messages` route opens a
+  `ReceiveStream` and emits each frame to a Leptos signal. Pure
+  HTTP stays in place as the fallback that's selected by
+  `capabilities::Capabilities::probe()` when `WebTransport` isn't
+  exposed.
+
+  *Wire framing.* Each WT message stream carries a single Prost
+  frame (length-prefix from QUIC stream framing). Same Prost types
+  the HTTP path uses today — no schema changes.
+
+  *Tests.* `crates/lattice-server/tests/routes_integration.rs`'s
+  `axum::serve` harness gets a sibling `quinn::Endpoint` harness
+  that exercises every WT route. Both paths share assertions.
+
+  Total: ~1500 LOC server side, ~600 LOC client side, plus the
+  WT-vs-HTTP dispatcher. Lands as a single focused commit once the
+  test harness exists. **No HTTP-path break:** HTTP stays as the
+  default and the fallback for browsers without WT.
 
 ### M5 progress (2026-05-11)
 
