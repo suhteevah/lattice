@@ -2276,6 +2276,7 @@ dependencies = [
  "lattice-protocol",
  "leptos",
  "mls-rs",
+ "mls-rs-codec",
  "mls-rs-core",
  "serde",
  "serde_json",

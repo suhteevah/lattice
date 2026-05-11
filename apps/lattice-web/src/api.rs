@@ -13,7 +13,10 @@ use base64::Engine;
 use gloo_net::http::Request;
 use lattice_crypto::mls::LatticeIdentity;
 use lattice_crypto::mls::psk::LatticePskStorage;
+use lattice_crypto::mls::welcome_pq::PqWelcomePayload;
+use lattice_crypto::mls::LatticeWelcome;
 use lattice_protocol::wire::{IdentityClaim, encode};
+use mls_rs_codec::{MlsDecode, MlsEncode};
 use serde::Deserialize;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -178,4 +181,257 @@ pub async fn fetch_key_package(
         .map_err(|e| format!("decode fetch_kp response: {e}"))?;
     B64.decode(&parsed.key_package_b64)
         .map_err(|e| format!("decode key_package_b64: {e}"))
+}
+
+/// Mirror of `lattice_server::routes::groups::CommitResponse`.
+#[derive(Debug, Deserialize)]
+struct CommitResponse {
+    #[allow(dead_code)]
+    epoch: u64,
+    welcomes_accepted: usize,
+}
+
+/// `POST /group/:gid/commit` — submit an MLS commit + per-joiner
+/// Welcome bundle. Returns the number of welcomes the server accepted
+/// for fan-out (federation push to remote home servers is a no-op
+/// when `remote_routing` is empty, which is the case for our
+/// single-server demo).
+///
+/// `pq_payload` is MLS-codec-encoded inline so the server can store it
+/// alongside the MLS Welcome and hand it back on
+/// `GET /group/:gid/welcome/:user_id`.
+///
+/// # Errors
+///
+/// Surfaces request/response failures with HTTP status and body text.
+pub async fn submit_commit(
+    server: &str,
+    group_id: &[u8; 16],
+    epoch: u64,
+    commit_bytes: &[u8],
+    welcome: &LatticeWelcome,
+    joiner_user_id: &[u8; 32],
+) -> Result<usize, String> {
+    let pq_bytes = welcome
+        .pq_payload
+        .mls_encode_to_vec()
+        .map_err(|e| format!("mls-encode pq_payload: {e}"))?;
+    let body = serde_json::json!({
+        "epoch": epoch,
+        "commit_b64": B64.encode(commit_bytes),
+        "welcomes": [{
+            "joiner_user_id_b64": B64.encode(joiner_user_id),
+            "mls_welcome_b64": B64.encode(&welcome.mls_welcome),
+            "pq_payload_b64": B64.encode(&pq_bytes),
+        }],
+    });
+    let response = Request::post(&format!(
+        "{server}/group/{}/commit",
+        B64URL.encode(group_id)
+    ))
+    .json(&body)
+    .map_err(|e| format!("build commit request: {e}"))?
+    .send()
+    .await
+    .map_err(|e| format!("send commit: {e}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "commit HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+
+    let parsed: CommitResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("decode commit response: {e}"))?;
+    Ok(parsed.welcomes_accepted)
+}
+
+/// Mirror of `lattice_server::routes::groups::WelcomeResponse`.
+#[derive(Debug, Deserialize)]
+struct WelcomeResponse {
+    #[allow(dead_code)]
+    epoch: u64,
+    mls_welcome_b64: String,
+    pq_payload_b64: String,
+}
+
+/// `GET /group/:gid/welcome/:user_id_b64url` — fetch a pending welcome
+/// for the joiner. Decodes both the MLS Welcome bytes and the
+/// MLS-codec `PqWelcomePayload`, then reassembles a [`LatticeWelcome`]
+/// ready to feed back into `process_welcome`.
+///
+/// # Errors
+///
+/// 404 ("no pending welcome") is reported verbatim by the server and
+/// surfaces here as a HTTP-status error.
+pub async fn fetch_welcome(
+    server: &str,
+    group_id: &[u8; 16],
+    user_id: &[u8; 32],
+) -> Result<LatticeWelcome, String> {
+    let response = Request::get(&format!(
+        "{server}/group/{}/welcome/{}",
+        B64URL.encode(group_id),
+        B64URL.encode(user_id)
+    ))
+    .send()
+    .await
+    .map_err(|e| format!("send fetch_welcome: {e}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "fetch_welcome HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+
+    let parsed: WelcomeResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("decode fetch_welcome response: {e}"))?;
+    let mls_welcome = B64
+        .decode(&parsed.mls_welcome_b64)
+        .map_err(|e| format!("decode mls_welcome_b64: {e}"))?;
+    let pq_bytes = B64
+        .decode(&parsed.pq_payload_b64)
+        .map_err(|e| format!("decode pq_payload_b64: {e}"))?;
+    let pq_payload = PqWelcomePayload::mls_decode(&mut pq_bytes.as_slice())
+        .map_err(|e| format!("mls-decode pq_payload: {e}"))?;
+    Ok(LatticeWelcome {
+        mls_welcome,
+        pq_payload,
+    })
+}
+
+/// Mirror of `lattice_server::routes::groups::PublishMessageResponse`.
+#[derive(Debug, Deserialize)]
+struct PublishMessageResponse {
+    seq: u64,
+}
+
+/// `POST /group/:gid/messages` — append a sealed envelope (or raw MLS
+/// application-message ciphertext) to the group's inbox. The server
+/// assigns a monotonic `seq` and returns it.
+///
+/// # Errors
+///
+/// Network or non-2xx status.
+pub async fn publish_message(
+    server: &str,
+    group_id: &[u8; 16],
+    envelope: &[u8],
+) -> Result<u64, String> {
+    let body = serde_json::json!({
+        "envelope_b64": B64.encode(envelope),
+    });
+    let response = Request::post(&format!(
+        "{server}/group/{}/messages",
+        B64URL.encode(group_id)
+    ))
+    .json(&body)
+    .map_err(|e| format!("build publish_message request: {e}"))?
+    .send()
+    .await
+    .map_err(|e| format!("send publish_message: {e}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "publish_message HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+    let parsed: PublishMessageResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("decode publish_message response: {e}"))?;
+    Ok(parsed.seq)
+}
+
+/// One message returned by [`fetch_messages`].
+pub struct FetchedMessage {
+    /// Server-assigned monotonic sequence number. Used by callers
+    /// that page through the inbox; the M4 γ.3 demo decrypts the
+    /// envelope and discards the seq, so it lives behind `dead_code`
+    /// for now.
+    #[allow(dead_code)]
+    pub seq: u64,
+    /// Decoded envelope bytes.
+    pub envelope: Vec<u8>,
+}
+
+/// `GET /group/:gid/messages?since=N` — drain the group's inbox from
+/// `since` upward. Returns the latest-seen seq + the messages in
+/// ascending seq order.
+///
+/// # Errors
+///
+/// Network or non-2xx status. Decode errors on the inner envelope
+/// base64 surface as `decode_envelope_b64`.
+pub async fn fetch_messages(
+    server: &str,
+    group_id: &[u8; 16],
+    since: u64,
+) -> Result<(u64, Vec<FetchedMessage>), String> {
+    #[derive(Deserialize)]
+    struct Entry {
+        seq: u64,
+        envelope_b64: String,
+    }
+    #[derive(Deserialize)]
+    struct Body {
+        latest_seq: u64,
+        messages: Vec<Entry>,
+    }
+
+    let response = Request::get(&format!(
+        "{server}/group/{}/messages?since={since}",
+        B64URL.encode(group_id)
+    ))
+    .send()
+    .await
+    .map_err(|e| format!("send fetch_messages: {e}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "fetch_messages HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+    let parsed: Body = response
+        .json()
+        .await
+        .map_err(|e| format!("decode fetch_messages response: {e}"))?;
+    let messages = parsed
+        .messages
+        .into_iter()
+        .map(|e| {
+            let envelope = B64
+                .decode(&e.envelope_b64)
+                .map_err(|err| format!("decode_envelope_b64 seq={}: {err}", e.seq))?;
+            Ok(FetchedMessage {
+                seq: e.seq,
+                envelope,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((parsed.latest_seq, messages))
 }

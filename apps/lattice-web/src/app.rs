@@ -83,6 +83,18 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let server_backed_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("running server-backed demo…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_server_backed_demo(DEFAULT_SERVER_URL, log).await {
+                Ok(()) => set_status.set("server-backed demo OK".to_string()),
+                Err(e) => set_status.set(format!("server-backed demo error: {e}")),
+            }
+        });
+    };
+
     view! {
         <div class="page">
             <div class="card">
@@ -94,6 +106,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=run_mls>"Run MLS round-trip"</button>
                     <button class="button" on:click=register_server>"Register with server"</button>
                     <button class="button" on:click=key_package_round_trip>"KP publish + fetch"</button>
+                    <button class="button" on:click=server_backed_demo>"Server-backed demo"</button>
                 </div>
                 <Show
                     when=move || !log_lines.get().is_empty()
@@ -343,6 +356,112 @@ async fn try_kp_round_trip(
 
     log("== M4 phase γ.2 complete ==".to_string());
     Ok(kp_bytes.len())
+}
+
+/// Phase γ.3: full Alice ⇌ Bob round-trip backed by a live
+/// `lattice-server`. Mirrors the M3 e2e flow `lattice-cli demo`
+/// drives, but from inside the browser tab. Same MLS state machine
+/// the in-tab Phase β demo runs — only the message bytes go over
+/// HTTP instead of staying in-process.
+async fn try_server_backed_demo(
+    server: &str,
+    log: impl Fn(String) + Copy,
+) -> Result<(), String> {
+    log(format!("== server-backed demo against {server} =="));
+    let alice = make_identity(0xAC)?;
+    let bob = make_identity(0xBD)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+    log(format!(
+        "alice user_id: {} / bob user_id: {}",
+        &B64.encode(alice.credential.user_id)[..12],
+        &B64.encode(bob.credential.user_id)[..12],
+    ));
+
+    log("== register both ==".to_string());
+    api::register(server, &alice).await?;
+    api::register(server, &bob).await?;
+
+    log("== bob publishes KP ==".to_string());
+    let _ = api::publish_key_package(server, &bob, &bob_psk).await?;
+
+    log("== alice fetches bob's KP ==".to_string());
+    let bob_kp_bytes = api::fetch_key_package(server, &bob.credential.user_id).await?;
+    log(format!("bob kp: {} bytes", bob_kp_bytes.len()));
+
+    log("== alice creates group ==".to_string());
+    let group_id: [u8; 16] = *b"lattice-browser2";
+    let mut alice_group = create_group(&alice, alice_psk.clone(), &group_id)
+        .map_err(|e| format!("create_group: {e}"))?;
+
+    log("== alice adds bob (locally) ==".to_string());
+    let commit_output =
+        add_member(&mut alice_group, &bob_kp_bytes).map_err(|e| format!("add_member: {e}"))?;
+    let welcome = commit_output
+        .welcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no welcome".to_string())?;
+    log(format!(
+        "commit: {} bytes, mls welcome: {} bytes, pq ct: {} bytes (epoch {})",
+        commit_output.commit.len(),
+        welcome.mls_welcome.len(),
+        welcome.pq_payload.ml_kem_ct.len(),
+        welcome.pq_payload.epoch,
+    ));
+
+    log("== alice POSTs /group/:gid/commit ==".to_string());
+    let accepted = api::submit_commit(
+        server,
+        &group_id,
+        welcome.pq_payload.epoch,
+        &commit_output.commit,
+        &welcome,
+        &bob.credential.user_id,
+    )
+    .await?;
+    log(format!("server accepted {accepted} welcome(s) for fan-out"));
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit: {e}"))?;
+
+    log("== bob GETs /group/:gid/welcome/:user_id ==".to_string());
+    let welcome_for_bob = api::fetch_welcome(server, &group_id, &bob.credential.user_id).await?;
+    log(format!(
+        "fetched welcome (mls: {} bytes, pq epoch: {})",
+        welcome_for_bob.mls_welcome.len(),
+        welcome_for_bob.pq_payload.epoch,
+    ));
+
+    log("== bob process_welcome ==".to_string());
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), &welcome_for_bob)
+        .map_err(|e| format!("process_welcome: {e}"))?;
+
+    log("== alice encrypts + POSTs /group/:gid/messages ==".to_string());
+    let ct = encrypt_application(&mut alice_group, b"hello via server")
+        .map_err(|e| format!("alice encrypt: {e}"))?;
+    let seq = api::publish_message(server, &group_id, &ct).await?;
+    log(format!("published seq={seq} ({} bytes)", ct.len()));
+
+    log("== bob GETs /group/:gid/messages?since=0 ==".to_string());
+    let (latest, messages) = api::fetch_messages(server, &group_id, 0).await?;
+    log(format!("latest_seq={latest}, count={}", messages.len()));
+    let first = messages
+        .first()
+        .ok_or_else(|| "no messages returned".to_string())?;
+    let plaintext = decrypt(&mut bob_group, &first.envelope)
+        .map_err(|e| format!("bob decrypt: {e}"))?;
+    if plaintext != b"hello via server" {
+        return Err(format!(
+            "bob recovered {:?}, expected 'hello via server'",
+            String::from_utf8_lossy(&plaintext),
+        ));
+    }
+    log(format!(
+        "bob recovered: {:?}",
+        String::from_utf8_lossy(&plaintext)
+    ));
+
+    log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
 }
 
 /// Build a fresh `LatticeIdentity` from scratch — signature keypair via

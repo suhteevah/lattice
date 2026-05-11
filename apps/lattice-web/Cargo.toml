@@ -32,6 +32,7 @@ lattice-crypto = { path = "../../crates/lattice-crypto" }
 lattice-protocol = { path = "../../crates/lattice-protocol" }
 mls-rs.workspace = true
 mls-rs-core.workspace = true
+mls-rs-codec.workspace = true
 blake3.workspace = true
 
 # HTTP client + JSON for talking to a local lattice-server. gloo-net
