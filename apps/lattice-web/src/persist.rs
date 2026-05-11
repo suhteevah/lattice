@@ -1,7 +1,7 @@
 //! Browser-local persistence for the user's `LatticeIdentity`.
 //!
 //! Stores the identity material in `window.localStorage` under
-//! `lattice/identity/v1`. Two blob versions are supported:
+//! `lattice/identity/v1`. Three blob versions are supported:
 //!
 //! * **`version: 1`** — plaintext (Phase δ.1). All key material is
 //!   base64-only. Anyone with read access to the browser profile can
@@ -12,10 +12,14 @@
 //!   the kem decapsulation key and signature secret key concat are
 //!   sealed by an Argon2id-derived KEK. Argon2id params match D-08
 //!   (m=64 MiB, t=3, p=1, 32-byte output).
-//!
-//! D-09 (WebAuthn-PRF KEK feeds AEAD) is a future Phase ε work — when
-//! that lands, we'll add `version: 3` that swaps the Argon2id step
-//! for a PRF-derived KEK.
+//! * **`version: 3`** — same AEAD envelope as v2, but the KEK comes
+//!   from a WebAuthn PRF evaluation rather than a passphrase + KDF
+//!   (Phase ε.2 / D-09 tier 1). The blob carries the credential_id
+//!   so [`load`] can replay the `navigator.credentials.get` ceremony
+//!   to re-derive the same 32-byte secret. Hardware-bound: the KEK
+//!   never leaves the authenticator, so a browser-profile leak
+//!   alone (without physical access to the security key /
+//!   platform-bound passkey) can't unwrap the body.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -77,8 +81,28 @@ struct V2Blob {
     sealed_b64: String,
 }
 
+/// PRF-encrypted v3 blob (Phase ε.2). Same envelope shape as v2 minus
+/// the salt — the KEK comes from WebAuthn PRF evaluation against the
+/// recorded credential_id, not from Argon2id over a passphrase.
+#[derive(Debug, Serialize, Deserialize)]
+struct V3Blob {
+    version: u32,
+    user_id_b64: String,
+    ed25519_pub_b64: String,
+    ml_dsa_pub_b64: String,
+    kem_ek_b64: String,
+    /// WebAuthn credential_id, URL-safe base64. `load` feeds this to
+    /// `passkey::evaluate_prf` to re-derive the same 32-byte KEK.
+    credential_id_b64url: String,
+    /// ChaCha20-Poly1305 nonce (12 random bytes).
+    nonce_b64: String,
+    /// AEAD ciphertext over `kem_dk || sig_sk_len_le(u16) || sig_sk`.
+    sealed_b64: String,
+}
+
 /// Whether the persisted blob is encrypted. Surfaced by [`probe`] so
-/// the UI can decide whether to prompt for a passphrase.
+/// the UI can decide whether to prompt for a passphrase, kick off a
+/// passkey ceremony, or auto-restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobShape {
     /// No persisted identity at this key.
@@ -87,6 +111,8 @@ pub enum BlobShape {
     Plaintext,
     /// Argon2id-encrypted v2.
     Encrypted,
+    /// WebAuthn-PRF-encrypted v3 (D-09 tier 1).
+    PrfEncrypted,
 }
 
 /// Inspect localStorage without decoding the secret material. Used at
@@ -113,8 +139,36 @@ pub fn probe() -> Result<BlobShape, String> {
     Ok(match header.version {
         1 => BlobShape::Plaintext,
         2 => BlobShape::Encrypted,
+        3 => BlobShape::PrfEncrypted,
         _ => BlobShape::None,
     })
+}
+
+/// Read the v3 blob's recorded `credential_id` without prompting for a
+/// passkey ceremony. The UI uses this so the "Load PRF-encrypted"
+/// button knows which credential to drive `navigator.credentials.get`
+/// against (and so the boot status can show "encrypted with passkey
+/// xyz…").
+///
+/// # Errors
+///
+/// Returns an error if the blob isn't a parseable v3.
+pub fn v3_credential_id() -> Result<Option<String>, String> {
+    let storage = local_storage()?;
+    let Some(json) = storage
+        .get_item(STORAGE_KEY)
+        .map_err(|e| format!("localStorage get_item: {e:?}"))?
+    else {
+        return Ok(None);
+    };
+    let header: VersionedHeader =
+        serde_json::from_str(&json).map_err(|e| format!("parse header: {e}"))?;
+    if header.version != 3 {
+        return Ok(None);
+    }
+    let blob: V3Blob =
+        serde_json::from_str(&json).map_err(|e| format!("parse v3 blob: {e}"))?;
+    Ok(Some(blob.credential_id_b64url))
 }
 
 /// Save `identity` to localStorage. If `passphrase` is `Some` and
@@ -136,6 +190,27 @@ pub fn save(identity: &LatticeIdentity, passphrase: Option<&str>) -> Result<usiz
     Ok(json.len())
 }
 
+/// Save `identity` as a v3 PRF-encrypted blob using a 32-byte KEK
+/// previously derived from `passkey::evaluate_prf`. The credential_id
+/// is stored alongside the blob so [`load_prf`] can locate the
+/// passkey to re-derive the same KEK.
+///
+/// # Errors
+///
+/// JSON / AEAD / storage failures.
+pub fn save_prf(
+    identity: &LatticeIdentity,
+    credential_id_b64url: &str,
+    kek: &[u8; 32],
+) -> Result<usize, String> {
+    let json = encode_v3(identity, credential_id_b64url, kek)?;
+    let storage = local_storage()?;
+    storage
+        .set_item(STORAGE_KEY, &json)
+        .map_err(|e| format!("localStorage set_item: {e:?}"))?;
+    Ok(json.len())
+}
+
 fn encode_v1(identity: &LatticeIdentity) -> Result<String, String> {
     let blob = V1Blob {
         version: 1,
@@ -149,11 +224,42 @@ fn encode_v1(identity: &LatticeIdentity) -> Result<String, String> {
     serde_json::to_string(&blob).map_err(|e| format!("serialize v1 identity: {e}"))
 }
 
-fn encode_v2(identity: &LatticeIdentity, passphrase: &str) -> Result<String, String> {
-    let mut salt = [0u8; SALT_LEN];
-    OsRng.fill_bytes(&mut salt);
-    let kek = derive_kek(passphrase, &salt)?;
+fn encode_v3(
+    identity: &LatticeIdentity,
+    credential_id_b64url: &str,
+    kek: &[u8; 32],
+) -> Result<String, String> {
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(kek.into());
+    let aad = b"lattice/persist/v3";
+    let plaintext = build_secret_blob(identity)?;
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            chacha20poly1305::aead::Payload {
+                msg: &plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| format!("ChaCha20-Poly1305 encrypt (v3): {e}"))?;
+    let blob = V3Blob {
+        version: 3,
+        user_id_b64: B64.encode(identity.credential.user_id),
+        ed25519_pub_b64: B64.encode(identity.credential.ed25519_pub),
+        ml_dsa_pub_b64: B64.encode(&identity.credential.ml_dsa_pub),
+        kem_ek_b64: B64.encode(identity.kem_keypair.encapsulation_key_bytes()),
+        credential_id_b64url: credential_id_b64url.to_string(),
+        nonce_b64: B64.encode(nonce_bytes),
+        sealed_b64: B64.encode(&ciphertext),
+    };
+    serde_json::to_string(&blob).map_err(|e| format!("serialize v3 identity: {e}"))
+}
 
+/// Concatenate the secret fields into the canonical body that AEAD
+/// envelopes (v2 / v3) seal. Layout:
+/// `kem_dk(2400) || sig_sk_len_le(u16) || sig_sk`.
+fn build_secret_blob(identity: &LatticeIdentity) -> Result<Vec<u8>, String> {
     let mut plaintext = Vec::new();
     let dk_bytes = identity.kem_keypair.decapsulation_key_persist();
     plaintext.extend_from_slice(dk_bytes);
@@ -164,6 +270,41 @@ fn encode_v2(identity: &LatticeIdentity, passphrase: &str) -> Result<String, Str
         .map_err(|_| format!("sig_sk too long ({} bytes)", sk_bytes.len()))?;
     plaintext.extend_from_slice(&sk_len_u16.to_le_bytes());
     plaintext.extend_from_slice(sk_bytes);
+    Ok(plaintext)
+}
+
+/// Split a decrypted body back into `(kem_dk, sig_sk_bytes)`. Used by
+/// both v2 and v3 decoders.
+fn split_secret_blob(plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    if plaintext.len() < ML_KEM_768_DK_LEN + 2 {
+        return Err(format!(
+            "decrypted body too short: {} bytes",
+            plaintext.len()
+        ));
+    }
+    let kem_dk = plaintext[..ML_KEM_768_DK_LEN].to_vec();
+    let sk_len_le: [u8; 2] = plaintext[ML_KEM_768_DK_LEN..ML_KEM_768_DK_LEN + 2]
+        .try_into()
+        .map_err(|_| "sk_len slice".to_string())?;
+    let sk_len = u16::from_le_bytes(sk_len_le) as usize;
+    let sk_start = ML_KEM_768_DK_LEN + 2;
+    if plaintext.len() < sk_start + sk_len {
+        return Err(format!(
+            "decrypted body sk truncated: have {} need {}",
+            plaintext.len(),
+            sk_start + sk_len
+        ));
+    }
+    let sig_sk_bytes = plaintext[sk_start..sk_start + sk_len].to_vec();
+    Ok((kem_dk, sig_sk_bytes))
+}
+
+fn encode_v2(identity: &LatticeIdentity, passphrase: &str) -> Result<String, String> {
+    let mut salt = [0u8; SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    let kek = derive_kek(passphrase, &salt)?;
+
+    let plaintext = build_secret_blob(identity)?;
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -219,8 +360,38 @@ pub fn load(passphrase: Option<&str>) -> Result<Option<LatticeIdentity>, String>
                 .ok_or_else(|| "encrypted blob: passphrase required".to_string())?;
             decode_v2(&json, pw).map(Some)
         }
+        3 => Err("v3 (PRF-encrypted) blob requires the PRF KEK — call \
+                  load_prf(kek) instead of load()"
+            .to_string()),
         v => Err(format!("unsupported persisted identity version {v}")),
     }
+}
+
+/// Load a v3 (PRF-encrypted) blob using the 32-byte KEK obtained
+/// from `passkey::evaluate_prf`.
+///
+/// Returns `Ok(None)` if no blob is present or it isn't a v3.
+///
+/// # Errors
+///
+/// Wrong KEK, malformed blob, or storage failure.
+pub fn load_prf(kek: &[u8; 32]) -> Result<Option<LatticeIdentity>, String> {
+    let storage = local_storage()?;
+    let Some(json) = storage
+        .get_item(STORAGE_KEY)
+        .map_err(|e| format!("localStorage get_item: {e:?}"))?
+    else {
+        return Ok(None);
+    };
+    let header: VersionedHeader =
+        serde_json::from_str(&json).map_err(|e| format!("parse blob header: {e}"))?;
+    if header.version != 3 {
+        return Err(format!(
+            "expected v3 blob, got version {} — use load() with the right credentials",
+            header.version
+        ));
+    }
+    decode_v3(&json, kek).map(Some)
 }
 
 fn decode_v1(json: &str) -> Result<LatticeIdentity, String> {
@@ -236,6 +407,34 @@ fn decode_v1(json: &str) -> Result<LatticeIdentity, String> {
     let sig_sk_bytes = B64
         .decode(&blob.sig_sk_b64)
         .map_err(|e| format!("decode sig_sk: {e}"))?;
+    Ok(build_identity(credential, kem_ek, kem_dk, sig_sk_bytes))
+}
+
+fn decode_v3(json: &str, kek: &[u8; 32]) -> Result<LatticeIdentity, String> {
+    let blob: V3Blob =
+        serde_json::from_str(json).map_err(|e| format!("parse v3 identity blob: {e}"))?;
+    let credential = decode_credential(
+        &blob.user_id_b64,
+        &blob.ed25519_pub_b64,
+        &blob.ml_dsa_pub_b64,
+    )?;
+    let kem_ek = decode_kem_ek(&blob.kem_ek_b64)?;
+    let nonce_bytes = decode_b64_exact(&blob.nonce_b64, NONCE_LEN, "nonce")?;
+    let cipher = ChaCha20Poly1305::new(kek.into());
+    let aad = b"lattice/persist/v3";
+    let ciphertext = B64
+        .decode(&blob.sealed_b64)
+        .map_err(|e| format!("decode sealed_b64: {e}"))?;
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce_bytes),
+            chacha20poly1305::aead::Payload {
+                msg: &ciphertext,
+                aad,
+            },
+        )
+        .map_err(|e| format!("AEAD decrypt failed (wrong PRF KEK?): {e}"))?;
+    let (kem_dk, sig_sk_bytes) = split_secret_blob(&plaintext)?;
     Ok(build_identity(credential, kem_ek, kem_dk, sig_sk_bytes))
 }
 
@@ -268,27 +467,7 @@ fn decode_v2(json: &str, passphrase: &str) -> Result<LatticeIdentity, String> {
         )
         .map_err(|e| format!("AEAD decrypt failed (wrong passphrase?): {e}"))?;
 
-    if plaintext.len() < ML_KEM_768_DK_LEN + 2 {
-        return Err(format!(
-            "decrypted body too short: {} bytes",
-            plaintext.len()
-        ));
-    }
-    let kem_dk = plaintext[..ML_KEM_768_DK_LEN].to_vec();
-    let sk_len_le: [u8; 2] = plaintext[ML_KEM_768_DK_LEN..ML_KEM_768_DK_LEN + 2]
-        .try_into()
-        .map_err(|_| "sk_len slice".to_string())?;
-    let sk_len = u16::from_le_bytes(sk_len_le) as usize;
-    let sk_start = ML_KEM_768_DK_LEN + 2;
-    if plaintext.len() < sk_start + sk_len {
-        return Err(format!(
-            "decrypted body sk truncated: have {} need {}",
-            plaintext.len(),
-            sk_start + sk_len
-        ));
-    }
-    let sig_sk_bytes = plaintext[sk_start..sk_start + sk_len].to_vec();
-
+    let (kem_dk, sig_sk_bytes) = split_secret_blob(&plaintext)?;
     Ok(build_identity(credential, kem_ek, kem_dk, sig_sk_bytes))
 }
 

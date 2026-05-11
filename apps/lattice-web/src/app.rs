@@ -65,6 +65,19 @@ pub fn App() -> impl IntoView {
              \"Load encrypted\" to unlock)",
             lattice_core::VERSION
         ),
+        Ok(persist::BlobShape::PrfEncrypted) => {
+            let prefix = persist::v3_credential_id()
+                .ok()
+                .flatten()
+                .map(|id| id.chars().take(12).collect::<String>())
+                .unwrap_or_else(|| "?".to_string());
+            format!(
+                "lattice-core v{} ready · passkey-encrypted identity for credential {}… \
+                 (click \"Load PRF-encrypted\")",
+                lattice_core::VERSION,
+                prefix,
+            )
+        }
         Err(e) => format!(
             "lattice-core v{} ready · probe error: {e}",
             lattice_core::VERSION
@@ -191,6 +204,34 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let save_prf_encrypted = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("save passkey-encrypted identity…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_save_prf_encrypted(log).await {
+                Ok(user_id_prefix) => set_status.set(format!(
+                    "saved passkey-encrypted identity {user_id_prefix}…"
+                )),
+                Err(e) => set_status.set(format!("save PRF error: {e}")),
+            }
+        });
+    };
+
+    let load_prf_encrypted = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("loading passkey-encrypted identity…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_load_prf_encrypted(log).await {
+                Ok(user_id_prefix) => {
+                    set_status.set(format!("loaded passkey-encrypted identity {user_id_prefix}…"));
+                }
+                Err(e) => set_status.set(format!("load PRF error: {e}")),
+            }
+        });
+    };
+
     let create_passkey = move |_| {
         set_log_lines.set(Vec::new());
         set_status.set("creating passkey…".to_string());
@@ -249,6 +290,8 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
                     <button class="button" on:click=create_passkey>"Create passkey"</button>
                     <button class="button" on:click=derive_passkey_kek>"Derive PRF KEK"</button>
+                    <button class="button" on:click=save_prf_encrypted>"Save PRF-encrypted"</button>
+                    <button class="button" on:click=load_prf_encrypted>"Load PRF-encrypted"</button>
                     <button class="button" on:click=clear_identity>"Clear saved identity"</button>
                 </div>
                 <Show
@@ -781,6 +824,67 @@ fn try_save_identity(
         log("== M4 phase δ.1 complete ==".to_string());
     }
     Ok(user_id_b64.chars().take(12).collect::<String>())
+}
+
+/// Phase ε.2 save path. Reads the credential_id saved by
+/// `try_create_passkey`, drives `evaluate_prf` to recover the 32-byte
+/// KEK, then `persist::save_prf` writes a v3 blob with the secret
+/// material sealed under that KEK.
+async fn try_save_prf_encrypted(log: impl Fn(String) + Copy) -> Result<String, String> {
+    log("== save PRF-encrypted identity ==".to_string());
+    let credential_id = read_saved_credential_id()?;
+    log(format!(
+        "credential_id (b64url): {credential_id}",
+    ));
+    log("evaluating PRF (will prompt for the passkey)…".to_string());
+    let kek = passkey::evaluate_prf(&credential_id).await?;
+    log(format!("KEK (32 bytes, prefix): {}…", &B64.encode(kek)[..12]));
+
+    let alice = make_identity(0xAA)?;
+    let user_id_b64 = B64.encode(alice.credential.user_id);
+    log(format!("user_id: {user_id_b64}"));
+    let bytes_written = persist::save_prf(&alice, &credential_id, &kek)?;
+    log(format!(
+        "wrote {bytes_written} bytes (v3) to localStorage[\"lattice/identity/v1\"]"
+    ));
+    log("reload the page to verify restore".to_string());
+    log("== M4 phase ε.2 (save) complete ==".to_string());
+    Ok(user_id_b64.chars().take(12).collect::<String>())
+}
+
+/// Phase ε.2 load path. Looks at the persisted v3 blob's recorded
+/// credential_id, re-runs `evaluate_prf` against that credential, then
+/// `persist::load_prf` unwraps the v3 envelope with the recovered
+/// KEK.
+async fn try_load_prf_encrypted(log: impl Fn(String) + Copy) -> Result<String, String> {
+    log("== load PRF-encrypted identity ==".to_string());
+    let credential_id = persist::v3_credential_id()?
+        .ok_or_else(|| "no v3 blob in localStorage".to_string())?;
+    log(format!("credential_id (b64url): {credential_id}"));
+    log("evaluating PRF (will prompt for the passkey)…".to_string());
+    let kek = passkey::evaluate_prf(&credential_id).await?;
+    log(format!("KEK (32 bytes, prefix): {}…", &B64.encode(kek)[..12]));
+    let identity = persist::load_prf(&kek)?
+        .ok_or_else(|| "load_prf returned None".to_string())?;
+    let user_id_b64 = B64.encode(identity.credential.user_id);
+    log(format!("recovered user_id: {user_id_b64}"));
+    log("== M4 phase ε.2 (load) complete ==".to_string());
+    Ok(user_id_b64.chars().take(12).collect::<String>())
+}
+
+/// Helper: pull `credential_id_b64url` previously written by
+/// `try_create_passkey`. Errors clearly if the user hasn't created a
+/// passkey yet (which would make every PRF flow undefined).
+fn read_saved_credential_id() -> Result<String, String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let storage = window
+        .local_storage()
+        .map_err(|e| format!("localStorage: {e:?}"))?
+        .ok_or_else(|| "localStorage unavailable".to_string())?;
+    storage
+        .get_item(PASSKEY_CREDENTIAL_LS_KEY)
+        .map_err(|e| format!("read credential_id: {e:?}"))?
+        .ok_or_else(|| "no saved credential_id — create a passkey first".to_string())
 }
 
 /// Phase ε: register a passkey for the dev RP `localhost`, request
