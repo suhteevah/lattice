@@ -1,11 +1,9 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 closed — δ.3 (localStorage MLS
-group state) shipped; γ.4 transport swap fully specified in §M4
-status with the server-side surgery sized at ~1500 LOC for a focused
-session. M5 partial — commit cadence, attachments, device
-revocation, federation distrust scoring, and SECURITY.md shipped;
-multi-member PSK rotation and Cap'n Proto deferred.)
+**Last updated:** 2026-05-11 (M4 closed — δ.3 + γ.4-spec; M5 closed —
+multi-member MLS shipped on wire v2, Cap'n Proto schema authored.
+Only γ.4 server-side QUIC + Cap'n Proto build wiring remain, both
+sized + ready to execute in focused sessions.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1+2; M1/M2/M3 shipped; **M4 done**; **M5 mostly
 shipped**. Browser tab is a full Lattice client: in-WASM MLS,
@@ -701,21 +699,32 @@ Module additions:
       M4 γ-polish.
 - [x] **Bug-bounty docs (D-14).** `SECURITY.md` at repo root —
       disclosure channels, scope, what gets credited.
-- [ ] **Multi-member MLS groups (>2).** PSK rotation for existing
-      members is the hard part — current 1:1 path encapsulates the
-      PSK to one joiner's pubkey, but multi-joiner needs a shared
-      secret encapsulated to N pubkeys. Three options on the table:
-      (a) extend `PqWelcomePayload` with an HKDF-wrap of a single
-      group-level secret (wire change, version bump); (b) include
-      multiple external PSKs per commit, one per joiner (mls-rs
-      supports the API but the key-schedule semantics need
-      revisiting); (c) skip PQ-PSK for non-1:1 Update commits.
-      Decision deferred to a focused session.
-- [ ] **Cap'n Proto migration.** Replace Prost in
-      `lattice-protocol::wire` with `capnp`-generated types from
-      `.capnp` schemas. Touches every callsite; needs a careful
-      schema-evolution test plan since the protocol is pre-1.0 but
-      already in use by the M3 testbed.
+- [x] **Multi-member MLS groups (>2)** — shipped 2026-05-11 commit
+      `ffa7c67`. Option (a) won: `PqWelcomePayload` extended (wire
+      v1 → v2) with `joiner_idx`, `wrap_nonce`, `wrap_ct`. Alice
+      generates one random 32-byte `W`; for each joiner she ML-KEM-
+      encapsulates to their pubkey, derives a per-joiner wrap key
+      `K_i = HKDF-SHA-256(salt=epoch||idx, ikm=ss_i, info="lattice/
+      wrap/v2", 32)`, ChaCha20-Poly1305-seals `W` with AAD
+      `epoch||idx`. Each joiner decap → derive `K_i` → AEAD-open →
+      register `W` under `psk_id_for_epoch(epoch)`. Commit
+      references one external PSK. New `lattice_crypto::mls::
+      add_members(group, &[&[u8]])`; the 1:1 `add_member` is now a
+      single-joiner slice through the same code. Browser "Multi-
+      member group (3-party)" demo button drives Alice + Bob + Carol
+      end-to-end. 4 new welcome_pq tests cover single + multi
+      round-trip, cross-joiner KEM rejection, tampered joiner_idx
+      AEAD rejection, tampered ml_kem_ct / wrap_ct rejection. 127
+      workspace tests pass (was 125 before).
+- [~] **Cap'n Proto migration** — schema authored 2026-05-11 commit
+      `d11d5fc`; capnpc build wiring deferred. `crates/lattice-
+      protocol/schema/lattice.capnp` carries the schema-of-record
+      for every Prost type currently in `src/wire.rs`, using
+      Cap'n Proto's native union for optional sub-messages.
+      Remaining work (one focused session): `choco install capnp`
+      → workspace deps `capnp` + `capnpc` → `lattice-protocol/build.rs`
+      → swap ~50 `wire::` callsites → bump `WIRE_VERSION` 2 → 3.
+      Sized in `schema/README.md` inline.
 
 ### Not done — M4 and beyond
 - [ ] Cap'n Proto migration from interim Prost wire (M5)
