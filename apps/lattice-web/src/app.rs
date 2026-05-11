@@ -21,7 +21,7 @@ use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider
 use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
-    LatticeIdentity, add_member, apply_commit, create_group, decrypt, encrypt_application,
+    LatticeIdentity, add_member, apply_commit, commit, create_group, decrypt, encrypt_application,
     generate_key_package, process_welcome,
 };
 use lattice_protocol::sealed_sender::{open_at_recipient, seal};
@@ -140,6 +140,14 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
             }
         });
+    };
+
+    let cadence_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        match try_cadence_demo(append) {
+            Ok(()) => set_status.set("cadence demo OK".to_string()),
+            Err(e) => set_status.set(format!("cadence error: {e}")),
+        }
     };
 
     let sealed_sender_demo = move |_| {
@@ -285,6 +293,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=key_package_round_trip>"KP publish + fetch"</button>
                     <button class="button" on:click=server_backed_demo>"Server-backed demo"</button>
                     <button class="button" on:click=sealed_sender_demo>"Sealed-sender demo"</button>
+                    <button class="button" on:click=cadence_demo>"Commit cadence demo"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -647,6 +656,99 @@ async fn try_server_backed_demo(
     ));
 
     log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
+}
+
+/// M5: commit cadence scheduler. ROADMAP §M5 calls for "aggressive
+/// commit cadence: every 50 messages OR every 5 minutes" — the M5
+/// goal is post-compromise secrecy via key rotation. Here we
+/// demonstrate the rotation primitive for 1:1 groups: between every
+/// application message we issue a self-commit (Update path) that
+/// rotates the ratchet without changing membership.
+///
+/// Single-tab demo: Alice + Bob in a 1:1 group, 4 messages, with a
+/// self-commit between each so Alice's epoch advances 0 → 1 → 2 →
+/// 3 → 4 → 5. Each step verifies Bob can still decrypt despite the
+/// ratchet rotation. Server-backed multi-member cadence with PSK
+/// rotation is the M5 follow-up.
+fn try_cadence_demo(log: impl Fn(String) + Copy) -> Result<(), String> {
+    log("== commit cadence demo ==".to_string());
+    let alice = make_identity(0xC1)?;
+    let bob = make_identity(0xC2)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+
+    let group_id: [u8; 16] = *b"lattice-cadence!";
+    let mut alice_group = create_group(&alice, alice_psk.clone(), &group_id)
+        .map_err(|e| format!("create_group: {e}"))?;
+    let bob_kp = generate_key_package(&bob, bob_psk.clone())
+        .map_err(|e| format!("generate_key_package: {e}"))?;
+    let commit_output =
+        add_member(&mut alice_group, &bob_kp).map_err(|e| format!("add_member: {e}"))?;
+    let welcome = commit_output
+        .welcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no welcome".to_string())?;
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit (add): {e}"))?;
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), &welcome)
+        .map_err(|e| format!("process_welcome: {e}"))?;
+    log(format!(
+        "initial epoch — alice={}, bob={}",
+        alice_group.current_epoch(),
+        bob_group.current_epoch()
+    ));
+
+    let messages = [
+        b"cadence msg 1".as_slice(),
+        b"cadence msg 2",
+        b"cadence msg 3",
+        b"cadence msg 4",
+    ];
+
+    for (i, payload) in messages.iter().enumerate() {
+        let ct = encrypt_application(&mut alice_group, payload)
+            .map_err(|e| format!("alice encrypt round {}: {e}", i + 1))?;
+        let pt = decrypt(&mut bob_group, &ct)
+            .map_err(|e| format!("bob decrypt round {}: {e}", i + 1))?;
+        if pt.as_slice() != *payload {
+            return Err(format!("round {} plaintext mismatch", i + 1));
+        }
+        log(format!(
+            "round {} — alice→bob {:?} recovered ({} bytes ct, epoch {})",
+            i + 1,
+            std::str::from_utf8(payload).unwrap_or("?"),
+            ct.len(),
+            alice_group.current_epoch(),
+        ));
+
+        // Self-commit (Update path) rotates the ratchet.
+        let upd = commit(&mut alice_group).map_err(|e| format!("commit round {}: {e}", i + 1))?;
+        apply_commit(&mut alice_group)
+            .map_err(|e| format!("apply_commit round {}: {e}", i + 1))?;
+        // Bob processes the commit so his epoch advances too. decrypt
+        // returns Vec::new() for non-application messages.
+        let _ = decrypt(&mut bob_group, &upd.commit)
+            .map_err(|e| format!("bob process commit round {}: {e}", i + 1))?;
+        log(format!(
+            "       self-commit — alice={}, bob={}",
+            alice_group.current_epoch(),
+            bob_group.current_epoch()
+        ));
+    }
+
+    if alice_group.current_epoch() != bob_group.current_epoch() {
+        return Err(format!(
+            "epoch drift: alice={} bob={}",
+            alice_group.current_epoch(),
+            bob_group.current_epoch()
+        ));
+    }
+    log(format!(
+        "== M5 cadence (1:1) complete — {} rotations, final epoch {} ==",
+        messages.len(),
+        alice_group.current_epoch()
+    ));
     Ok(())
 }
 
