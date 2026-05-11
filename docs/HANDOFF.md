@@ -1,18 +1,70 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-10
+**Last updated:** 2026-05-10 (post-recovery + Phases A/B/C.1 shipped)
 **Owner:** Matt Gates (suhteevah)
-**Status:** Steps 1 + 2 complete; M1 (crypto primitives) shipped; M2 in
-progress. **Wire types done** (`lattice-protocol::{wire, sig}` with all
-seven Prost messages — `HybridSignatureWire`, `IdentityClaim`,
-`MembershipCert`, `SealedEnvelope`, `KeyPackage`, `Welcome`, `Commit`,
-`ApplicationMessage` — plus `encode`/`decode` helpers and 9 round-trip
-tests). **MLS + sealed sender scaffolded only** —
-`lattice-crypto::{mls, sealed_sender}` modules wired into the crate with
-public API surface defined but bodies return `Error::Mls(_)` /
-`Error::SealedSender(_)` stubs. Workspace builds clean; 40 tests pass
-(31 crypto + 9 wire). Next: implement `LatticeHybridCipherSuite` (D-04)
-and the sealed-sender cert flow (D-05).
+**Status:** Steps 1 + 2 complete; M1 shipped; M2 partway through. Six
+commits on `main` (local repo, no remote yet — `git log --oneline`):
+
+```
+3d743c0 feat(crypto): Phase C.1 — per-epoch PSK id derivation + in-memory storage
+60550da chore(crypto): Phase F prep — remove dead sealed_sender stub + D-02 dead constants
+33121fc feat(crypto): Phase B — LatticeHybridCipherSuite (0xF000)
+02d2cf1 feat(crypto): Phase A — LatticeCredential (0xF001) + IdentityProvider
+8898460 docs(d-04): re-open and amend for PSK-injection path
+fe8868e chore: initialize repo at M1-shipped + M2-partial post-recovery state
+```
+
+`cargo test -p lattice-crypto`: **69 tests pass.** Workspace builds
+zero-warning. The M2 vertical slice acceptance (Alice + Bob round-trip
+without a live server) is still ahead — see §6 and §13 below.
+
+### Key M2 decisions taken this session
+
+1. **D-04 re-opened on 2026-05-10 for PSK injection.** The original
+   construction (fold ML-KEM-768 into `init_secret` via HKDF) is not
+   buildable on mls-rs 0.55: `KeySchedule::from_epoch_secret` is
+   `pub(crate)` with no public hook. Matt picked the hybrid path: ship
+   PSK injection in M2, keep the fork as an M6 hardening fallback. PSK
+   id = `b"lattice/mls-init/v1" || epoch.to_le_bytes()`. RFC 9420 §8
+   explicitly intends PSK as the hybrid-PQ binding extension point.
+   Security property — PQ secret enters the schedule under HKDF-SHA-256
+   immediately before `epoch_secret` derivation — is preserved. Full
+   record in DECISIONS.md §D-04 "Re-opened 2026-05-10".
+
+2. **mls-rs stack upgraded to latest (0.55 / 0.27 / 0.22 / 0.6).** The
+   prior pin (mls-rs 0.45, rustcrypto 0.16) had a transitive version
+   skew on `mls-rs-core` (0.21 vs 0.22) that left `CryptoProvider`
+   trait bounds unsatisfied. The upgrade collapsed both into 0.27 and
+   compiles clean. API drift caught and handled in Phase B: `hpke_open`
+   returns `Zeroizing<Vec<u8>>`, new `hpke_seal_psk` / `hpke_open_psk`
+   on the trait (delegated to inner).
+
+3. **Sealed-sender module moved to `lattice-protocol`.** Per Matt's
+   decision on the Phase F architecture question (Option B): under
+   D-05 there is no Lattice-specific cryptographic primitive in
+   sealed-sender — it's just Ed25519 sign/verify over canonical wire
+   bytes. `lattice-crypto::sealed_sender` was removed as dead code.
+   The seal/verify functions land in `lattice-protocol::sealed_sender`
+   in Phase F (still pending). Wire types stay in `lattice-protocol::wire`.
+   D-02's `HKDF_SEALED_SENDER` + `HKDF_SEALED_SENDER_MAC` constants
+   were also dead under D-05 (no inner-envelope-key derivation, no
+   HMAC) and got removed; D-02 now carries a "Removed 2026-05-10"
+   footer table.
+
+4. **mls-rs API research lives at `scratch/mls-rs-api.md`.** Detailed
+   trait surfaces, footguns, sync-vs-async picks (sync chosen), and
+   a working code skeleton. Note: this was researched against
+   mls-rs-0.45.3 / mls-rs-core-0.21; the upgrade in commit `33121fc`
+   moved us to 0.55 / 0.27. Most of the doc is still accurate but
+   any specific method signature should be cross-checked against
+   the actual 0.27 source.
+
+5. **M2 build plan at `scratch/m2-build-plan.md`.** Eight phases A–H,
+   each a commit checkpoint. A, B, F-prep, and C.1 are done. C.2,
+   D, E, F, G, H remain. The plan still describes Phase F using the
+   old `lattice-crypto::sealed_sender` location — disregard that
+   detail; the actual home is now `lattice-protocol::sealed_sender`
+   per decision 3 above.
 
 > **What this doc is.** A self-contained brief that lets a fresh Claude (or any
 > engineer) load full context in one read and start producing useful work
@@ -170,43 +222,129 @@ lattice/
       matching stable release yet)
 
 ### Done (M2 partial — 2026-05-10)
+
+**Phase A** (commit `02d2cf1`):
 - [x] `lattice-protocol::wire` — Prost messages for `HybridSignatureWire`,
       `IdentityClaim`, `MembershipCert`, `SealedEnvelope`, `KeyPackage`,
       `Welcome`, `Commit`, `ApplicationMessage` + `encode`/`decode` helpers
 - [x] `lattice-protocol::sig` — re-exports `HybridSignature` + `HybridSignatureWire`
-      per D-03 (no architectural-invariant breach: protocol depends on crypto)
-- [x] `From<HybridSignature>` / `TryFrom<HybridSignatureWire>` round-trip
-      with length validation on the Ed25519 component
-- [x] `cargo test -p lattice-protocol`: 9 unit tests green
-- [x] `MembershipCert` + `SealedEnvelope` wire types match D-05 (server-issued
-      per-epoch certs + `envelope_sig` under `ephemeral_sender_pubkey`)
-- [x] `lattice-crypto::mls` — module wired into crate; public API surface
-      (`GroupHandle`, `CommitOutput`, `create_group`, `add_member`,
-      `encrypt_application`, `decrypt`, `commit`) defined with full
-      tracing instrumentation; bodies return `Error::Mls(_)` stubs
-- [x] `lattice-crypto::sealed_sender` — module wired; `seal`, `open`
-      signatures present; bodies return `Error::SealedSender(_)` stubs
+- [x] `MembershipCert` + `SealedEnvelope` shapes match D-05
+- [x] `lattice-crypto::credential::LatticeCredential` — type id `0xF001`,
+      MLS-codec serialized, length validation. Carries `user_id` (32B
+      BLAKE3) + `ed25519_pub` + `ml_dsa_pub` (no ML-KEM yet — see
+      Phase C.2 below for where that will live)
+- [x] `lattice-crypto::mls::identity_provider::LatticeIdentityProvider` —
+      `mls_rs_core::identity::IdentityProvider` impl that decodes the
+      custom credential, cross-checks the `SigningIdentity::signature_key`
+      byte layout against the credential's individual key fields
+      (defeats confused-deputy), reports `user_id` as MLS identity
+      (device rotation via `valid_successor` returning true on matching
+      user_id), refuses external senders in V1
+
+**Phase B** (commit `33121fc`):
+- [x] mls-rs stack upgraded to 0.55 / 0.27 / 0.22 / mls-rs-codec 0.6.
+      Resolved transitive `mls-rs-core` version skew.
+- [x] `lattice-crypto::mls::cipher_suite::LatticeCryptoProvider` advertising
+      only `LATTICE_HYBRID_V1` (`0xF000`)
+- [x] `lattice-crypto::mls::cipher_suite::LatticeHybridCipherSuite`
+      implementing `CipherSuiteProvider`. Delegates 20 of 24 methods to
+      `RustCryptoProvider`'s `0x0003` suite; overrides the 4 signature
+      methods to handle packed Ed25519 + ML-DSA-65 keys / signatures.
+      Byte layouts pinned in module docs.
+
+**Phase F-prep** (commit `60550da`):
+- [x] Deleted dead `lattice-crypto::sealed_sender` stub per Matt's
+      Option B decision (Phase F lands in `lattice-protocol::sealed_sender`)
+- [x] Removed dead D-02 constants `HKDF_SEALED_SENDER`,
+      `HKDF_SEALED_SENDER_MAC` (superseded by D-05 — Ed25519-sig-only
+      construction has no inner-envelope key or HMAC)
+- [x] D-02 entry updated with "Removed 2026-05-10" footer; D-05
+      Implementation pointer aligned to actual code structure
+
+**Phase C.1** (commit `3d743c0`):
+- [x] `lattice-crypto::mls::psk::psk_id_for_epoch` deterministic id
+      derivation: `HKDF_MLS_INIT || epoch.to_le_bytes()`
+- [x] `lattice-crypto::mls::psk::LatticePskStorage` — thread-safe
+      in-memory impl of `mls_rs_core::psk::PreSharedKeyStorage`
+- [x] 9 tests covering deterministic id, per-epoch uniqueness, byte
+      layout, zero-epoch edge case, insert/get/remove/clone semantics
 
 ### Not done — M2 remaining work
-- [ ] `LatticeHybridCipherSuite` (D-04): wrap MLS 0x0003 base ciphersuite
-      (`MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`), fold an
-      ML-KEM-768 encapsulated secret into `init_secret` via
-      HKDF-SHA-256 with `HKDF_MLS_INIT` info. Register as 0xF000.
-- [ ] Real impl of `mls::{create_group, add_member, encrypt_application,
-      decrypt, commit}` on top of `mls-rs::Group` with the custom suite
-- [ ] `mls_integration` test: Alice + Bob round-trip without a live
-      server (per ROADMAP M2 acceptance)
-- [ ] Real impl of `sealed_sender::{seal, open}` per D-05: client signs
-      `SealedEnvelope` with cert's ephemeral private key; verifier checks
-      `server_sig` on cert + `envelope_sig` under `ephemeral_sender_pubkey`
-- [ ] Sealed-sender 3-party round-trip test (sender / synthetic routing
-      server / recipient) verifying routing server cannot identify sender
-- [ ] Doc-comment fix on `mls.rs` module header (currently references the
-      superseded `MLS_256_DHKEMP384_AES256GCM_SHA384_P384` pick — D-04
-      supersedes that)
-- [ ] Doc-comment fix on `sealed_sender.rs` module header (currently
-      describes Signal-pre-cert sender-ephemeral-keypair construction —
-      D-05 supersedes that with the server-issued cert flow)
+
+**Phase C.2 — ML-KEM-768 wired into LeafNode + Welcome custom extensions.**
+See §13 below for the design. New files expected:
+- `crates/lattice-crypto/src/mls/leaf_node_kem.rs` — custom LeafNode
+  extension `LatticeKemPubkey` (extension id `0xF002`) carrying an
+  ML-KEM-768 verifying key (1184 bytes) alongside the standard X25519
+  init key. Generated as part of KeyPackage creation; stored per-leaf.
+- `crates/lattice-crypto/src/mls/welcome_pq.rs` — `PqWelcomePayload`
+  (Welcome extension id `0xF003`) carrying the per-joiner ML-KEM
+  ciphertext (1088 bytes per FIPS 203). `seal_pq_secret(joiner_kem_pk)`
+  and `open_pq_secret(payload, our_kem_sk)` helpers.
+- Hooks: `LatticeHybridCipherSuite::signature_key_generate` does not
+  generate the ML-KEM keypair (signature ≠ KEM). The Phase D group-ops
+  wrapper generates ML-KEM keys when minting a KeyPackage and attaches
+  them to the LeafNode extensions.
+
+**Phase D — Real `mls::{create_group, add_member, process_welcome,
+encrypt_application, decrypt, commit}` on top of `mls_rs::Group<C>`.**
+Currently stubs returning `Error::Mls("not implemented")`. Replace with
+real impls that:
+- Use `ClientBuilder` with `LatticeCryptoProvider` + `LatticeIdentityProvider`
+  + `LatticePskStorage` + the extension types `0xF002`/`0xF003`
+  registered.
+- `add_member`: encapsulate fresh ML-KEM secret to joiner's leaf KEM
+  pubkey, store in PSK storage under `psk_id_for_epoch(next_epoch)`,
+  `commit_builder().add_member(kp)?.add_psk(psk_id)?.build()`, attach
+  `PqWelcomePayload` to the Welcome.
+- `process_welcome`: read `PqWelcomePayload` from welcome extensions,
+  decapsulate, store PSK *before* calling `Client::join_group` (mls-rs
+  looks up the PSK synchronously during join).
+- All methods `#[instrument]`-d; call `group.write_to_storage()` after
+  every state mutation per the mls-rs research §6.1 footgun.
+
+**Phase E — Alice+Bob integration test.** `crates/lattice-crypto/tests/
+mls_integration.rs`. Acceptance per ROADMAP M2:
+- Alice creates group → invites Bob → both ratchet → both encrypt and
+  decrypt cross-direction app messages — no live server in the test.
+- Plus: forward secrecy across commit, cross-epoch PSK rotation,
+  tampered-message rejection.
+
+**Phase F — Sealed sender per D-05 (Option B location).** New file
+`crates/lattice-protocol/src/sealed_sender.rs`. Functions:
+- `seal(cert: &MembershipCert, ephemeral_sk: &SigningKey, inner_ct: &[u8])
+  -> Result<SealedEnvelope>` — signs `canonical_envelope_bytes` with
+  `ephemeral_sk` (the key pair matching `cert.ephemeral_sender_pubkey`).
+- `verify_at_router(server_pk: &VerifyingKey, env: &SealedEnvelope)
+  -> Result<()>` — verifies `cert.server_sig` over canonical cert
+  bytes + `env.envelope_sig` over canonical envelope bytes. Routing
+  server uses this; does NOT decrypt inner.
+- `open_at_recipient(server_pk, env) -> Result<&[u8]>` — same verify,
+  returns inner ciphertext (recipient's MLS state decrypts that to
+  learn sender's `LeafNodeIndex`).
+- Canonical bytes builders using `mls-rs-codec` so the transcripts
+  are deterministic.
+
+Integration test in `crates/lattice-protocol/tests/sealed_sender_
+integration.rs`: 3-party round trip (synthetic home server issues cert,
+sender seals, routing server verifies, recipient opens). Assert the
+routing server cannot determine sender identity from the envelope.
+
+**Phase G — Pre-commit gate green:** `.\scripts\test-all.ps1` (cargo
+test --workspace + clippy + fmt --check + audit). WASM check still
+green for `lattice-core`.
+
+**Phase H — Ship M2:** move M2 to ROADMAP "Shipped" block, update
+HANDOFF §4 status header, update ROADMAP §Status.
+
+### Not done — M3 and beyond
+- [ ] Server routes beyond `/health`: registration, MLS commit upload,
+      message fetch, federation gossip, server-side `MembershipCert`
+      issuance (M3)
+- [ ] Cap'n Proto migration from interim Prost wire (M5)
+- [ ] Solid UI past the "Hello, Lattice" placeholder (M4)
+- [ ] First end-to-end vertical slice — two servers, two CLI clients,
+      "hello, lattice" cross-federation (see §6, M3)
 
 ### Not done — M3 and beyond
 - [ ] Server routes beyond `/health`: registration, MLS commit upload,
@@ -396,11 +534,122 @@ notifications, moderation — is now in `DECISIONS.md` (see §2.5).
 
 ---
 
-## 12. Provenance
+## 12. Phase C.2 design notes (ML-KEM-768 on LeafNode + Welcome)
+
+Captured here so a fresh session can pick up Phase C.2 without
+re-deriving the design.
+
+### Why ML-KEM-768 belongs on the LeafNode, not in the credential
+
+The credential (`LatticeCredential`, `CREDENTIAL_TYPE = 0xF001`) carries
+**signature material** — Ed25519 + ML-DSA-65 verifying keys plus the
+user_id binding. ML-KEM-768 is a **KEM**, not a signature scheme, and
+its keypair is per-device per-epoch rotation material. The standard MLS
+LeafNode already carries a per-device `init_key` (X25519 HPKE pubkey
+for the base 0x0003 suite). Adding ML-KEM-768 alongside it via a custom
+extension keeps the separation clean: identity binding in credential,
+KEM keys with the rest of the leaf key material.
+
+This means `LatticeCredential` does NOT need to change. Phase A's wire
+format stays intact.
+
+### Custom MLS extension types reserved
+
+| Extension id | Use | Carrier |
+|---|---|---|
+| `0xF002` | `LatticeKemPubkey` — ML-KEM-768 verifying key (1184 bytes) | LeafNode extension |
+| `0xF003` | `PqWelcomePayload` — ML-KEM-768 ciphertext for the joiner (1088 bytes) + epoch reference (u64) | Welcome extension |
+
+Both must be registered on the `ClientBuilder` via
+`.extension_type(ExtensionType::new(0xF002))` etc., or mls-rs
+silently rejects KeyPackages / Welcomes carrying them as
+`MlsError::ExtensionNotInCapabilities` (mls-rs research §6.10).
+
+### Per-epoch PSK flow end-to-end
+
+1. **KeyPackage creation** (joiner side, in advance): generate
+   ML-KEM-768 keypair via `ml-kem` crate, attach the pubkey as a
+   `LatticeKemPubkey` LeafNode extension when building the KeyPackage.
+   Store the ML-KEM secret in a per-device store keyed by KeyPackage id
+   (so we can find it when consuming a Welcome).
+
+2. **Adding the joiner** (Alice side):
+   - Decode joiner's KeyPackage, extract their `LatticeKemPubkey`
+     extension → joiner's ML-KEM-768 verifying key.
+   - `(ct, ss) = ML-KEM-768.encapsulate(joiner_kem_pk)` — fresh per-
+     commit secret + ciphertext.
+   - `storage.insert(psk_id_for_epoch(next_epoch), PreSharedKey::new(ss))`.
+   - Build commit:
+     `group.commit_builder()
+            .add_member(joiner_kp)?
+            .add_psk(psk_id_for_epoch(next_epoch))?
+            .build()`.
+   - Attach `PqWelcomePayload { ml_kem_ct: ct, epoch: next_epoch }`
+     to the Welcome via `MlsMessage` extension mechanism.
+
+3. **Joining** (Bob side, in `process_welcome`):
+   - Read `PqWelcomePayload` from Welcome extensions.
+   - Look up our ML-KEM-768 secret key by KeyPackage id (we used a
+     fresh KeyPackage to be invited, so we know which secret it
+     corresponds to).
+   - `ss = ML-KEM-768.decapsulate(ct, our_kem_sk)`.
+   - `storage.insert(psk_id_for_epoch(payload.epoch), PreSharedKey::new(ss))`
+     — **before** calling `Client::join_group`, because mls-rs looks
+     up the PSK synchronously during join.
+   - `Client::join_group(None, &welcome)?`.
+
+4. **Subsequent commits** (existing members updating themselves):
+   - The committer encapsulates a fresh ML-KEM secret to every other
+     member's current ML-KEM pubkey (or rotates everyone's pubkey via
+     an `Update` proposal). The simplest v0.1 approach: each commit
+     also drives an Update proposal that rotates everyone's
+     `LatticeKemPubkey` extension, and the PSK ciphertexts for the
+     non-joiners ride along in either the commit's `authenticated_data`
+     field or in further custom extensions. **TODO during Phase C.2/D:
+     finalize the rotation mechanism.**
+
+### Where the design is still vague
+
+- The "subsequent commits" path (item 4 above) is the part the research
+  doc flagged as TODO. Three plausible options:
+  - **(α) Per-commit fresh ML-KEM encap to every member** — clean,
+    correct, but ~1.2 KB per epoch per member of overhead. For small
+    groups (Lattice's target) this is negligible.
+  - **(β) Resumption PSK** — reuse mls-rs's existing
+    `PreSharedKeyID::Resumption(...)` path to fold in the previous
+    epoch's PQ secret deterministically. No per-commit network
+    overhead but no fresh PQ secret either.
+  - **(γ) Periodic rotation** — fresh ML-KEM encap every N commits,
+    resumption PSK in between.
+  - **Recommendation:** ship (α) in M2 to get the full PQ property
+    on every epoch, optimize to (γ) post-V1 if the bandwidth shows
+    up as an issue in real use.
+
+- "Generation of the ML-KEM-768 keypair at KeyPackage creation" —
+  currently `lattice-crypto::hybrid_kex` has the keypair gen
+  primitives (`encapsulate` / `decapsulate` over a hybrid X25519 +
+  ML-KEM secret). Phase C.2 likely wants a thinner ML-KEM-only helper
+  exposed alongside, since the Welcome extension uses ML-KEM in
+  isolation (the X25519 part is already handled by mls-rs's standard
+  Welcome HPKE wrap to the leaf init key).
+
+---
+
+## 13. Provenance
 
 This scaffold was generated 2026-05-10 in a single Claude session after
 Step 1 (foundational decisions) was locked. Every directory contains a
 `README.md` describing the crate or asset's purpose. Every Rust file has
-doc comments. No code has been compiled yet — running
-`.\scripts\dev-setup.ps1` followed by `cargo check --workspace` is the
-suggested first verification step.
+doc comments.
+
+A subsequent recovery session (also 2026-05-10) restored work that was
+in flight when a power outage interrupted: the `pub mod sig;` /
+`pub mod wire;` declarations in `lattice-protocol/src/lib.rs` had been
+written but not yet wired, leaving the wire-types module unreachable.
+That session then carried M2 forward through Phases A, B, F-prep, and
+C.1 — see §4 commit log. The repo is a local git tree (no remote yet);
+all six commits live on `main`.
+
+Recovery context: this is also where the M2 decisions captured in the
+header §2.5 / D-04 re-open + Option B sealed-sender split + mls-rs stack
+upgrade originated.
