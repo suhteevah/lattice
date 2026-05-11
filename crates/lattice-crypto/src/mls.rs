@@ -29,6 +29,7 @@
 
 pub mod cipher_suite;
 pub mod identity_provider;
+pub mod psk;
 
 use tracing::instrument;
 
