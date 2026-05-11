@@ -10,8 +10,14 @@
 //!   (see [`identity`])
 //! - `ChaCha20-Poly1305` AEAD framing (see [`aead`])
 //! - MLS group state management via `mls-rs` (see [`mls`])
-//! - Sealed sender envelopes (see [`sealed_sender`])
 //! - Message padding to fixed buckets (see [`padding`])
+//!
+//! Sealed-sender envelope construction lives in `lattice-protocol::sealed_sender`
+//! (D-05). It is intentionally not in this crate because, after the D-05
+//! design, sealed-sender involves only Ed25519 sign/verify (a well-known
+//! primitive already available via `ed25519-dalek`) over canonically-encoded
+//! wire bytes — there is no Lattice-specific cryptographic primitive to
+//! house here.
 //!
 //! ## Cryptographic spec
 //!
@@ -48,7 +54,6 @@ pub mod hybrid_kex;
 pub mod identity;
 pub mod mls;
 pub mod padding;
-pub mod sealed_sender;
 
 /// Initialize the crypto subsystem.
 ///
@@ -105,10 +110,6 @@ pub enum Error {
     /// MLS state machine rejected an input.
     #[error("MLS error: {0}")]
     Mls(String),
-
-    /// Sealed sender envelope was malformed or failed integrity check.
-    #[error("sealed sender envelope rejected: {0}")]
-    SealedSender(String),
 
     /// Padding bucket lookup failed (message exceeds maximum).
     #[error("padding bucket overflow: payload {0} bytes exceeds {1} bytes")]

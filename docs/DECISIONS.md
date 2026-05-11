@@ -81,12 +81,19 @@ wire protocol version in `lattice-protocol`.
 |---|---|---|
 | `HKDF_INIT` | `b"lattice/init/v1"` | PQXDH-style initial session secret derivation |
 | `HKDF_MLS_INIT` | `b"lattice/mls-init/v1"` | Namespace prefix for the per-epoch external-PSK ID that folds the ML-KEM-768 secret into the MLS key schedule. Full PSK ID = prefix `\|\|` `epoch.to_le_bytes()`. Renamed in semantics from "HKDF info" to "PSK id prefix" by the D-04 re-open of 2026-05-10; the byte string is unchanged. |
-| `HKDF_SEALED_SENDER` | `b"lattice/sealed-sender/v1"` | Sealed sender envelope key |
 | `HKDF_AEAD_NONCE_PREFIX` | `b"lattice/aead-nonce/v1"` | Direction-specific AEAD nonce prefix |
 | `HKDF_IDENTITY_CLAIM` | `b"lattice/identity-claim/v1"` | Identity-claim binding hash |
 | `HKDF_KEY_PACKAGE_SIG` | `b"lattice/key-package-sig/v1"` | KeyPackage signature transcript |
 | `HKDF_FEDERATION_AUTH` | `b"lattice/federation-auth/v1"` | Server-to-server auth handshake |
-| `HKDF_SEALED_SENDER_MAC` | `b"lattice/sealed-sender-mac/v1"` | Outer-envelope MAC key for D-05 |
+
+**Removed 2026-05-10** by the D-05 follow-up cleanup (sealed-sender
+seal/verify moved to `lattice-protocol::sealed_sender` per Phase F
+of the M2 build plan):
+
+| Removed constant | Original purpose | Why removed |
+|---|---|---|
+| `HKDF_SEALED_SENDER` | "Sealed sender envelope key" — pre-D-05 design that AEAD-encrypted the inner payload under a key derived from the MLS epoch secret. | Superseded by D-05: the inner payload is already MLS-encrypted; there is no separate envelope-key derivation. |
+| `HKDF_SEALED_SENDER_MAC` | "Outer-envelope MAC key for D-05" — referenced an HMAC on the outer envelope. | D-05 actually uses Ed25519 signatures (not HMAC) for both the server's `cert.server_sig` and the sender's `envelope.envelope_sig`. No HMAC key needed. |
 
 **Rationale:** Spelling each info string explicitly avoids the worst
 silent-drift bug class in protocols: a typo in `HKDF(salt, ikm, info)`
@@ -279,13 +286,22 @@ zero-knowledge proofs are overkill. The cert approach has a known
 audit story.
 
 **Implementation:**
-- `lattice-protocol::sealed::{MembershipCert, SealedEnvelope}`
+- Wire types: `lattice-protocol::wire::{MembershipCert, SealedEnvelope}`
+  (Prost-encoded per the M2 wire-types deliverable).
+- Sealing / verification: `lattice-protocol::sealed_sender::{seal,
+  verify_at_router, open_at_recipient}`. The crypto is plain Ed25519
+  sign/verify from `ed25519-dalek` over canonically-encoded transcript
+  bytes — no Lattice-specific primitive needed, so the logic lives in
+  `lattice-protocol` rather than `lattice-crypto` (decided 2026-05-10
+  during M2 Phase F prep). `lattice-crypto::sealed_sender` was removed
+  in the same change as a dead stub.
 - Cert issuance: `lattice-server::routes::issue_cert` triggered by
-  `/group/{id}/commit`
+  `/group/{id}/commit` (M3 scope).
 - Cert refresh: clients fetch fresh certs on epoch rotation; if their
   cert expires before they get a new one, they queue outbound messages
+  (M3 scope).
 - Federated cert verification: peer servers trust the issuing server's
-  identity key (already required for federation per D-06)
+  identity key (already required for federation per D-06).
 
 **Trade-off accepted:** Adds one cert-issuance round-trip per MLS commit
 to the owning server. With M5's 50-msg / 5-min commit cadence this is at
