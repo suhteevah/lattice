@@ -1,11 +1,12 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 α + β + γ.1 shipped — browser client
-registers with a live `lattice-server` over fetch + CORS)
+**Last updated:** 2026-05-11 (M4 α + β + γ.1/.2/.3 shipped — browser
+drives the full Alice⇌Bob vertical slice against a live `lattice-server`)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1 + 2 complete; M1 shipped; M2 shipped; M3 federated
-bridge working three-node; **M4 Phases α + β + γ.1 shipped**. Fourteen+
-commits on `main` (local repo, no remote yet):
+bridge working three-node; **M4 Phases α + β + γ.1/.2/.3 shipped**. The
+M3 vertical-slice acceptance gate is now hit from a browser tab — no
+CLI required. Sixteen+ commits on `main` (local repo, no remote yet):
 
 ```
 2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
@@ -503,12 +504,22 @@ Module additions:
       `[0xAA; 32]`). `scripts/run-server-dev.ps1` spins up the server
       on `127.0.0.1:8080` with run state under `J:\lattice\.run\`
       (gitignored).
-- [ ] Phase γ.2: extend `api.rs` with `publish_kp`, `fetch_kp`,
-      `commit`, `welcome_for`, `publish_message`, `fetch_messages`,
-      `issue_cert`. Same per-route shape as `lattice-cli/src/main.rs`.
-- [ ] Phase γ.3: bind "Run MLS round-trip" to the real server path
-      — Alice + Bob each register, publish KeyPackages, exchange a
-      Welcome through the server, ratchet a message.
+- [x] Phase γ.2 (shipped 2026-05-11): `api::publish_key_package`
+      + `api::fetch_key_package`. Verified live — Bob publishes
+      12057-byte KP, GET returns 12057 bytes intact. URL-safe base64
+      (no padding) for path segments; server tries both encodings.
+- [x] Phase γ.3 (shipped 2026-05-11): full Alice⇌Bob server-backed
+      demo button. `api::submit_commit`, `api::fetch_welcome`,
+      `api::publish_message`, `api::fetch_messages`. `fetch_welcome`
+      MLS-decodes the `PqWelcomePayload` and rebuilds a
+      `LatticeWelcome` ready for `process_welcome`. Live values:
+      commit 15601 bytes, MLS Welcome 19819, PQ ct 1088 (epoch 1),
+      ciphertext 3662 bytes, "hello via server" round-trip OK.
+- [ ] Phase γ.4: still open — replace HTTP with WebTransport
+      (`web-sys::WebTransport`) per D-11; HTTP stays as fallback.
+- [ ] Phase γ-polish: `api::issue_cert` (`POST /group/:gid/issue_cert`)
+      for sealed-sender envelopes — currently the demo posts the raw
+      MLS application message, not a `SealedEnvelope`.
 - [ ] Phase γ.4: replace HTTP with WebTransport (`web-sys::WebTransport`)
       per D-11; HTTP stays as the fallback.
 - [ ] Phase δ: IndexedDB-backed storage providers
