@@ -1,11 +1,12 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 Phase α shipped — Leptos browser
-client running PQ-hybrid crypto in-WASM at `http://127.0.0.1:5173`)
+**Last updated:** 2026-05-11 (M4 Phase α + β shipped — Leptos browser
+client running the full Alice↔Bob MLS round-trip entirely in WASM at
+`http://127.0.0.1:5173`)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1 + 2 complete; M1 shipped; M2 shipped; M3 federated
-bridge working three-node; **M4 Phase α (browser preview) shipped**.
-Twelve+ commits on `main` (local repo, no remote yet):
+bridge working three-node; **M4 Phases α + β shipped**. Thirteen+
+commits on `main` (local repo, no remote yet):
 
 ```
 2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
@@ -468,16 +469,45 @@ TypeScript scaffold was replaced with a pure-Rust Leptos client.
   that any static CSP would block; production CSP is enforced by the
   home server via `csp.json`-derived headers.
 
+### Done (M4 Phase β — 2026-05-11, full MLS round-trip in-WASM)
+
+Second demo button on the home page exercises the M2 acceptance
+integration test (`alice_invites_bob_and_both_round_trip`) entirely in
+the browser tab. Same code paths the CLI demo and `cargo test --workspace`
+hit; here they run client-side with no network and no server.
+
+Live numbers (verified 2026-05-11 via `mcp__claude-in-chrome`):
+- Bob KeyPackage: **12057 bytes** (with `LatticeKemPubkey` extension).
+- Add-member commit: **15601 bytes**; MLS Welcome: **19819 bytes**;
+  PQ Welcome ciphertext: **1088 bytes** (ML-KEM-768 ct, epoch 1).
+- Alice + Bob `LatticePskStorage` both hold 1 entry after seal/open.
+- Bidirectional encrypt+decrypt: 3662-byte ciphertexts, plaintexts
+  recovered exactly (`"hello, lattice"`, `"hello, alice"`).
+- Status reports `MLS round-trip OK`.
+
+Module additions:
+- `apps/lattice-web/Cargo.toml` gains `mls-rs.workspace` dep for
+  `InMemoryKeyPackageStorage` on the `LatticeIdentity` struct field.
+- `apps/lattice-web/scripts/check.ps1` — quick `cargo check
+  --target wasm32-unknown-unknown` wrapper inside the VS env, so the
+  inner-dev loop doesn't have to wait for a full `trunk build`.
+
 ### Not done — M4 polish (open for the browser-client deploy)
 
-- [ ] Phase β: real group/DM UI — create-group / invite / send / recv
-      wired through the same `lattice-crypto::mls` API the CLI uses.
-- [ ] Phase γ: WebTransport client (`web-sys::WebTransport`) hitting
-      the lattice-server federation/message endpoints from the
-      browser.
+- [ ] Phase γ: HTTP/WebTransport client wiring the same flow against
+      a live `lattice-server`. Two sub-tasks: (1) add `tower-http`
+      CORS to `lattice-server` so the browser can call it from a
+      different origin; (2) implement a `gloo-net::http`-based
+      adapter that POSTs to `/register`, `/key_packages`,
+      `/group/{id}/commit`, etc. — once both halves land, "Run MLS
+      round-trip" can talk to the real server instead of running both
+      ends in one tab.
 - [ ] Phase δ: IndexedDB-backed storage providers
       (`KeyPackageStorage`, `GroupStateStorage`, `PreSharedKeyStorage`)
-      so the browser persists state across reloads.
+      so the browser persists state across reloads. Pull `idb`
+      (thin async wrapper) and wrap the three `mls_rs_core::*::*Storage`
+      traits. Identity persistence is D-08; chunked encrypt-at-rest
+      can land on the same store.
 - [ ] Phase ε: WebAuthn passkey flow (D-09 — PRF / passphrase+badge /
       refuse three-tier).
 - [ ] Phase ζ: a11y pass — keyboard nav, focus rings, ARIA roles,
