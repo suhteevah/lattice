@@ -95,14 +95,12 @@ pub fn derive_iv(session_secret: &[u8], direction: &[u8]) -> Result<[u8; 12]> {
 /// only realistic cause is plaintext exceeding the per-nonce length limit
 /// (~256 GiB); we surface it uniformly.
 #[instrument(level = "trace", skip(key, plaintext, aad), fields(pt_len = plaintext.len(), aad_len = aad.len()))]
-pub fn encrypt(
-    key: &AeadKey,
-    nonce: AeadNonce,
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>> {
+pub fn encrypt(key: &AeadKey, nonce: AeadNonce, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key.0));
-    let payload = Payload { msg: plaintext, aad };
+    let payload = Payload {
+        msg: plaintext,
+        aad,
+    };
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce.0), payload)
         .map_err(|_| Error::Encrypt)?;
@@ -119,14 +117,12 @@ pub fn encrypt(
 /// The two are not distinguished externally to avoid leaking which one
 /// happened.
 #[instrument(level = "trace", skip(key, ciphertext, aad), fields(ct_len = ciphertext.len(), aad_len = aad.len()))]
-pub fn decrypt(
-    key: &AeadKey,
-    nonce: AeadNonce,
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>> {
+pub fn decrypt(key: &AeadKey, nonce: AeadNonce, aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key.0));
-    let payload = Payload { msg: ciphertext, aad };
+    let payload = Payload {
+        msg: ciphertext,
+        aad,
+    };
     let plaintext = cipher
         .decrypt(Nonce::from_slice(&nonce.0), payload)
         .map_err(|_| Error::Decrypt)?;
@@ -171,7 +167,10 @@ mod tests {
         let mut ct = encrypt(&key, nonce, b"", pt).expect("encrypt");
         // flip a bit in the ciphertext body (skip the leading 0 of length-zero AAD)
         ct[0] ^= 0x01;
-        assert!(matches!(decrypt(&key, nonce, b"", &ct), Err(Error::Decrypt)));
+        assert!(matches!(
+            decrypt(&key, nonce, b"", &ct),
+            Err(Error::Decrypt)
+        ));
     }
 
     #[test]
@@ -179,7 +178,10 @@ mod tests {
         let key = fixed_key();
         let nonce = AeadNonce([0; 12]);
         let ct = encrypt(&key, nonce, b"aad1", b"pt").expect("encrypt");
-        assert!(matches!(decrypt(&key, nonce, b"aad2", &ct), Err(Error::Decrypt)));
+        assert!(matches!(
+            decrypt(&key, nonce, b"aad2", &ct),
+            Err(Error::Decrypt)
+        ));
     }
 
     #[test]
@@ -188,7 +190,10 @@ mod tests {
         let key2 = AeadKey::from_bytes([0x02; 32]);
         let nonce = AeadNonce([0; 12]);
         let ct = encrypt(&key1, nonce, b"", b"secret").expect("encrypt");
-        assert!(matches!(decrypt(&key2, nonce, b"", &ct), Err(Error::Decrypt)));
+        assert!(matches!(
+            decrypt(&key2, nonce, b"", &ct),
+            Err(Error::Decrypt)
+        ));
     }
 
     #[test]

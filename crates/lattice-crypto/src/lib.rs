@@ -40,10 +40,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 // Test code legitimately uses expect()/unwrap()/panic per HANDOFF §7.
-#![cfg_attr(
-    test,
-    allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)
-)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 use tracing::instrument;
 

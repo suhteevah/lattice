@@ -30,7 +30,24 @@
 //! that mirror the wire types minus the signature fields — keeps the
 //! transcript deterministic without ad-hoc concatenation.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::module_name_repetitions,
+    // `seal()`'s first paragraph reads as one logical thought; splitting it
+    // hurts the documentation more than it helps the rustdoc summary.
+    clippy::too_long_first_doc_paragraph,
+)]
+
+// Test code in this module legitimately uses expect()/unwrap()/panic and
+// redundant clones for clarity per HANDOFF §7.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::redundant_clone,
+    )
+)]
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use prost::Message;
@@ -282,12 +299,13 @@ pub fn verify_at_router(
     }
     let cert_canonical = MembershipCertTbs::from_cert(cert).encode_to_vec();
     let server_sig_bytes: [u8; ED25519_SIG_LEN] =
-        cert.server_sig.as_slice().try_into().map_err(|_| {
-            SealedSenderError::CertSigLength {
+        cert.server_sig
+            .as_slice()
+            .try_into()
+            .map_err(|_| SealedSenderError::CertSigLength {
                 got: cert.server_sig.len(),
                 expected: ED25519_SIG_LEN,
-            }
-        })?;
+            })?;
     let cert_sig = Signature::from_bytes(&server_sig_bytes);
     server_pubkey
         .verify(&cert_canonical, &cert_sig)
@@ -432,13 +450,7 @@ mod tests {
         );
         let bob_eph_sk = rand_signing_key();
         let bob_eph_pk = bob_eph_sk.verifying_key().to_bytes().to_vec();
-        let bob_cert = issue_cert(
-            &server_sk,
-            group_id.clone(),
-            epoch,
-            bob_eph_pk,
-            valid_until,
-        );
+        let bob_cert = issue_cert(&server_sk, group_id.clone(), epoch, bob_eph_pk, valid_until);
 
         let env_a = seal(alice_cert, &alice_eph_sk, b"from alice".to_vec()).expect("alice seal");
         let env_b = seal(bob_cert, &bob_eph_sk, b"from bob".to_vec()).expect("bob seal");
@@ -524,7 +536,10 @@ mod tests {
         let (_server_pk, cert, _correct_eph_sk) = fixture(vec![9; 16], 1, 1_700_000_000);
         let wrong_eph_sk = rand_signing_key();
         let result = seal(cert, &wrong_eph_sk, b"x".to_vec());
-        assert!(matches!(result, Err(SealedSenderError::EphemeralPubkeyLength { .. })));
+        assert!(matches!(
+            result,
+            Err(SealedSenderError::EphemeralPubkeyLength { .. })
+        ));
     }
 
     #[test]

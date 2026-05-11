@@ -102,7 +102,7 @@ validator = { version = "0.19", features = ["derive"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 # Utilities
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde", "rng-getrandom", "js"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 base64 = "0.22"
@@ -113,6 +113,11 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
+# getrandom 0.4 (transitively pulled in by mls-rs's newer deps) requires
+# the `wasm_js` feature to compile on wasm32-unknown-unknown. We export
+# both 0.2 and 0.4 with their respective JS backend features so any
+# crate in the tree can resolve a working RNG on browser targets.
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -127,6 +132,19 @@ panic = "warn"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
+# Pedantic lints we don't agree with workspace-wide:
+# `doc_markdown`: rust-analyzer flags every TitleCase word in doc comments
+#   as "should be in backticks"; the prose is correct as written and
+#   sprinkling backticks for every type name in a paragraph hurts
+#   readability.
+# `similar_names`: crypto code uses pk/sk, ek/dk, ct/pt etc. by long-
+#   standing convention. Renaming to dissimilar identifiers hurts
+#   readability for anyone reading cryptographic literature.
+# `significant_drop_tightening`: pedantic-nursery, often false-positive
+#   on Mutex guards that we deliberately hold across short blocks.
+doc_markdown = "allow"
+similar_names = "allow"
+significant_drop_tightening = "allow"
 
 [profile.release]
 opt-level = 3

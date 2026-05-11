@@ -33,14 +33,7 @@ use tracing::instrument;
 use crate::{Error, Result};
 
 /// Padding bucket sizes in bytes, in increasing order.
-pub const BUCKETS: &[usize] = &[
-    256,
-    1_024,
-    4_096,
-    16_384,
-    65_536,
-    262_144,
-];
+pub const BUCKETS: &[usize] = &[256, 1_024, 4_096, 16_384, 65_536, 262_144];
 
 /// Maximum supported padded payload size.
 pub const MAX_BUCKET: usize = 262_144;
@@ -55,7 +48,10 @@ pub const MAX_BUCKET: usize = 262_144;
 /// [`MAX_BUCKET`]. The `+ 1` accounts for the mandatory marker byte.
 #[instrument(level = "trace", skip(payload), fields(pt_len = payload.len()))]
 pub fn pad(payload: &[u8]) -> Result<Vec<u8>> {
-    let needed = payload.len().checked_add(1).ok_or(Error::PaddingOverflow(payload.len(), MAX_BUCKET))?;
+    let needed = payload
+        .len()
+        .checked_add(1)
+        .ok_or(Error::PaddingOverflow(payload.len(), MAX_BUCKET))?;
     let bucket = BUCKETS.iter().copied().find(|&b| b >= needed);
     let Some(bucket_size) = bucket else {
         return Err(Error::PaddingOverflow(payload.len(), MAX_BUCKET));

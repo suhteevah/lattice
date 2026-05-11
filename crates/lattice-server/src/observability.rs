@@ -1,7 +1,7 @@
 //! Tracing initialization. JSON output in production, pretty in development.
 
 use anyhow::Context;
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 /// Initialize the global tracing subscriber.
 ///

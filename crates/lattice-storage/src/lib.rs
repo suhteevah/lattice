@@ -68,8 +68,12 @@ pub async fn open_default() -> Result<impl Store, Error> {
     }
 }
 
-#[allow(dead_code)]
-fn unimplemented_store() -> Result<UnimplementedStore, Error> {
+// Placeholder until real backends land in M3 (server side) and M4
+// (IndexedDB). The `Result` wrapper is retained because the real
+// signatures will fail (`std::io::Error` etc.); silence the
+// unnecessary_wraps lint until then.
+#[allow(dead_code, clippy::unnecessary_wraps)]
+const fn unimplemented_store() -> Result<UnimplementedStore, Error> {
     Ok(UnimplementedStore)
 }
 

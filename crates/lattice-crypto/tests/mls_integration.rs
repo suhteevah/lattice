@@ -6,13 +6,26 @@
 //! shared secret. No live server, no network — purely the crypto + MLS
 //! layer.
 
+// Test code legitimately uses expect()/unwrap()/panic per HANDOFF §7.
+// Integration tests are their own crate, so they don't inherit
+// lattice-crypto's lib-level cfg_attr(test, ...).
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    // The .clone()s in this file are deliberate readability aids — the
+    // test wants to demonstrate that Alice and Bob each hold their own
+    // storage handles, even if one of them isn't reused afterwards.
+    clippy::redundant_clone
+)]
+
 use lattice_crypto::credential::{
-    LatticeCredential, ED25519_PK_LEN, ML_DSA_65_PK_LEN, USER_ID_LEN,
+    ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
 };
 use lattice_crypto::mls::{
-    add_member, apply_commit, cipher_suite::LATTICE_HYBRID_V1, create_group, decrypt,
-    encrypt_application, generate_key_package, leaf_node_kem::KemKeyPair, process_welcome,
-    psk::LatticePskStorage, LatticeIdentity,
+    LatticeIdentity, add_member, apply_commit, cipher_suite::LATTICE_HYBRID_V1, create_group,
+    decrypt, encrypt_application, generate_key_package, leaf_node_kem::KemKeyPair, process_welcome,
+    psk::LatticePskStorage,
 };
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider, SignaturePublicKey};
 
@@ -37,7 +50,7 @@ fn make_identity(user_id_byte: u8) -> LatticeIdentity {
         ed25519_pub,
         ml_dsa_pub,
     };
-    let kem_keypair = KemKeyPair::generate().expect("kem keygen");
+    let kem_keypair = KemKeyPair::generate();
 
     LatticeIdentity {
         credential,
@@ -49,7 +62,7 @@ fn make_identity(user_id_byte: u8) -> LatticeIdentity {
 
 /// Stable group id for tests. UUIDv7 bytes in production; arbitrary 16
 /// bytes here.
-fn group_id() -> [u8; 16] {
+const fn group_id() -> [u8; 16] {
     *b"lattice-int-test"
 }
 
@@ -62,8 +75,7 @@ fn alice_invites_bob_and_both_round_trip() {
     let bob_psk = LatticePskStorage::new();
 
     // === Alice creates the group ===
-    let mut alice_group =
-        create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
+    let mut alice_group = create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
 
     // === Bob publishes a KeyPackage ===
     let bob_kp = generate_key_package(&bob_id, bob_psk.clone()).expect("kp");
@@ -81,16 +93,15 @@ fn alice_invites_bob_and_both_round_trip() {
     apply_commit(&mut alice_group).expect("alice apply");
 
     // === Bob joins via the Welcome ===
-    let mut bob_group =
-        process_welcome(&bob_id, bob_psk.clone(), &welcome).expect("bob join");
+    let mut bob_group = process_welcome(&bob_id, bob_psk.clone(), &welcome).expect("bob join");
 
     // Bob's PSK store should also hold one entry (the secret he just
     // decapsulated from the PQ payload).
     assert_eq!(bob_psk.len().expect("len"), 1);
 
     // === Application messages: Alice → Bob ===
-    let alice_msg = encrypt_application(&mut alice_group, b"hello, lattice")
-        .expect("alice encrypt");
+    let alice_msg =
+        encrypt_application(&mut alice_group, b"hello, lattice").expect("alice encrypt");
     let recovered_at_bob = decrypt(&mut bob_group, &alice_msg).expect("bob decrypt");
     assert_eq!(recovered_at_bob, b"hello, lattice");
 
@@ -107,14 +118,12 @@ fn bob_decrypts_messages_in_order() {
     let alice_psk = LatticePskStorage::new();
     let bob_psk = LatticePskStorage::new();
 
-    let mut alice_group =
-        create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
+    let mut alice_group = create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
     let bob_kp = generate_key_package(&bob_id, bob_psk.clone()).expect("kp");
     let commit_output = add_member(&mut alice_group, &bob_kp).expect("add_member");
     let welcome = commit_output.welcomes.into_iter().next().unwrap();
     apply_commit(&mut alice_group).expect("apply");
-    let mut bob_group =
-        process_welcome(&bob_id, bob_psk.clone(), &welcome).expect("join");
+    let mut bob_group = process_welcome(&bob_id, bob_psk.clone(), &welcome).expect("join");
 
     // Send three messages in order.
     let messages: Vec<&[u8]> = vec![b"first", b"second", b"third"];
@@ -137,14 +146,12 @@ fn tampered_application_message_is_rejected() {
     let alice_psk = LatticePskStorage::new();
     let bob_psk = LatticePskStorage::new();
 
-    let mut alice_group =
-        create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
+    let mut alice_group = create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
     let bob_kp = generate_key_package(&bob_id, bob_psk.clone()).expect("kp");
     let commit_output = add_member(&mut alice_group, &bob_kp).expect("add_member");
     let welcome = commit_output.welcomes.into_iter().next().unwrap();
     apply_commit(&mut alice_group).expect("apply");
-    let mut bob_group =
-        process_welcome(&bob_id, bob_psk.clone(), &welcome).expect("join");
+    let mut bob_group = process_welcome(&bob_id, bob_psk.clone(), &welcome).expect("join");
 
     let ct = encrypt_application(&mut alice_group, b"original").expect("encrypt");
 
@@ -154,10 +161,7 @@ fn tampered_application_message_is_rejected() {
     tampered[idx] ^= 0xFF;
 
     let result = decrypt(&mut bob_group, &tampered);
-    assert!(
-        result.is_err(),
-        "tampered message must not decrypt cleanly"
-    );
+    assert!(result.is_err(), "tampered message must not decrypt cleanly");
 }
 
 #[test]
@@ -173,8 +177,7 @@ fn psk_id_matches_per_epoch() {
     let alice_psk = LatticePskStorage::new();
     let bob_psk = LatticePskStorage::new();
 
-    let mut alice_group =
-        create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
+    let mut alice_group = create_group(&alice_id, alice_psk.clone(), &group_id()).expect("create");
     let bob_kp = generate_key_package(&bob_id, bob_psk.clone()).expect("kp");
     let commit = add_member(&mut alice_group, &bob_kp).expect("add");
     let welcome = commit.welcomes.into_iter().next().unwrap();
@@ -183,7 +186,10 @@ fn psk_id_matches_per_epoch() {
 
     // Epoch after the commit that added Bob is 1 (group started at 0).
     let psk_id = psk_id_for_epoch(1);
-    let alice_psk_val = alice_psk.get(&psk_id).expect("alice get").expect("alice present");
+    let alice_psk_val = alice_psk
+        .get(&psk_id)
+        .expect("alice get")
+        .expect("alice present");
     let bob_psk_val = bob_psk.get(&psk_id).expect("bob get").expect("bob present");
     assert_eq!(
         alice_psk_val.raw_value(),
@@ -197,12 +203,12 @@ fn unknown_user_id_rejected_at_credential_decode() {
     // Confirm that an arbitrary signature pubkey does NOT satisfy
     // LatticeIdentityProvider's binding check (catches confused-deputy
     // attempts).
-    use lattice_crypto::mls::cipher_suite::{LatticeCryptoProvider, LATTICE_HYBRID_V1};
+    use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider};
     use lattice_crypto::mls::identity_provider::LatticeIdentityProvider;
     use mls_rs_core::extension::ExtensionList;
     use mls_rs_core::identity::{
-        Credential, CredentialType, CustomCredential, IdentityProvider,
-        MemberValidationContext, SigningIdentity,
+        Credential, CredentialType, CustomCredential, IdentityProvider, MemberValidationContext,
+        SigningIdentity,
     };
 
     let alice_id = make_identity(0xAA);
@@ -218,12 +224,11 @@ fn unknown_user_id_rejected_at_credential_decode() {
     );
 
     let provider = LatticeIdentityProvider::new();
-    let result = provider.validate_member(
-        &bad_signing,
-        None,
-        MemberValidationContext::None,
+    let result = provider.validate_member(&bad_signing, None, MemberValidationContext::None);
+    assert!(
+        result.is_err(),
+        "mismatch between credential and signature_key must fail"
     );
-    assert!(result.is_err(), "mismatch between credential and signature_key must fail");
 
     // sanity: providers also exist (smoke check that the test compiles
     // against the real provider chain).

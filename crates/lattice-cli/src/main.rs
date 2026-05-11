@@ -16,13 +16,17 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 #[derive(Debug, Parser)]
 #[command(name = "lattice", version, about = "Lattice CLI")]
 struct Cli {
     /// Home server URL.
-    #[arg(long, env = "LATTICE_HOME_SERVER", default_value = "https://localhost:8443")]
+    #[arg(
+        long,
+        env = "LATTICE_HOME_SERVER",
+        default_value = "https://localhost:8443"
+    )]
     home_server: String,
 
     /// Local identity file. Defaults to `~/.lattice/identity.json`.
@@ -71,8 +75,8 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("lattice=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("lattice=debug"));
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().compact())

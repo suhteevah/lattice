@@ -1,10 +1,9 @@
 //! `/health` endpoint. Returns service liveness and component checks.
 
-use axum::{routing::get, Json, Router};
-use serde_json::{json, Value};
+use axum::{Json, Router, routing::get};
+use serde_json::{Value, json};
 
 /// Build the health router fragment.
-#[must_use]
 pub fn router() -> Router {
     Router::new().route("/health", get(health))
 }

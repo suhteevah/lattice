@@ -37,8 +37,10 @@ use ed25519_dalek::{
     Verifier as EdVerifier, VerifyingKey as EdVerifyingKey,
 };
 use ml_dsa::signature::{Keypair as MlKeypair, Signer as MlSigner, Verifier as MlVerifier};
-use ml_dsa::{EncodedVerifyingKey, MlDsa65, Seed, SigningKey as MlDsaSigningKey,
-    VerifyingKey as MlDsaVerifyingKey, Signature as MlDsaSignature};
+use ml_dsa::{
+    EncodedVerifyingKey, MlDsa65, Seed, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey,
+};
 use mls_rs_core::crypto::{
     CipherSuite, CipherSuiteProvider, CryptoProvider, HpkeCiphertext, HpkePsk, HpkePublicKey,
     HpkeSecretKey, SignaturePublicKey, SignatureSecretKey,
@@ -276,14 +278,9 @@ impl CipherSuiteProvider for LatticeHybridCipherSuite {
         aad: Option<&[u8]>,
         psk: HpkePsk<'_>,
     ) -> Result<Zeroizing<Vec<u8>>, Self::Error> {
-        Ok(self.inner.hpke_open_psk(
-            ciphertext,
-            local_secret,
-            local_public,
-            info,
-            aad,
-            psk,
-        )?)
+        Ok(self
+            .inner
+            .hpke_open_psk(ciphertext, local_secret, local_public, info, aad, psk)?)
     }
 
     fn hpke_setup_s(
@@ -306,10 +303,7 @@ impl CipherSuiteProvider for LatticeHybridCipherSuite {
             .hpke_setup_r(kem_output, local_secret, local_public, info)?)
     }
 
-    fn kem_derive(
-        &self,
-        ikm: &[u8],
-    ) -> Result<(HpkeSecretKey, HpkePublicKey), Self::Error> {
+    fn kem_derive(&self, ikm: &[u8]) -> Result<(HpkeSecretKey, HpkePublicKey), Self::Error> {
         Ok(self.inner.kem_derive(ikm)?)
     }
 
@@ -372,14 +366,12 @@ impl CipherSuiteProvider for LatticeHybridCipherSuite {
         }
         let (ed_sk_bytes, ml_dsa_seed_bytes) = sk_bytes.split_at(32);
 
-        let ed_sk = EdSigningKey::from_bytes(
-            ed_sk_bytes
-                .try_into()
-                .map_err(|_| LatticeHybridError::SigSkLength {
-                    got: ed_sk_bytes.len(),
-                    expected: 32,
-                })?,
-        );
+        let ed_sk = EdSigningKey::from_bytes(ed_sk_bytes.try_into().map_err(|_| {
+            LatticeHybridError::SigSkLength {
+                got: ed_sk_bytes.len(),
+                expected: 32,
+            }
+        })?);
         let ed_pk = ed_sk.verifying_key();
 
         let seed_arr: [u8; 32] =
@@ -399,11 +391,7 @@ impl CipherSuiteProvider for LatticeHybridCipherSuite {
         Ok(SignaturePublicKey::from(pk_bytes))
     }
 
-    fn sign(
-        &self,
-        secret_key: &SignatureSecretKey,
-        data: &[u8],
-    ) -> Result<Vec<u8>, Self::Error> {
+    fn sign(&self, secret_key: &SignatureSecretKey, data: &[u8]) -> Result<Vec<u8>, Self::Error> {
         let sk_bytes = secret_key.as_bytes();
         if sk_bytes.len() != HYBRID_SIG_SK_LEN {
             return Err(LatticeHybridError::SigSkLength {
@@ -413,14 +401,12 @@ impl CipherSuiteProvider for LatticeHybridCipherSuite {
         }
         let (ed_sk_bytes, ml_dsa_seed_bytes) = sk_bytes.split_at(32);
 
-        let ed_sk = EdSigningKey::from_bytes(
-            ed_sk_bytes
-                .try_into()
-                .map_err(|_| LatticeHybridError::SigSkLength {
-                    got: ed_sk_bytes.len(),
-                    expected: 32,
-                })?,
-        );
+        let ed_sk = EdSigningKey::from_bytes(ed_sk_bytes.try_into().map_err(|_| {
+            LatticeHybridError::SigSkLength {
+                got: ed_sk_bytes.len(),
+                expected: 32,
+            }
+        })?);
         let ed_sig = ed_sk.sign(data);
 
         let seed_arr: [u8; 32] =
@@ -514,12 +500,11 @@ mod tests {
     fn provider_advertises_only_lattice_suite() {
         let p = LatticeCryptoProvider::new();
         assert_eq!(p.supported_cipher_suites(), vec![LATTICE_HYBRID_V1]);
-        assert!(p
-            .cipher_suite_provider(CipherSuite::CURVE25519_CHACHA)
-            .is_none());
-        assert!(p
-            .cipher_suite_provider(CipherSuite::P256_AES128)
-            .is_none());
+        assert!(
+            p.cipher_suite_provider(CipherSuite::CURVE25519_CHACHA)
+                .is_none()
+        );
+        assert!(p.cipher_suite_provider(CipherSuite::P256_AES128).is_none());
     }
 
     #[test]
@@ -608,9 +593,7 @@ mod tests {
     fn signature_key_derive_public_matches_generate() {
         let p = provider();
         let (sk, pk) = p.signature_key_generate().expect("keygen");
-        let derived = p
-            .signature_key_derive_public(&sk)
-            .expect("derive");
+        let derived = p.signature_key_derive_public(&sk).expect("derive");
         assert_eq!(derived.as_bytes(), pk.as_bytes());
     }
 
@@ -625,22 +608,16 @@ mod tests {
         let ct = p
             .aead_seal(&key, plaintext, Some(b"aad"), &nonce)
             .expect("seal");
-        let pt = p
-            .aead_open(&key, &ct, Some(b"aad"), &nonce)
-            .expect("open");
+        let pt = p.aead_open(&key, &ct, Some(b"aad"), &nonce).expect("open");
         assert_eq!(pt.as_slice(), plaintext);
     }
 
     #[test]
     fn delegated_kdf_extract_expand_works() {
         let p = provider();
-        let prk = p
-            .kdf_extract(b"salt", b"ikm")
-            .expect("extract");
+        let prk = p.kdf_extract(b"salt", b"ikm").expect("extract");
         assert_eq!(prk.len(), p.kdf_extract_size());
-        let okm = p
-            .kdf_expand(&prk, b"info", 64)
-            .expect("expand");
+        let okm = p.kdf_expand(&prk, b"info", 64).expect("expand");
         assert_eq!(okm.len(), 64);
     }
 }

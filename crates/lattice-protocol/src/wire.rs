@@ -299,8 +299,7 @@ mod tests {
             ed25519_sig: [0xDD; 64],
         };
         let wire: HybridSignatureWire = crypto_sig.clone().into();
-        let back: lattice_crypto::identity::HybridSignature =
-            wire.try_into().expect("try_into");
+        let back: lattice_crypto::identity::HybridSignature = wire.try_into().expect("try_into");
         assert_eq!(back.ml_dsa_sig, crypto_sig.ml_dsa_sig);
         assert_eq!(back.ed25519_sig, crypto_sig.ed25519_sig);
     }

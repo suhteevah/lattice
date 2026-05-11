@@ -22,17 +22,18 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     // 2. Tracing
-    lattice_server::observability::init_tracing()
-        .context("failed to initialize tracing")?;
+    lattice_server::observability::init_tracing().context("failed to initialize tracing")?;
 
-    info!(version = env!("CARGO_PKG_VERSION"), "starting lattice-server");
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "starting lattice-server"
+    );
 
     // 3. Crypto
     lattice_crypto::init().context("crypto init failed")?;
 
     // 4. Config
-    let cfg = lattice_server::config::AppConfig::load()
-        .context("failed to load configuration")?;
+    let cfg = lattice_server::config::AppConfig::load().context("failed to load configuration")?;
     info!(
         bind_addr = %cfg.server.bind_addr,
         environment = %cfg.environment,

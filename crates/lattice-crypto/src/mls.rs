@@ -27,7 +27,7 @@
 //! via per-epoch external PSK injection rather than by rewriting the
 //! MLS `init_secret`. `add_member` and `commit` both ML-KEM-encapsulate
 //! a fresh shared secret to every (other) member's `LatticeKemPubkey`,
-//! store the secret under [`psk::psk_id_for_epoch`]`(next_epoch)` in
+//! store the secret under `psk::psk_id_for_epoch(next_epoch)` in
 //! the local [`psk::LatticePskStorage`], and reference the PSK from
 //! the commit via `CommitBuilder::add_psk`. mls-rs's key schedule
 //! evaluates `epoch_secret = Expand("epoch", Extract(joiner_secret,
@@ -61,23 +61,23 @@ pub mod psk;
 pub mod welcome_pq;
 
 use mls_rs::{
+    Client, ExtensionList, MlsMessage,
     identity::SigningIdentity,
     mls_rs_codec::{MlsDecode, MlsEncode},
     storage_provider::in_memory::InMemoryKeyPackageStorage,
-    Client, ExtensionList, MlsMessage,
 };
-use mls_rs_core::extension::MlsExtension;
 use mls_rs_core::crypto::SignatureSecretKey;
+use mls_rs_core::extension::MlsExtension;
 use tracing::instrument;
 
 use crate::credential::LatticeCredential;
 use crate::{Error, Result};
 
-use self::cipher_suite::{LatticeCryptoProvider, LATTICE_HYBRID_V1};
+use self::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider};
 use self::identity_provider::LatticeIdentityProvider;
 use self::leaf_node_kem::{KemKeyPair, LatticeKemPubkey};
-use self::psk::{psk_id_for_epoch, LatticePskStorage};
-use self::welcome_pq::{open_pq_secret, seal_pq_secret, PqWelcomePayload};
+use self::psk::{LatticePskStorage, psk_id_for_epoch};
+use self::welcome_pq::{PqWelcomePayload, open_pq_secret, seal_pq_secret};
 
 /// Per-device identity bundle used to build an MLS [`Client`].
 ///
@@ -149,8 +149,8 @@ pub struct LatticeWelcome {
 
 /// Concrete [`MlsConfig`] type alias for Lattice clients. Keeps callers
 /// from spelling out the long `WithFoo<WithBar<...>>` builder type chain.
-type LatticeMlsConfig = <self::client_config::LatticeClientBuilder as
-    self::client_config::AsLatticeMlsConfig>::Config;
+type LatticeMlsConfig =
+    <self::client_config::LatticeClientBuilder as self::client_config::AsLatticeMlsConfig>::Config;
 
 mod client_config {
     //! Internal helper to name the concrete `MlsConfig` type for a
@@ -199,16 +199,16 @@ mod client_config {
 fn build_client(
     identity: &LatticeIdentity,
     psk_store: LatticePskStorage,
-) -> Client<LatticeMlsConfig> {
+) -> Result<Client<LatticeMlsConfig>> {
+    let credential_bytes = identity
+        .credential
+        .encode()
+        .map_err(|e| Error::Mls(format!("encode credential: {e}")))?;
     let custom_credential = mls_rs_core::identity::CustomCredential::new(
         mls_rs_core::identity::CredentialType::new(crate::credential::CREDENTIAL_TYPE_LATTICE),
-        identity
-            .credential
-            .encode()
-            .expect("LatticeCredential::encode never fails for valid struct"),
+        credential_bytes,
     );
-    let mls_credential =
-        mls_rs_core::identity::Credential::Custom(custom_credential);
+    let mls_credential = mls_rs_core::identity::Credential::Custom(custom_credential);
 
     // Reconstruct the packed signature pubkey from the credential fields
     // (ed25519_pub || ml_dsa_pub) — this is the layout
@@ -224,7 +224,7 @@ fn build_client(
         mls_rs_core::crypto::SignaturePublicKey::from(sig_pk_bytes),
     );
 
-    Client::builder()
+    Ok(Client::builder()
         .identity_provider(LatticeIdentityProvider::new())
         .crypto_provider(LatticeCryptoProvider::new())
         .psk_store(psk_store)
@@ -240,7 +240,7 @@ fn build_client(
             identity.signature_secret.clone(),
             LATTICE_HYBRID_V1,
         )
-        .build()
+        .build())
 }
 
 /// Build the KeyPackage `ExtensionList` carrying our `LatticeKemPubkey`.
@@ -279,21 +279,17 @@ pub fn create_group(
     psk_store: LatticePskStorage,
     group_id: &[u8],
 ) -> Result<GroupHandle> {
-    let client = build_client(identity, psk_store.clone());
-    let kp_extensions = key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
+    let client = build_client(identity, psk_store.clone())?;
+    let kp_extensions =
+        key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
     let group = client
-        .create_group_with_id(
-            group_id.to_vec(),
-            ExtensionList::new(),
-            kp_extensions,
-            None,
-        )
+        .create_group_with_id(group_id.to_vec(), ExtensionList::new(), kp_extensions, None)
         .map_err(|e| Error::Mls(format!("create_group: {e:?}")))?;
     tracing::debug!(group_id_len = group_id.len(), "MLS group created");
     Ok(GroupHandle {
         inner: group,
         psk_store,
-        kem_keypair: identity.kem_keypair.duplicate()?,
+        kem_keypair: identity.kem_keypair.duplicate(),
     })
 }
 
@@ -311,8 +307,9 @@ pub fn generate_key_package(
     identity: &LatticeIdentity,
     psk_store: LatticePskStorage,
 ) -> Result<Vec<u8>> {
-    let client = build_client(identity, psk_store);
-    let kp_extensions = key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
+    let client = build_client(identity, psk_store)?;
+    let kp_extensions =
+        key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
     let kp = client
         .generate_key_package_message(kp_extensions, ExtensionList::new(), None)
         .map_err(|e| Error::Mls(format!("generate_key_package_message: {e:?}")))?;
@@ -328,10 +325,7 @@ pub fn generate_key_package(
 /// a `LatticeKemPubkey` LeafNode extension, or if mls-rs rejects the
 /// commit.
 #[instrument(level = "debug", skip(group, joiner_key_package))]
-pub fn add_member(
-    group: &mut GroupHandle,
-    joiner_key_package: &[u8],
-) -> Result<CommitOutput> {
+pub fn add_member(group: &mut GroupHandle, joiner_key_package: &[u8]) -> Result<CommitOutput> {
     let kp = MlsMessage::mls_decode(&mut &*joiner_key_package)
         .map_err(|e| Error::Mls(format!("decode joiner KeyPackage: {e:?}")))?;
 
@@ -448,7 +442,7 @@ pub fn process_welcome(
     let mls_welcome = MlsMessage::mls_decode(&mut &*welcome.mls_welcome)
         .map_err(|e| Error::Mls(format!("decode welcome: {e:?}")))?;
 
-    let client = build_client(identity, psk_store.clone());
+    let client = build_client(identity, psk_store.clone())?;
     let (group, _new_member_info) = client
         .join_group(None, &mls_welcome, None)
         .map_err(|e| Error::Mls(format!("join_group: {e:?}")))?;
@@ -461,7 +455,7 @@ pub fn process_welcome(
     Ok(GroupHandle {
         inner: group,
         psk_store,
-        kem_keypair: identity.kem_keypair.duplicate()?,
+        kem_keypair: identity.kem_keypair.duplicate(),
     })
 }
 
@@ -511,7 +505,8 @@ pub fn decrypt(group: &mut GroupHandle, ciphertext: &[u8]) -> Result<Vec<u8>> {
     use mls_rs::group::ReceivedMessage;
     Ok(match processed {
         ReceivedMessage::ApplicationMessage(app) => app.data().to_vec(),
-        ReceivedMessage::Commit(_) | ReceivedMessage::Proposal(_) => Vec::new(),
+        // All non-application variants (commit / proposal / external /
+        // future) advance state but produce no plaintext for the caller.
         _ => Vec::new(),
     })
 }
@@ -568,9 +563,7 @@ fn extract_leaf_kem_pubkey(kp: &MlsMessage) -> Result<LatticeKemPubkey> {
     let ext = key_pkg
         .extensions
         .get(<LatticeKemPubkey as MlsExtension>::extension_type())
-        .ok_or_else(|| {
-            Error::Mls("KeyPackage missing LatticeKemPubkey extension".into())
-        })?;
+        .ok_or_else(|| Error::Mls("KeyPackage missing LatticeKemPubkey extension".into()))?;
     LatticeKemPubkey::from_extension(&ext)
         .map_err(|e| Error::Mls(format!("decode LatticeKemPubkey: {e:?}")))
 }
@@ -595,22 +588,17 @@ impl LatticeCredential {
 }
 
 impl KemKeyPair {
-    /// Best-effort duplication of a keypair. Used internally to build
-    /// the GroupHandle without consuming the caller's `KemKeyPair`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::KeyGen`] only on unexpected internal failures
-    /// (this is essentially infallible).
-    pub fn duplicate(&self) -> Result<Self> {
+    /// Duplicate a keypair (workaround for `ml-kem`'s decap key not
+    /// being `Clone`). Used internally to build the GroupHandle without
+    /// consuming the caller's `KemKeyPair`.
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
         // ML-KEM-768 decap keys are not Clone in `ml-kem`'s public API;
         // we reconstruct by holding raw bytes here. Since `KemKeyPair`
         // already stores raw bytes, we just clone them.
-        let dk_bytes = self
-            .decapsulation_key_bytes()
-            .to_vec();
+        let dk_bytes = self.decapsulation_key_bytes().to_vec();
         let ek_bytes = self.encapsulation_key_bytes().to_vec();
-        Ok(Self::from_raw_bytes(ek_bytes, dk_bytes))
+        Self::from_raw_bytes(ek_bytes, dk_bytes)
     }
 }
 

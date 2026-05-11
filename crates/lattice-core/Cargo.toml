@@ -29,7 +29,12 @@ wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
 web-sys = { workspace = true, features = ["Window", "console", "Crypto"] }
+# Both major versions of getrandom are in the transitive tree (0.2 via
+# our direct deps; 0.4 via mls-rs's newer chain). The first uses the
+# `js` feature for WebCrypto; the second renamed it to `wasm_js`. Pin
+# both feature sets here so wasm32 builds resolve a working RNG.
 getrandom = { workspace = true, features = ["js"] }
+getrandom_04 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

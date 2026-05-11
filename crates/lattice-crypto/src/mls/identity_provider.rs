@@ -27,7 +27,7 @@ use mls_rs_core::{
 };
 
 use crate::credential::{
-    LatticeCredential, CREDENTIAL_TYPE_LATTICE, ED25519_PK_LEN, ML_DSA_65_PK_LEN,
+    CREDENTIAL_TYPE_LATTICE, ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN,
 };
 
 /// Layout of the `SigningIdentity::signature_key` byte string for the
@@ -68,9 +68,8 @@ impl LatticeIdentityProvider {
                 custom.credential_type.raw_value(),
             ));
         }
-        LatticeCredential::decode(&custom.data).map_err(|e| {
-            IdentityProviderError::Decode(format!("credential decode: {e}"))
-        })
+        LatticeCredential::decode(&custom.data)
+            .map_err(|e| IdentityProviderError::Decode(format!("credential decode: {e}")))
     }
 
     /// Check that `signing_identity.signature_key` byte layout matches the
@@ -210,8 +209,7 @@ mod tests {
     /// Build a SigningIdentity whose signature_key is the canonical
     /// `ed25519_pub || ml_dsa_pub` byte layout for the given credential.
     fn matched_signing_identity(cred: &LatticeCredential) -> SigningIdentity {
-        let mut signature_key_bytes =
-            Vec::with_capacity(ED25519_PK_LEN + ML_DSA_65_PK_LEN);
+        let mut signature_key_bytes = Vec::with_capacity(ED25519_PK_LEN + ML_DSA_65_PK_LEN);
         signature_key_bytes.extend_from_slice(&cred.ed25519_pub);
         signature_key_bytes.extend_from_slice(&cred.ml_dsa_pub);
         SigningIdentity {
@@ -332,9 +330,11 @@ mod tests {
         };
         let pre = matched_signing_identity(&pre_cred);
         let suc = matched_signing_identity(&suc_cred);
-        assert!(provider
-            .valid_successor(&pre, &suc, &ExtensionList::default())
-            .expect("valid_successor"));
+        assert!(
+            provider
+                .valid_successor(&pre, &suc, &ExtensionList::default())
+                .expect("valid_successor")
+        );
     }
 
     #[test]
@@ -342,9 +342,11 @@ mod tests {
         let provider = LatticeIdentityProvider::new();
         let pre = matched_signing_identity(&sample_credential(0x88));
         let suc = matched_signing_identity(&sample_credential(0x89));
-        assert!(!provider
-            .valid_successor(&pre, &suc, &ExtensionList::default())
-            .expect("valid_successor"));
+        assert!(
+            !provider
+                .valid_successor(&pre, &suc, &ExtensionList::default())
+                .expect("valid_successor")
+        );
     }
 
     #[test]

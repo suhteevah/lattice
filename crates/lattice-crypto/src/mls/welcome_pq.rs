@@ -4,12 +4,11 @@
 //! This is the receive-path side of the D-04 PSK injection flow. When
 //! Alice adds Bob via [`super::add_member`] (M2 Phase D), she:
 //!
-//! 1. Reads Bob's [`super::leaf_node_kem::LatticeKemPubkey`] from his
-//!    KeyPackage LeafNode extensions.
+//! 1. Reads Bob's `LatticeKemPubkey` from his KeyPackage extensions.
 //! 2. Calls [`seal_pq_secret`] which ML-KEM-encapsulates a fresh
 //!    per-commit shared secret to Bob's encapsulation key.
-//! 3. Stores the resulting secret in her [`super::psk::LatticePskStorage`]
-//!    under [`super::psk::psk_id_for_epoch`]`(next_epoch)`.
+//! 3. Stores the resulting secret in her `LatticePskStorage` under
+//!    `psk_id_for_epoch(next_epoch)`.
 //! 4. Attaches a [`PqWelcomePayload`] (this module's extension) to the
 //!    Welcome message that mls-rs produces.
 //! 5. References the PSK in the commit via `add_psk(psk_id)`.
@@ -19,8 +18,8 @@
 //! 1. Reads the [`PqWelcomePayload`] from the Welcome's extensions.
 //! 2. Calls [`open_pq_secret`] with his own
 //!    [`super::leaf_node_kem::KemKeyPair`] to recover the shared secret.
-//! 3. Stores it in his own [`super::psk::LatticePskStorage`] under the
-//!    same epoch-derived id — **before** calling `Client::join_group`,
+//! 3. Stores it in his own `LatticePskStorage` under the same
+//!    epoch-derived id — **before** calling `Client::join_group`,
 //!    because mls-rs looks up the PSK synchronously during join.
 //!
 //! ## Extension id
@@ -44,7 +43,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use ml_kem::{kem::Encapsulate, EncodedSizeUser, KemCore, MlKem768};
+use ml_kem::{EncodedSizeUser, KemCore, MlKem768, kem::Encapsulate};
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::extension::{ExtensionType, MlsCodecExtension};
 use rand::rngs::OsRng;
@@ -80,8 +79,7 @@ impl MlsCodecExtension for PqWelcomePayload {
 /// using [`OsRng`].
 ///
 /// Returns the wire payload (for the Welcome message) and the shared
-/// secret (to be stored locally under
-/// [`super::psk::psk_id_for_epoch`]`(epoch)`).
+/// secret (to be stored locally under `psk_id_for_epoch(epoch)`).
 ///
 /// # Errors
 ///
@@ -139,9 +137,9 @@ pub fn seal_pq_secret_with_rng<R: CryptoRng + RngCore>(
 /// [`KemKeyPair`] to recover the shared secret.
 ///
 /// The caller should store the returned secret under
-/// [`super::psk::psk_id_for_epoch`]`(payload.epoch)` before invoking
-/// `Client::join_group` — mls-rs's join path looks up the PSK
-/// synchronously and any later insertion will be too late.
+/// `psk_id_for_epoch(payload.epoch)` before invoking `Client::join_group`
+/// — mls-rs's join path looks up the PSK synchronously and any later
+/// insertion will be too late.
 ///
 /// # Errors
 ///
@@ -191,7 +189,7 @@ mod tests {
     #[test]
     fn seal_open_round_trip() {
         // Bob's KeyPackage carries his LatticeKemPubkey extension.
-        let bob = KemKeyPair::generate().expect("bob");
+        let bob = KemKeyPair::generate();
         let bob_pk = bob.pubkey();
 
         // Alice seals against Bob's pubkey for epoch 7.
@@ -206,7 +204,7 @@ mod tests {
 
     #[test]
     fn payload_round_trips_through_mls_codec() {
-        let bob = KemKeyPair::generate().expect("bob");
+        let bob = KemKeyPair::generate();
         let (payload, _ss) = seal_pq_secret(&bob.pubkey(), 99).expect("seal");
         let bytes = payload.mls_encode_to_vec().expect("encode");
         let decoded = PqWelcomePayload::mls_decode(&mut &*bytes).expect("decode");
@@ -226,23 +224,23 @@ mod tests {
 
     #[test]
     fn open_rejects_tampered_ciphertext() {
-        let bob = KemKeyPair::generate().expect("bob");
+        let bob = KemKeyPair::generate();
         let (mut payload, ss_alice) = seal_pq_secret(&bob.pubkey(), 11).expect("seal");
         // Flip one byte of the ciphertext.
         payload.ml_kem_ct[0] ^= 0xFF;
-        match open_pq_secret(&bob, &payload) {
-            // ml-kem-768 has implicit rejection — a tampered ct decapsulates
-            // to a different secret (not an error). Verify the secret differs.
-            Ok(ss_bob) => assert_ne!(&ss_alice[..], &ss_bob[..]),
-            // If the underlying impl strict-rejects (some versions do), that
-            // also satisfies the security goal.
-            Err(_) => {}
+        // ml-kem-768 has implicit rejection — a tampered ciphertext
+        // decapsulates to a *different* secret rather than producing an
+        // error. Either outcome (different secret OR strict error from
+        // some impls) satisfies the security goal: Bob does not recover
+        // Alice's secret.
+        if let Ok(ss_bob) = open_pq_secret(&bob, &payload) {
+            assert_ne!(&ss_alice[..], &ss_bob[..]);
         }
     }
 
     #[test]
     fn open_rejects_wrong_length_ciphertext() {
-        let bob = KemKeyPair::generate().expect("bob");
+        let bob = KemKeyPair::generate();
         let payload = PqWelcomePayload {
             epoch: 0,
             ml_kem_ct: vec![0u8; ML_KEM_768_CT_LEN - 1],
@@ -250,7 +248,9 @@ mod tests {
         let result = open_pq_secret(&bob, &payload);
         assert!(matches!(
             result,
-            Err(WelcomePqError::Decap(super::super::leaf_node_kem::KemKeyError::CiphertextLength { .. }))
+            Err(WelcomePqError::Decap(
+                super::super::leaf_node_kem::KemKeyError::CiphertextLength { .. }
+            ))
         ));
     }
 
@@ -258,7 +258,7 @@ mod tests {
     fn distinct_seals_produce_distinct_ciphertexts() {
         // Same recipient, two encapsulations — fresh randomness should yield
         // distinct ciphertexts and distinct shared secrets.
-        let bob = KemKeyPair::generate().expect("bob");
+        let bob = KemKeyPair::generate();
         let (p1, ss1) = seal_pq_secret(&bob.pubkey(), 0).expect("seal1");
         let (p2, ss2) = seal_pq_secret(&bob.pubkey(), 0).expect("seal2");
         assert_ne!(p1.ml_kem_ct, p2.ml_kem_ct);
@@ -267,8 +267,8 @@ mod tests {
 
     #[test]
     fn distinct_recipients_yield_distinct_secrets() {
-        let bob = KemKeyPair::generate().expect("bob");
-        let carol = KemKeyPair::generate().expect("carol");
+        let bob = KemKeyPair::generate();
+        let carol = KemKeyPair::generate();
         let (_p1, ss_bob) = seal_pq_secret(&bob.pubkey(), 0).expect("seal bob");
         let (_p2, ss_carol) = seal_pq_secret(&carol.pubkey(), 0).expect("seal carol");
         assert_ne!(&ss_bob[..], &ss_carol[..]);
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn epoch_carried_in_payload() {
-        let bob = KemKeyPair::generate().expect("bob");
+        let bob = KemKeyPair::generate();
         let (p, _ss) = seal_pq_secret(&bob.pubkey(), 0x1234_5678_9ABC_DEF0).expect("seal");
         assert_eq!(p.epoch, 0x1234_5678_9ABC_DEF0);
     }

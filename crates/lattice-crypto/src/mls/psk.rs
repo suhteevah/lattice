@@ -122,6 +122,16 @@ impl LatticePskStorage {
             .map_err(|_| LatticePskStorageError::Poisoned)?;
         Ok(guard.len())
     }
+
+    /// True if the storage holds no entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePskStorageError::Poisoned`] if the internal mutex
+    /// was poisoned by a panic in another thread.
+    pub fn is_empty(&self) -> Result<bool, LatticePskStorageError> {
+        Ok(self.len()? == 0)
+    }
 }
 
 impl PreSharedKeyStorage for LatticePskStorage {

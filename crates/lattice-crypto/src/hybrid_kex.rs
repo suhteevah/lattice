@@ -271,7 +271,11 @@ mod tests {
         assert_eq!(sk.ml_kem.len(), 2400, "ML-KEM-768 dk is 2400 bytes");
 
         let (ct, _ss) = encapsulate(&pk, HKDF_INIT).expect("encap");
-        assert_eq!(ct.x25519_eph_pk.len(), 32, "ephemeral X25519 pk is 32 bytes");
+        assert_eq!(
+            ct.x25519_eph_pk.len(),
+            32,
+            "ephemeral X25519 pk is 32 bytes"
+        );
         assert_eq!(ct.ml_kem_ct.len(), 1088, "ML-KEM-768 ct is 1088 bytes");
     }
 
@@ -306,7 +310,10 @@ mod tests {
             x25519: [0u8; 32],
             ml_kem: vec![0u8; 100], // wrong length
         };
-        assert!(matches!(encapsulate(&bad_pk, HKDF_INIT), Err(Error::Kem(_))));
+        assert!(matches!(
+            encapsulate(&bad_pk, HKDF_INIT),
+            Err(Error::Kem(_))
+        ));
     }
 
     #[test]

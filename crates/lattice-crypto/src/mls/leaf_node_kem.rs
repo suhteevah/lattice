@@ -29,7 +29,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use ml_kem::{kem::Decapsulate, EncodedSizeUser, KemCore, MlKem768};
+use ml_kem::{EncodedSizeUser, KemCore, MlKem768, kem::Decapsulate};
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::extension::{ExtensionType, MlsCodecExtension};
 use rand::rngs::OsRng;
@@ -108,28 +108,19 @@ pub struct KemKeyPair {
 }
 
 impl KemKeyPair {
-    /// Generate a fresh ML-KEM-768 keypair using [`OsRng`].
-    ///
-    /// # Errors
-    ///
-    /// Practically infallible — `OsRng` does not error in normal
-    /// operation. The `Result` is here for forward compatibility.
-    pub fn generate() -> Result<Self, KemKeyError> {
+    /// Generate a fresh ML-KEM-768 keypair using `OsRng`.
+    #[must_use]
+    pub fn generate() -> Self {
         Self::generate_from_rng(&mut OsRng)
     }
 
     /// Generate a fresh ML-KEM-768 keypair from an explicit RNG.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KemKeyError::Generation`] only on unexpected internal
-    /// failure of the `ml-kem` crate.
-    pub fn generate_from_rng<R: CryptoRng + RngCore>(rng: &mut R) -> Result<Self, KemKeyError> {
+    pub fn generate_from_rng<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
         let (dk, ek) = MlKem768::generate(rng);
-        Ok(Self {
+        Self {
             encapsulation_key: ek.as_bytes().to_vec(),
             decapsulation_key: Zeroizing::new(dk.as_bytes().to_vec()),
-        })
+        }
     }
 
     /// Borrow the encapsulation key bytes for publication.
@@ -163,21 +154,21 @@ impl KemKeyPair {
                 expected: ML_KEM_768_CT_LEN,
             });
         }
-        let dk_bytes: &ml_kem::Encoded<<MlKem768 as KemCore>::DecapsulationKey> = self
-            .decapsulation_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| KemKeyError::DecapsulationKeyLength {
-                got: self.decapsulation_key.len(),
-                expected: ML_KEM_768_DK_LEN,
+        let dk_bytes: &ml_kem::Encoded<<MlKem768 as KemCore>::DecapsulationKey> =
+            self.decapsulation_key.as_slice().try_into().map_err(|_| {
+                KemKeyError::DecapsulationKeyLength {
+                    got: self.decapsulation_key.len(),
+                    expected: ML_KEM_768_DK_LEN,
+                }
             })?;
         let dk = <MlKem768 as KemCore>::DecapsulationKey::from_bytes(dk_bytes);
-        let ct: &ml_kem::Ciphertext<MlKem768> = ciphertext
-            .try_into()
-            .map_err(|_| KemKeyError::CiphertextLength {
-                got: ciphertext.len(),
-                expected: ML_KEM_768_CT_LEN,
-            })?;
+        let ct: &ml_kem::Ciphertext<MlKem768> =
+            ciphertext
+                .try_into()
+                .map_err(|_| KemKeyError::CiphertextLength {
+                    got: ciphertext.len(),
+                    expected: ML_KEM_768_CT_LEN,
+                })?;
         let ss = dk
             .decapsulate(ct)
             .map_err(|e| KemKeyError::Decapsulate(format!("{e:?}")))?;
@@ -257,10 +248,7 @@ mod tests {
 
     #[test]
     fn extension_type_is_f002() {
-        assert_eq!(
-            LATTICE_KEM_PUBKEY_EXTENSION.raw_value(),
-            0xF002,
-        );
+        assert_eq!(LATTICE_KEM_PUBKEY_EXTENSION.raw_value(), 0xF002,);
         assert_eq!(
             <LatticeKemPubkey as MlsCodecExtension>::extension_type(),
             LATTICE_KEM_PUBKEY_EXTENSION,
@@ -269,14 +257,14 @@ mod tests {
 
     #[test]
     fn keypair_generate_yields_correct_sizes() {
-        let kp = KemKeyPair::generate().expect("generate");
+        let kp = KemKeyPair::generate();
         assert_eq!(kp.encapsulation_key_bytes().len(), ML_KEM_768_EK_LEN);
         assert_eq!(kp.pubkey().encapsulation_key.len(), ML_KEM_768_EK_LEN);
     }
 
     #[test]
     fn lattice_kem_pubkey_round_trip_codec() {
-        let kp = KemKeyPair::generate().expect("generate");
+        let kp = KemKeyPair::generate();
         let pk = kp.pubkey();
         let bytes = pk.mls_encode_to_vec().expect("encode");
         let decoded = LatticeKemPubkey::mls_decode(&mut &*bytes).expect("decode");
@@ -295,7 +283,7 @@ mod tests {
     #[test]
     fn encap_decap_round_trip() {
         // Alice generates a keypair, publishes the pubkey.
-        let alice = KemKeyPair::generate().expect("alice");
+        let alice = KemKeyPair::generate();
         let alice_pk_bytes = alice.encapsulation_key_bytes().to_vec();
 
         // Bob encapsulates against Alice's pubkey.
@@ -312,15 +300,15 @@ mod tests {
 
     #[test]
     fn decapsulate_rejects_wrong_length_ciphertext() {
-        let kp = KemKeyPair::generate().expect("generate");
+        let kp = KemKeyPair::generate();
         let result = kp.decapsulate(&vec![0u8; ML_KEM_768_CT_LEN - 1]);
         assert!(matches!(result, Err(KemKeyError::CiphertextLength { .. })));
     }
 
     #[test]
     fn distinct_keypairs_produce_distinct_pubkeys() {
-        let a = KemKeyPair::generate().expect("a");
-        let b = KemKeyPair::generate().expect("b");
+        let a = KemKeyPair::generate();
+        let b = KemKeyPair::generate();
         assert_ne!(a.encapsulation_key_bytes(), b.encapsulation_key_bytes());
     }
 }

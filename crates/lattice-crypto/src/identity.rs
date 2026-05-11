@@ -23,8 +23,8 @@ use ed25519_dalek::{
 };
 use ml_dsa::signature::{Keypair as MlKeypair, Signer as MlSigner, Verifier as MlVerifier};
 use ml_dsa::{
-    EncodedVerifyingKey, MlDsa65, Seed, Signature as MlDsaSignature,
-    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    EncodedVerifyingKey, MlDsa65, Seed, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey,
 };
 use rand::rngs::OsRng;
 use rand_core::{CryptoRng, RngCore};
@@ -140,9 +140,8 @@ pub fn sign(sk: &IdentitySecretKey, message: &[u8]) -> Result<HybridSignature> {
     // ML-DSA sign
     let seed: Seed = sk.ml_dsa_seed.into();
     let ml_dsa_sk = MlDsaSigningKey::<MlDsa65>::from_seed(&seed);
-    let ml_dsa_sig: MlDsaSignature<MlDsa65> = ml_dsa_sk
-        .try_sign(message)
-        .map_err(|_| Error::Signature)?;
+    let ml_dsa_sig: MlDsaSignature<MlDsa65> =
+        ml_dsa_sk.try_sign(message).map_err(|_| Error::Signature)?;
 
     // Ed25519 sign
     let ed_signing = EdSigningKey::from_bytes(&sk.ed25519_sk);
@@ -163,11 +162,7 @@ pub fn sign(sk: &IdentitySecretKey, message: &[u8]) -> Result<HybridSignature> {
 /// either signature has the wrong length, or if either public key can't be
 /// decoded.
 #[instrument(level = "debug", skip(pk, message, sig), fields(msg_len = message.len()))]
-pub fn verify(
-    pk: &IdentityPublicKey,
-    message: &[u8],
-    sig: &HybridSignature,
-) -> Result<()> {
+pub fn verify(pk: &IdentityPublicKey, message: &[u8], sig: &HybridSignature) -> Result<()> {
     // ML-DSA verify
     let ml_dsa_pk_enc: &EncodedVerifyingKey<MlDsa65> = pk
         .ml_dsa_pk
@@ -219,7 +214,10 @@ mod tests {
         let (pk_a, sk_a) = generate_identity().expect("generate a");
         let (_pk_b, sk_b) = generate_identity().expect("generate b");
         let sig_b = sign(&sk_b, b"msg").expect("sign b");
-        assert!(matches!(verify(&pk_a, b"msg", &sig_b), Err(Error::Signature)));
+        assert!(matches!(
+            verify(&pk_a, b"msg", &sig_b),
+            Err(Error::Signature)
+        ));
         let sig_a = sign(&sk_a, b"msg").expect("sign a");
         verify(&pk_a, b"msg", &sig_a).expect("verify a");
     }
@@ -237,9 +235,15 @@ mod tests {
             ed25519_sig: sig_b.ed25519_sig,
         };
         // Against A's pk: Ed25519 portion was signed by B's key → fail
-        assert!(matches!(verify(&pk_a, b"msg", &franken), Err(Error::Signature)));
+        assert!(matches!(
+            verify(&pk_a, b"msg", &franken),
+            Err(Error::Signature)
+        ));
         // Against B's pk: ML-DSA portion was signed by A's key → fail
-        assert!(matches!(verify(&pk_b, b"msg", &franken), Err(Error::Signature)));
+        assert!(matches!(
+            verify(&pk_b, b"msg", &franken),
+            Err(Error::Signature)
+        ));
     }
 
     #[test]
