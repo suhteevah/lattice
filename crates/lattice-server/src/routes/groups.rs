@@ -243,14 +243,29 @@ async fn publish_message_handler(
     let envelope = decode_b64_vec(&body.envelope_b64)?;
     let seq = append_message(&state, gid, envelope.clone()).await;
 
-    if !body.remote_routing.is_empty() {
+    // Fan out to peers. The request body's `remote_routing` wins if
+    // present (lets a client override topology per-send); otherwise
+    // fall back to the per-group `group_replication` list stored
+    // via PUT /group/:gid/replication_peers (M6 store-and-forward).
+    let effective_peers: Vec<String> = if body.remote_routing.is_empty() {
+        state
+            .group_replication
+            .read()
+            .await
+            .get(&gid)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        body.remote_routing.clone()
+    };
+    if !effective_peers.is_empty() {
         let origin_host = body.origin_host.clone().unwrap_or_default();
         let origin_base_url = body.origin_base_url.clone().unwrap_or_default();
         crate::routes::federation::push_message_to_peers(
             &state,
             gid,
             &envelope,
-            &body.remote_routing,
+            &effective_peers,
             &origin_host,
             &origin_base_url,
         )
@@ -358,6 +373,46 @@ pub fn router() -> Router<ServerState> {
         )
         .route("/group/{gid_b64}/messages/ws", get(messages_ws_handler))
         .route("/group/{gid_b64}/issue_cert", post(issue_cert_handler))
+        .route(
+            "/group/{gid_b64}/replication_peers",
+            post(set_replication_peers_handler).get(get_replication_peers_handler),
+        )
+}
+
+/// `PUT/POST /group/:gid/replication_peers` body — list of peer
+/// base URLs that should mirror this group's traffic.
+#[derive(Debug, Deserialize)]
+pub struct SetReplicationPeersRequest {
+    /// Peer base URLs (e.g. `["http://cnc:4443", "http://pixie:4444"]`).
+    pub peers: Vec<String>,
+}
+
+/// `GET /group/:gid/replication_peers` response.
+#[derive(Debug, Serialize)]
+pub struct GetReplicationPeersResponse {
+    /// Currently-configured peer list. Empty if none.
+    pub peers: Vec<String>,
+}
+
+async fn set_replication_peers_handler(
+    State(state): State<ServerState>,
+    Path(gid_b64): Path<String>,
+    Json(body): Json<SetReplicationPeersRequest>,
+) -> Result<Json<GetReplicationPeersResponse>, (StatusCode, String)> {
+    let gid: [u8; 16] = decode_b64(&gid_b64)?;
+    let mut map = state.group_replication.write().await;
+    map.insert(gid, body.peers.clone());
+    Ok(Json(GetReplicationPeersResponse { peers: body.peers }))
+}
+
+async fn get_replication_peers_handler(
+    State(state): State<ServerState>,
+    Path(gid_b64): Path<String>,
+) -> Result<Json<GetReplicationPeersResponse>, (StatusCode, String)> {
+    let gid: [u8; 16] = decode_b64(&gid_b64)?;
+    let map = state.group_replication.read().await;
+    let peers = map.get(&gid).cloned().unwrap_or_default();
+    Ok(Json(GetReplicationPeersResponse { peers }))
 }
 
 /// `GET /group/:gid/messages/ws` — WebSocket upgrade. Each

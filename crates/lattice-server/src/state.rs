@@ -155,6 +155,13 @@ pub struct ServerState {
     /// the WS handler closes the stream so the client knows to
     /// re-poll from the HTTP path.
     pub subscribers: Arc<RwLock<HashMap<[u8; 16], broadcast::Sender<(u64, Vec<u8>)>>>>,
+    /// Per-group replication peer list (M6 store-and-forward). Each
+    /// entry is the base URL of a federation peer that mirrors this
+    /// group's traffic. `publish_message_handler` and the commit
+    /// handler use the stored list to fan out when the request body
+    /// doesn't carry an explicit `remote_routing`, so clients don't
+    /// need to repeat the topology on every send.
+    pub group_replication: Arc<RwLock<HashMap<[u8; 16], Vec<String>>>>,
 }
 
 impl ServerState {
@@ -181,6 +188,7 @@ impl ServerState {
             next_seq: Arc::new(RwLock::new(0)),
             federation_http: http,
             subscribers: Arc::default(),
+            group_replication: Arc::default(),
         }
     }
 

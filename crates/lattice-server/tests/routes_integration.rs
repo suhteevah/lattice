@@ -348,3 +348,66 @@ async fn issue_cert_returns_valid_membership_cert() {
     )
     .unwrap();
 }
+
+#[tokio::test]
+async fn replication_peers_round_trip() {
+    // M6 / ROADMAP §M6 acceptance: per-group replication list
+    // (store-and-forward topology) can be set + read back. The
+    // actual cross-server delivery is exercised in the existing
+    // cross-host federation tests; this verifies the per-group list
+    // round-trips through the new endpoint pair.
+    let (base, _state) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let gid: [u8; 16] = *b"replication-rt!!";
+    let gid_b64 = B64.encode(gid);
+
+    // Initially empty.
+    let r: serde_json::Value = client
+        .get(format!("{base}/group/{gid_b64}/replication_peers"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["peers"].as_array().unwrap().len(), 0);
+
+    // Set a list.
+    let peers = vec![
+        "http://cnc.lattice.local:4443".to_string(),
+        "http://pixie.lattice.local:4443".to_string(),
+    ];
+    let r: serde_json::Value = client
+        .post(format!("{base}/group/{gid_b64}/replication_peers"))
+        .json(&serde_json::json!({ "peers": peers }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let got_peers: Vec<String> = r["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(got_peers, peers);
+
+    // Read back.
+    let r: serde_json::Value = client
+        .get(format!("{base}/group/{gid_b64}/replication_peers"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let got_peers: Vec<String> = r["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(got_peers, peers);
+}
