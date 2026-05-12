@@ -1,0 +1,70 @@
+[package]
+name = "lattice-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lattice desktop shell (Tauri 2) — wraps the lattice-web Leptos UI and exposes lattice-media voice/video over IPC. M7 Phase F."
+
+[lints]
+workspace = true
+
+[lib]
+name = "lattice_desktop_lib"
+# Phase F is desktop-only. Tauri Mobile (Phase H) will add `cdylib` +
+# `staticlib` back so the same lib can be consumed by Android/iOS
+# shared libraries. The mingw `ld.exe` shipped with MSYS2 hits an
+# "export ordinal too large" failure when linking the cdylib variant
+# of this crate due to its transitive symbol count (Tauri + webrtc-rs
+# + lattice-crypto); the rlib path works fine. Reinstate the other
+# crate types in Phase H, on a toolchain that supports it.
+crate-type = ["rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lattice-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri 2 core. The shell + dialog + opener plugins are deliberately
+# omitted for now — Phase F surfaces voice/video IPC, not OS shell
+# integrations. Future plugins land via tauri.conf.json + this dep
+# table together.
+tauri = { version = "2", features = [] }
+
+# Lattice crates consumed natively (not WASM) on the desktop shell.
+# The browser tab compiles these to wasm32; the desktop wraps the same
+# UI but talks to native Rust through #[tauri::command] IPC.
+lattice-core = { path = "../../../crates/lattice-core" }
+lattice-crypto = { path = "../../../crates/lattice-crypto" }
+lattice-protocol = { path = "../../../crates/lattice-protocol" }
+lattice-media = { path = "../../../crates/lattice-media" }
+
+# Logging — every Lattice binary follows the same tracing posture
+# (workspace convention). RUST_LOG=lattice=trace surfaces the full
+# call lifecycle.
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Async runtime for the lattice-media orchestrator. Tauri provides its
+# own runtime but lattice-media's APIs expect Tokio; an explicit
+# dependency keeps the feature set stable across upstream versions.
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+
+# Error reporting + IPC serialization.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+rand.workspace = true
+
+[features]
+# Default-empty so `cargo check -p lattice-desktop` stays cheap. The
+# `custom-protocol` feature toggle is required by `cargo tauri build`
+# at release time to disable the inspector / hot reload bridge.
+custom-protocol = ["tauri/custom-protocol"]

@@ -48,6 +48,11 @@ async fn pq_dtls_srtp_full_loopback_converges() {
         return;
     }
 
+    // Workspace builds unify rustls features (ring + aws-lc-rs) from
+    // `lattice-server` + `dtls`; explicitly pin a provider so the DTLS
+    // handshake doesn't panic in `CryptoProvider::get_default`.
+    lattice_media::ensure_crypto_provider();
+
     // -- ICE: same as the C.2 test ------------------------------------
     let alice_ice = Arc::new(IceAgent::new(vec![], true).await.expect("alice ice"));
     let bob_ice = Arc::new(IceAgent::new(vec![], false).await.expect("bob ice"));

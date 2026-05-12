@@ -352,6 +352,73 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let tauri_host = crate::tauri::is_tauri();
+
+    let desktop_handshake = move |_| {
+        set_log_lines.set(Vec::new());
+        if !tauri_host {
+            set_status.set(
+                "desktop info: not running inside the Lattice desktop shell".to_string(),
+            );
+            return;
+        }
+        set_status.set("desktop info: querying shell…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match crate::tauri::desktop_info().await {
+                Ok(Some(info)) => {
+                    log(format!("greeting: {}", info.greeting));
+                    log(format!("core_version: {}", info.core_version));
+                    log(format!("media_version: {}", info.media_version));
+                    set_status.set("desktop info OK".to_string());
+                }
+                Ok(None) => set_status.set("desktop info: probe returned None".to_string()),
+                Err(e) => set_status.set(format!("desktop info error: {e}")),
+            }
+        });
+    };
+
+    let phase_f_call_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        if !tauri_host {
+            set_status.set(
+                "Phase F call demo runs inside the Lattice desktop shell — \
+                 build with `cargo tauri dev` from apps/lattice-desktop/src-tauri/"
+                    .to_string(),
+            );
+            return;
+        }
+        set_status.set("Phase F call: running PQ-DTLS-SRTP loopback in the shell…".to_string());
+        let log = append;
+        spawn_local(async move {
+            let request = crate::tauri::StartCallRequest::default();
+            match crate::tauri::start_call(&request).await {
+                Ok(report) => {
+                    log("== Phase F call demo (lattice-media loopback) ==".to_string());
+                    log(format!("call_id: {}", report.call_id_hex));
+                    log(format!(
+                        "ice candidates seen: caller={}, callee={}",
+                        report.caller_candidates_seen, report.callee_candidates_seen
+                    ));
+                    log(format!("srtp master prefix: {}", report.srtp_master_prefix));
+                    log(format!(
+                        "rtp: plain={} B → protected={} B → recovered={} B",
+                        report.plain_rtp_len, report.protected_rtp_len, report.recovered_rtp_len
+                    ));
+                    set_status.set(format!(
+                        "Phase F call OK (call_id {})",
+                        &report.call_id_hex[..16.min(report.call_id_hex.len())]
+                    ));
+                    // Best-effort teardown so the shell registry doesn't grow.
+                    if let Err(e) = crate::tauri::end_call(&report.call_id_hex).await {
+                        log(format!("end_call cleanup error: {e}"));
+                    }
+                }
+                Err(e) => set_status.set(format!("Phase F call error: {e}")),
+            }
+        });
+    };
+
     view! {
         <main class="page">
             <section class="card" aria-labelledby="lattice-heading">
@@ -384,6 +451,19 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=save_prf_encrypted>"Save PRF-encrypted"</button>
                     <button class="button" on:click=load_prf_encrypted>"Load PRF-encrypted"</button>
                     <button class="button" on:click=clear_identity>"Clear saved identity"</button>
+                    <button class="button" on:click=desktop_handshake>
+                        {if tauri_host { "Desktop info (Phase F)" } else { "Desktop info (desktop only)" }}
+                    </button>
+                    <button class="button" on:click=phase_f_call_demo>
+                        {if tauri_host { "Phase F: PQ call demo" } else { "Phase F: PQ call demo (desktop only)" }}
+                    </button>
+                </div>
+                <div class="muted" aria-label="host environment">
+                    {if tauri_host {
+                        "Host: Lattice desktop shell — native voice/video available."
+                    } else {
+                        "Host: browser tab — voice/video runs only in the desktop shell."
+                    }}
                 </div>
                 <Show
                     when=move || !log_lines.get().is_empty()

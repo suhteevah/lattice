@@ -1,18 +1,18 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M7 Phases A–E shipped: full PQ-DTLS-SRTP
-construction proved end-to-end in a same-process loopback. Wire
-version bumped 3 → 4 for call signaling. The prior "tonight
-voice/video shortcut" was retired earlier in this session per the
-no-shortcut directive; §14 documents the new posture.)
+**Last updated:** 2026-05-12 (M7 Phase F shipped: Tauri 2 desktop
+shell + IPC bridge + real `webrtc-srtp::Context` RTP round trip
+through the PQ-folded master + a `run_loopback_call` orchestrator
+the Tauri `start_call` command drives. See §15 below.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6
-all shipped**, **M7 Phases A–E all shipped, F is next.** Browser
+all shipped**, **M7 Phases A–F all shipped, G is next.** Browser
 tab is a full Lattice client; server live at `http://127.0.0.1:8080`.
-Wire version bumped 3 → 4 this session (M7 call signaling).
-**182 workspace tests pass** with `LATTICE_NET_TESTS=1` set (178
-without). `cargo check --workspace` green. `cargo clippy -p
-lattice-media --all-targets -- -D warnings` clean on the new crate.
+Wire version is 4 (M7 call signaling, bumped during Phase C).
+**186 workspace tests pass** with `LATTICE_NET_TESTS=1` set (182
+without). `cargo check --workspace`, `cargo check -p
+lattice-desktop`, `cargo check -p lattice-core --target
+wasm32-unknown-unknown` all green.
 
 **Phase E.2 cryptographic smoke test is green.** A same-process
 loopback drives two `IceAgent`s through full connectivity checks,
@@ -24,6 +24,101 @@ session keys. Test:
 `crates/lattice-media/tests/pq_dtls_srtp_loopback.rs`. Run with
 `$env:LATTICE_NET_TESTS=1; cargo test -p lattice-media --test
 pq_dtls_srtp_loopback`.
+
+### Session log — 2026-05-12 (Phase F)
+
+Compact session diff for the incoming Claude:
+
+- **Docs:** rewrote HANDOFF header + appended §15 (Phase F shipped
+  block). Appended Phase F "shipped" entry to ROADMAP.md M7
+  section.
+- **New `lattice-media::call::run_loopback_call` orchestrator.**
+  Same pipeline as Phase E.2 smoke test, packaged as a single
+  async entry point that returns a `CallOutcome` (serializable for
+  IPC). 240 LOC in `crates/lattice-media/src/call.rs`. New
+  integration test `tests/orchestrator_loopback.rs` exercises it.
+- **New `lattice-media::srtp::PqSrtpEndpoint`.** Wraps two
+  `webrtc-srtp::Context`s (local + remote) built from the
+  `split_srtp_master` output. Methods: `from_session_keys`,
+  `protect_rtp`, `unprotect_rtp`. Three new unit tests prove
+  caller↔callee RTP packet round trip + wrong-direction rejection.
+- **`default_dtls_config` advertises only
+  `AES-128-CM-HMAC-SHA1-80`.** Removing AES-GCM keeps the 60-byte
+  SRTP master OKM layout (`2*16 + 2*14`) consistent with
+  `derive_srtp_master`. GCM is a tracked M7 follow-up (different
+  salt length → 56-byte OKM).
+- **`lattice_media::ensure_crypto_provider()`** installs rustls's
+  `ring` provider once per process. Defends against the workspace's
+  transitive rustls feature unification (lattice-server's
+  `rustls.workspace` keeps `default` features → pulls `aws-lc-rs`
+  alongside our explicit `ring` → `CryptoProvider::get_default()`
+  panic at first DTLS handshake). Called from the orchestrator,
+  the Phase E.2 smoke test, and lattice-desktop's `run()`.
+- **New crate `apps/lattice-desktop/src-tauri`** (Tauri 2.10).
+  `lib.rs` (~70 LOC), `main.rs` (~10 LOC), `state.rs` (~30 LOC),
+  `commands.rs` (~200 LOC, 5 IPC commands). `cargo tauri icon`
+  generated the canonical icon set; `tauri.conf.json` points
+  `frontendDist` at `../../lattice-web/dist` so the desktop wraps
+  the trunk-built Leptos bundle.
+- **`apps/lattice-web/src/tauri.rs`** runtime-detects the Tauri host
+  via `window.__TAURI_INTERNALS__`; exposes `is_tauri()`,
+  `desktop_info()`, `start_call()`, `end_call()`. `JsCast` +
+  `js_sys::Reflect` rather than `tauri-sys` so the wasm-bundle
+  size doesn't bloat for a tiny IPC surface.
+- **`apps/lattice-web/src/app.rs`** gains two new buttons (`Desktop
+  info`, `Phase F: PQ call demo`) and a "Host: …" muted-text chip
+  that flips on `is_tauri()`. Outside Tauri the buttons explain
+  they're desktop-only rather than erroring.
+- **Build/workspace:** added
+  `apps/lattice-desktop/src-tauri` to `members`. lattice-desktop's
+  `[lib]` crate type is `["rlib"]` only — mingw `ld.exe` hits an
+  "export ordinal too large" failure on the cdylib variant due to
+  the transitive symbol count (Tauri + webrtc-rs + lattice-crypto).
+  Reinstate `["staticlib", "cdylib", "rlib"]` in Phase H on a
+  toolchain that supports it.
+- **New helper script** `apps/lattice-web/scripts/build.ps1` —
+  loads vcvars64 then runs `trunk build --release`. Wired into
+  `tauri.conf.json` `beforeBuildCommand`.
+
+Verification gates run this session:
+
+- `cargo check --workspace` ✅
+- `cargo test --workspace` with `LATTICE_NET_TESTS=1` ✅ **186
+  tests pass** (up from 182). Without the env var: 182.
+- `cargo check -p lattice-core --target wasm32-unknown-unknown` ✅
+- `cargo check -p lattice-desktop` ✅
+- `cargo check --target wasm32-unknown-unknown --bin lattice-web` ✅
+- Grep for `todo!()` / `unimplemented!()` / `FIXME` in new code → 0.
+
+What this session deliberately did **not** do:
+
+- Cross-machine call signaling. `start_call` currently runs the
+  Phase E.2 loopback in-process as a smoke proof that the IPC
+  bridge can carry the full lattice-media pipeline. Real
+  MLS-routed call invites land in a follow-up phase.
+- AES-128-GCM SRTP profile. CM-only for now (60-byte OKM); GCM is
+  a tracked follow-up (56-byte OKM with the 12-byte salt layout).
+- Tauri "production" bundle build (`cargo tauri build`). Bundle
+  packaging needs MSVC Build Tools on the host; the dev binary
+  (`cargo check -p lattice-desktop`) compiles green under the GNU
+  host toolchain.
+- Real audio/video capture. Phase F closes the cryptographic
+  stack and IPC bridge; opening the OS audio/video device sources
+  is a Phase G/H concern.
+
+Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md):
+
+| Phase | Status | Notes |
+|---|---|---|
+| A — webrtc-rs API research | ✅ shipped | Phase A baseline from prior session. |
+| B — `lattice-media` scaffold | ✅ shipped | Phase B baseline. |
+| C — ICE + STUN/TURN + call signaling wire types | ✅ shipped | Phase C baseline; wire v4. |
+| D — webrtc-rs deps + exporter helper | ✅ shipped | Phase D baseline. |
+| E — PQ-hybrid DTLS-SRTP construction | ✅ shipped | Phase E baseline + `tests/pq_dtls_srtp_loopback.rs`. |
+| F — Tauri desktop shell | ✅ shipped 2026-05-12 | This session. See above + §15. |
+| G — Hardware-backed key storage | ⬜ next | Windows Hello / TPM 2.0 + Secure Enclave + Secret Service. Phase F's IPC surface is the seam where Phase G's `keystore::sign(...)` commands attach. |
+| H — Tauri mobile shells | ⬜ | |
+| I — Cover-traffic + V2 parity gate | ⬜ | |
 
 ### Session log — 2026-05-11
 
@@ -1248,3 +1343,109 @@ Implementation home is the `lattice-media` crate. Roadmap reference:
 No phase ships without a passing test that exercises the PQ key
 derivation end-to-end. No phase weakens the PQ requirement to land
 faster.
+
+---
+
+## 15. M7 Phase F — Tauri desktop shell (shipped 2026-05-12)
+
+Captured here as the design / decision reference for the in-tree
+state. Day-by-day commit log lives in the top-of-file session log.
+
+### Goal
+
+Wrap the existing `lattice-web` Leptos UI in a Tauri 2 desktop app
+and prove the IPC bridge can drive `lattice-media`'s PQ-DTLS-SRTP
+pipeline end-to-end. The desktop shell substitutes native crates
+for `lattice-core` + `lattice-crypto` + `lattice-protocol` +
+`lattice-media` so the same Leptos code that runs in a browser tab
+runs against native Tokio + UDP on the desktop.
+
+### What shipped
+
+| Surface | Where |
+|---|---|
+| Tauri 2.10 project scaffold | `apps/lattice-desktop/src-tauri/` |
+| IPC commands `start_call` / `accept_call` / `end_call` / `call_status` / `desktop_info` | `apps/lattice-desktop/src-tauri/src/commands.rs` |
+| In-process call orchestrator + `CallOutcome` IPC type | `crates/lattice-media/src/call.rs::run_loopback_call` |
+| Real `webrtc-srtp::Context` round-trip wrapper | `crates/lattice-media/src/srtp.rs::PqSrtpEndpoint` |
+| Workspace rustls crypto-provider install | `crates/lattice-media/src/lib.rs::ensure_crypto_provider` |
+| Leptos host detection + IPC helper | `apps/lattice-web/src/tauri.rs` |
+| UI buttons (`Desktop info`, `Phase F: PQ call demo`) + host chip | `apps/lattice-web/src/app.rs` |
+| `trunk build --release` wrapper for `beforeBuildCommand` | `apps/lattice-web/scripts/build.ps1` |
+
+### Key design choices
+
+- **SRTP profile pinned to AES-128-CM-HMAC-SHA1-80.** The 60-byte
+  `derive_srtp_master` OKM matches the CM layout exactly
+  (`2*key + 2*salt = 2*16 + 2*14`). AES-GCM uses a 12-byte salt
+  → 56-byte OKM; supporting both requires profile-aware split +
+  derive. Filed as M7 follow-up; ship CM only for Phase F so the
+  RTP round trip can land cleanly.
+- **`rename_all = "snake_case"` on every Tauri command.** Tauri 2
+  defaults to camelCase for command-arg JSON keys, but every other
+  wire artifact in the workspace is snake_case (HKDF info strings,
+  Prost field names, capnp schemas, …). Pinning the IPC layer to
+  snake_case matches the rest of the codebase and avoids per-arg
+  `#[serde(rename = "…")]` noise on the Leptos side.
+- **`rustls::crypto::ring::default_provider().install_default()`
+  invoked once via `lattice_media::ensure_crypto_provider`.** The
+  workspace's `rustls = { version = "0.23", features = ["ring"] }`
+  declaration *does not* set `default-features = false`, so
+  rustls's `default` features (which include `aws-lc-rs`) remain
+  active. When `lattice-server` and `lattice-media` are both in
+  the same `cargo` invocation, Cargo unifies rustls features and
+  `CryptoProvider::get_default()` panics at first DTLS handshake.
+  An explicit install with `std::sync::Once` is the cheapest fix
+  that avoids touching every dependent crate's Cargo.toml.
+- **Tauri host detection via raw `__TAURI_INTERNALS__` probe.**
+  `tauri-sys` exists but adds non-trivial wasm-bundle weight for
+  an IPC surface this small. `js_sys::Reflect::get` on the
+  `window` object resolves it in ~10 lines and skips the version
+  pinning headache.
+- **lattice-desktop `[lib]` is `rlib` only for now.** Tauri's
+  default scaffold uses `["staticlib", "cdylib", "rlib"]` so the
+  same lib can serve Tauri Mobile (Phase H). On the mingw-w64
+  toolchain (no MSVC Build Tools on Matt's box), `ld.exe` hits an
+  `export ordinal too large: 65891` failure when linking the
+  cdylib variant of this crate because of the transitive symbol
+  count (Tauri + webrtc-rs + lattice-crypto + lattice-server
+  cross-deps under workspace unification). Reinstate the full
+  crate-type set in Phase H, after standing up a toolchain that
+  handles it.
+
+### Not done in Phase F
+
+- **Cross-machine signaling.** `start_call` runs the Phase E.2
+  loopback in-process as a smoke proof that IPC + lattice-media
+  carry the full pipeline. Real `CallInvite` / `CallAccept`
+  signaling rides MLS application messages already wired through
+  `lattice-protocol` (wire v4); plugging those into the
+  orchestrator is the next step.
+- **AES-128-GCM SRTP profile.** Tracked above. Cryptographic
+  property is unchanged; this is a wire-format ergonomic.
+- **`cargo tauri build` bundle.** Bundle packaging requires MSVC
+  Build Tools on Windows. The dev binary
+  (`cargo check -p lattice-desktop`) compiles green under GNU.
+- **Real audio/video device capture.** Phase F closes the
+  cryptographic stack and the IPC seam; opening OS audio/video
+  sources is a Phase G/H concern.
+
+### How to run the desktop shell
+
+```powershell
+# One-time: install Tauri CLI (already on Matt's box).
+cargo install tauri-cli@^2 --locked
+
+# Dev: trunk-serves lattice-web on :5173 inside vcvars64, opens a
+# WebView window pointed at it.
+cd apps\lattice-desktop\src-tauri
+cargo tauri dev
+
+# Production bundle (Windows installer / MSI):
+cargo tauri build
+```
+
+`cargo tauri dev` shells out to `apps/lattice-web/scripts/serve.ps1`
+to bring up trunk inside the MSVC environment. The browser-shell
+fallback still works (`cd apps\lattice-web; .\scripts\serve.ps1`)
+for any work that doesn't need native voice/video.

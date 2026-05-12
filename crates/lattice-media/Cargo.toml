@@ -77,6 +77,15 @@ webrtc-ice = "0.17.1"
 webrtc-util = "0.17.1"
 async-trait = "0.1"
 
+# rustls is a transitive dep of `dtls`, but we depend on it directly to
+# install the `ring` `CryptoProvider` as the process-wide default before
+# any DTLS handshake runs. Without that, downstream consumers (e.g.
+# `lattice-server` + `lattice-desktop` in the same `cargo test
+# --workspace` invocation) unify rustls features to include BOTH `ring`
+# and `aws-lc-rs`, and rustls panics in `get_default()` when it can't
+# auto-pick. See `crate::ensure_crypto_provider`.
+rustls = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 rand_chacha = "0.3"

@@ -284,10 +284,12 @@ pub async fn extract_dtls_exporter<E: KeyingMaterialExporter + Sync>(
 ///   real binding is via MLS-attested identity, not DTLS certs;
 ///   `insecure_skip_verify = true` is therefore safe at the DTLS
 ///   layer alone).
-/// - SRTP protection profile = AES-128-GCM (RFC 7714) preferred,
-///   AES-128-CM-HMAC-SHA1-80 as fallback. Both lay session keys out
-///   at the same 60-byte layout we derive in
-///   [`crate::srtp::derive_srtp_master`].
+/// - SRTP protection profile = `AES-128-CM-HMAC-SHA1-80` only. This is
+///   the layout [`crate::srtp::derive_srtp_master`] outputs 60 bytes
+///   for (`2*16 + 2*14`). AEAD-AES-128-GCM uses a 12-byte salt instead
+///   of 14, so adding it back requires a profile-aware OKM length and
+///   ride-along changes to [`crate::srtp::split_srtp_master`]. M7 Phase
+///   F ships CM-80 only; GCM is a tracked follow-up.
 /// - Extended master secret REQUIRED — defends against the
 ///   triple-handshake attack and is universally supported by modern
 ///   DTLS stacks.
@@ -301,10 +303,7 @@ pub fn default_dtls_config() -> Result<DtlsConfig, MediaError> {
         .map_err(|e| MediaError::DtlsHandshake(format!("generate_self_signed: {e}")))?;
     Ok(DtlsConfig {
         certificates: vec![cert],
-        srtp_protection_profiles: vec![
-            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
-            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
-        ],
+        srtp_protection_profiles: vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
         extended_master_secret: ExtendedMasterSecretType::Require,
         // MLS attests the peer's identity end-to-end; certificate-layer
         // verification at DTLS is redundant and would force a CA

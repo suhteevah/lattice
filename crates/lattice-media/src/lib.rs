@@ -64,6 +64,39 @@ pub mod srtp;
 
 pub use error::MediaError;
 
+use std::sync::Once;
+
+static INSTALL_CRYPTO: Once = Once::new();
+
+/// Install rustls's `ring` `CryptoProvider` as the process-wide default,
+/// at most once per process.
+///
+/// `dtls` depends on rustls 0.23 for the TLS 1.2 cipher suite
+/// implementations. When the same workspace also depends on rustls via
+/// `lattice-server` (which inherits the rustls `default` features and
+/// therefore enables `aws-lc-rs`), Cargo's feature unification produces
+/// a rustls build with BOTH crypto providers enabled. In that state,
+/// `CryptoProvider::get_default()` panics with "Could not automatically
+/// determine the process-level CryptoProvider".
+///
+/// Call this at every public entry point that drives a DTLS handshake
+/// (the [`call::run_loopback_call`] orchestrator does so internally;
+/// the `lattice-desktop` shell does so in `main`). The `Once` makes
+/// repeated calls cheap.
+///
+/// Pinning `ring` here matches the workspace's explicit
+/// `rustls = { features = ["ring"] }` declaration; we don't want
+/// `aws-lc-rs` because it pulls in a vendored C build that pads
+/// compile times and shifts the cryptographic posture sideways.
+pub fn ensure_crypto_provider() {
+    INSTALL_CRYPTO.call_once(|| {
+        // `install_default` returns `Err` if a provider was already
+        // installed by some other code path in this process — that's a
+        // soft success for our purposes, so we discard the result.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Identifier reported by [`crate_version`] — sanity-check that the
 /// scaffold is reachable from downstream tests / dependents.
 ///

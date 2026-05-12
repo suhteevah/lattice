@@ -16,6 +16,7 @@ mod distrust;
 mod passkey;
 mod persist;
 mod storage;
+mod tauri;
 
 use leptos::prelude::*;
 

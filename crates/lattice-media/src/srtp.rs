@@ -29,14 +29,25 @@
 //! `encrypt_rtp` / `decrypt_rtp` yet — those land in Phase E once the
 //! vendored Context is wired up.
 
+use bytes::Bytes;
 use hkdf::Hkdf;
 use sha2::Sha256;
+use webrtc_srtp::context::Context as SrtpContext;
+use webrtc_srtp::protection_profile::ProtectionProfile;
 use zeroize::Zeroize;
 
 use crate::call::{CallId, Role};
 use crate::constants::{PQ_DTLS_SRTP_INFO_PREFIX, SRTP_MASTER_OKM_LEN};
 use crate::error::MediaError;
 use crate::handshake::PqSharedSecret;
+
+/// SRTP protection profile pinned by [`crate::handshake::default_dtls_config`].
+///
+/// `AES-128-CM-HMAC-SHA1-80` is the only profile advertised in the DTLS
+/// `use_srtp` extension, so this is the profile both endpoints must
+/// install. Tracked as an M7 follow-up to add AES-GCM (which would
+/// require a 56-byte rather than 60-byte SRTP master OKM).
+pub const PQ_SRTP_PROFILE: ProtectionProfile = ProtectionProfile::Aes128CmHmacSha1_80;
 
 /// Length of a single SRTP master key, in bytes.
 ///
@@ -195,6 +206,89 @@ pub fn split_srtp_master(master: &SrtpMasterKey, role: Role) -> SrtpSessionKeys 
     }
 }
 
+/// One side of an SRTP session — owns a local-write `Context` for
+/// encrypting outgoing RTP and a remote-write `Context` for decrypting
+/// incoming RTP. Constructed from the [`SrtpSessionKeys`] that
+/// [`split_srtp_master`] produces.
+///
+/// Pinned to [`PQ_SRTP_PROFILE`] (`AES-128-CM-HMAC-SHA1-80`). The two
+/// `Context`s are intentionally separate per webrtc-srtp's documented
+/// "one-way operations only" constraint — sharing one `Context` for
+/// both directions would corrupt SSRC state.
+///
+/// Construction takes ownership of the [`SrtpSessionKeys`] so the
+/// underlying key/salt bytes are zeroized when the endpoint drops.
+pub struct PqSrtpEndpoint {
+    local: SrtpContext,
+    remote: SrtpContext,
+}
+
+impl PqSrtpEndpoint {
+    /// Build a new endpoint from a pair of pre-derived session keys.
+    ///
+    /// `keys` typically comes from
+    /// [`split_srtp_master`]`(master, role)` on the local participant's
+    /// view of a freshly-derived [`SrtpMasterKey`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError::Srtp`] if `webrtc-srtp` rejects the key
+    /// or salt material (e.g., wrong length for the pinned profile).
+    /// With keys produced by [`split_srtp_master`] this is unreachable
+    /// in practice; we still propagate the error rather than panic.
+    pub fn from_session_keys(keys: SrtpSessionKeys) -> Result<Self, MediaError> {
+        let local = SrtpContext::new(
+            &keys.local.master_key,
+            &keys.local.master_salt,
+            PQ_SRTP_PROFILE,
+            None,
+            None,
+        )
+        .map_err(|e| MediaError::Srtp(format!("local context: {e}")))?;
+        let remote = SrtpContext::new(
+            &keys.remote.master_key,
+            &keys.remote.master_salt,
+            PQ_SRTP_PROFILE,
+            None,
+            None,
+        )
+        .map_err(|e| MediaError::Srtp(format!("remote context: {e}")))?;
+        Ok(Self { local, remote })
+    }
+
+    /// Encrypt one outgoing RTP packet. `rtp_packet` must be the
+    /// already-marshalled (header + payload) RTP packet bytes; the
+    /// returned [`Bytes`] is the SRTP-protected form ready to put on
+    /// the wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError::Srtp`] if the input isn't a valid RTP
+    /// packet (header unmarshal fails) or the cipher errors. After
+    /// 2^48 packets on the same SSRC the underlying counter overflows
+    /// and webrtc-srtp returns `ErrExceededMaxPackets`; surface that
+    /// as a re-key trigger in the orchestrator (M7 follow-up).
+    pub fn protect_rtp(&mut self, rtp_packet: &[u8]) -> Result<Bytes, MediaError> {
+        self.local
+            .encrypt_rtp(rtp_packet)
+            .map_err(|e| MediaError::Srtp(format!("encrypt_rtp: {e}")))
+    }
+
+    /// Decrypt one incoming SRTP packet. Returns the recovered RTP
+    /// packet bytes (header + payload, marshalled). Replay protection
+    /// is enabled by default on the remote context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError::Srtp`] on auth-tag failure, replay,
+    /// malformed header, or SSRC-state mismatch.
+    pub fn unprotect_rtp(&mut self, srtp_packet: &[u8]) -> Result<Bytes, MediaError> {
+        self.remote
+            .decrypt_rtp(srtp_packet)
+            .map_err(|e| MediaError::Srtp(format!("decrypt_rtp: {e}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +387,93 @@ mod tests {
         assert_eq!(alice.local.master_salt, bob.remote.master_salt);
         assert_eq!(alice.remote.master_key, bob.local.master_key);
         assert_eq!(alice.remote.master_salt, bob.local.master_salt);
+    }
+
+    /// Build a minimal RTP/2 packet by hand: 12-byte fixed header
+    /// (V=2, no padding/extension/CSRC, PT=96 dynamic, marker clear)
+    /// followed by the payload bytes. Self-contained so the test
+    /// doesn't pull in the `rtp` crate as a dev-dep.
+    fn build_rtp_packet(seq: u16, timestamp: u32, ssrc: u32, payload: &[u8]) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(12 + payload.len());
+        packet.push(0x80); // V=2, P=0, X=0, CC=0
+        packet.push(96);   // M=0, PT=96
+        packet.extend_from_slice(&seq.to_be_bytes());
+        packet.extend_from_slice(&timestamp.to_be_bytes());
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    /// Build a Caller + Callee endpoint pair from a recognizable
+    /// 60-byte master, so the in-process round-trip below uses keys
+    /// laid out the same way `derive_srtp_master` would lay them.
+    fn endpoint_pair() -> (PqSrtpEndpoint, PqSrtpEndpoint) {
+        let mut bytes = [0u8; SRTP_MASTER_OKM_LEN];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(13).wrapping_add(5);
+        }
+        let master = unsafe_construct_master(bytes);
+        let caller_keys = split_srtp_master(&master, Role::Caller);
+        let callee_keys = split_srtp_master(&master, Role::Callee);
+        let caller = PqSrtpEndpoint::from_session_keys(caller_keys).expect("caller endpoint");
+        let callee = PqSrtpEndpoint::from_session_keys(callee_keys).expect("callee endpoint");
+        (caller, callee)
+    }
+
+    /// Real `webrtc-srtp::Context` round trip through the PQ-derived
+    /// keys. Caller protects, callee unprotects — the recovered RTP
+    /// packet must byte-equal the original. This is the smoke test
+    /// the Phase F orchestrator relies on.
+    #[test]
+    fn pq_srtp_endpoint_round_trips_caller_to_callee() {
+        let (mut caller, mut callee) = endpoint_pair();
+        let payload = b"hello, lattice phase F";
+        let rtp = build_rtp_packet(1234, 0x0001_0203, 0xabcd_ef01, payload);
+
+        let protected = caller.protect_rtp(&rtp).expect("protect");
+        // SRTP CM-80 appends a 10-byte HMAC tag — the protected blob
+        // is strictly larger than the plain RTP packet.
+        assert!(
+            protected.len() > rtp.len(),
+            "protected packet should be larger (auth tag); got {} vs {}",
+            protected.len(),
+            rtp.len()
+        );
+
+        let recovered = callee.unprotect_rtp(&protected).expect("unprotect");
+        // decrypt_rtp returns just the RTP packet minus the auth tag,
+        // i.e. the same bytes we passed to encrypt_rtp.
+        assert_eq!(&recovered[..], &rtp[..]);
+    }
+
+    /// Symmetric round trip the other way — Callee → Caller. Different
+    /// SSRCs / sequence numbers exercise the second direction's
+    /// SSRC-state initialization.
+    #[test]
+    fn pq_srtp_endpoint_round_trips_callee_to_caller() {
+        let (mut caller, mut callee) = endpoint_pair();
+        let payload = b"reply, lattice phase F";
+        let rtp = build_rtp_packet(7, 99, 0x1111_2222, payload);
+
+        let protected = callee.protect_rtp(&rtp).expect("protect");
+        let recovered = caller.unprotect_rtp(&protected).expect("unprotect");
+        assert_eq!(&recovered[..], &rtp[..]);
+    }
+
+    /// Decrypt with the wrong endpoint must fail — proves the local
+    /// vs remote context split is doing real work, not just labeling.
+    #[test]
+    fn pq_srtp_endpoint_rejects_wrong_direction() {
+        let (mut caller, _callee) = endpoint_pair();
+        let payload = b"wrong-direction probe";
+        let rtp = build_rtp_packet(42, 100, 0x3333_4444, payload);
+        let protected = caller.protect_rtp(&rtp).expect("protect");
+        // Caller protected with its local (= client-write) key. The
+        // caller's own remote context can't unprotect that — and neither
+        // can the callee's local context, because callee.local is the
+        // server-write key. Only callee.remote (= client-write) can.
+        let result = caller.unprotect_rtp(&protected);
+        assert!(result.is_err(), "caller decoded its own outbound packet");
     }
 
     /// Test-only helper: construct a `SrtpMasterKey` from a known

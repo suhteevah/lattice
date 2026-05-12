@@ -49,9 +49,13 @@ pub const DTLS_SRTP_EXPORTER_LABEL: &str = "EXTRACTOR-dtls_srtp";
 ///
 /// Pinned to match `webrtc-srtp`'s
 /// `(key_len * 2) + (salt_len * 2) = (16 * 2) + (14 * 2) = 60`
-/// for the `AES_CM_128_HMAC_SHA1_80` and `AEAD_AES_128_GCM` SRTP
-/// profiles (both lay their session keys out the same way at this
-/// length).
+/// for the `AES_CM_128_HMAC_SHA1_80` SRTP profile. M7 Phase F currently
+/// negotiates **only** that profile (see [`crate::handshake::default_dtls_config`]).
+///
+/// `AEAD_AES_128_GCM` lays its session keys out at
+/// `(2 * 16) + (2 * 12) = 56` bytes instead (GCM uses a 12-byte salt),
+/// so supporting both requires a profile-aware OKM length. Tracked as
+/// an M7 follow-up after the end-to-end RTP round trip is proven on CM.
 pub const DTLS_EXPORTER_LEN: usize = 60;
 
 /// Domain-separation prefix for the call-invite wire payload signed

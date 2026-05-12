@@ -32,6 +32,39 @@ Approach locked: **no shortcuts on voice/video** — D-18 PQ-DTLS-SRTP
 authored at `scratch/m7-build-plan.md`; `lattice-media` crate is the
 implementation home. Phase outline in HANDOFF §14.
 
+### M7 Phases A–F shipped 2026-05-12
+
+Phases A–E proved the PQ-DTLS-SRTP cryptographic construction
+end-to-end in a same-process loopback (Phase E.2 smoke test).
+**Phase F** (2026-05-12) shipped:
+
+- `apps/lattice-desktop/` Tauri 2 shell wrapping the Leptos UI;
+  natively links `lattice-core`, `lattice-crypto`, `lattice-protocol`,
+  `lattice-media`.
+- Tauri IPC commands `start_call` / `accept_call` / `end_call` /
+  `call_status` / `desktop_info`, all `rename_all = "snake_case"`.
+- `lattice_media::call::run_loopback_call` orchestrator wraps the
+  Phase E pipeline into a single async entry point; the Tauri
+  `start_call` command invokes it for the in-shell smoke proof.
+- `lattice_media::srtp::PqSrtpEndpoint` wraps `webrtc-srtp::Context`
+  for real RTP encrypt → decrypt round trip across the two sides.
+  SRTP profile pinned to `AES-128-CM-HMAC-SHA1-80` (GCM is a tracked
+  follow-up).
+- `apps/lattice-web/src/tauri.rs` runtime-detects the Tauri host via
+  `window.__TAURI_INTERNALS__` and exposes an `invoke()` helper.
+  Two new Leptos buttons (`Desktop info`, `Phase F: PQ call demo`)
+  visibly route through the IPC bridge.
+- `lattice_media::ensure_crypto_provider()` installs rustls's `ring`
+  provider once at boot — defends against the workspace's transitive
+  rustls feature unification (lattice-server pulls `aws-lc-rs` via
+  `default`; `dtls` wants `ring`).
+
+**186 workspace tests pass** with `LATTICE_NET_TESTS=1` set (up
+from 182 in Phase E). `cargo check --workspace`, `cargo check
+-p lattice-desktop`, `cargo check -p lattice-core --target
+wasm32-unknown-unknown` all green. Phase G (hardware-backed keys)
+is next.
+
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for
 the threats each milestone's mitigations defend against.
