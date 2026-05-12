@@ -47,6 +47,7 @@ use tracing::instrument;
 pub mod aead;
 pub mod constants;
 pub mod credential;
+pub mod fingerprint;
 pub mod hybrid_kex;
 pub mod identity;
 pub mod mls;

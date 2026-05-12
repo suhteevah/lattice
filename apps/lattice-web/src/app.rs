@@ -17,6 +17,7 @@ use lattice_crypto::credential::{
     ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
 };
 use lattice_crypto::aead::{AeadKey, AeadNonce, decrypt as aead_decrypt, encrypt as aead_encrypt};
+use lattice_crypto::fingerprint;
 use lattice_crypto::hybrid_kex;
 use lattice_crypto::padding;
 use rand::RngCore;
@@ -146,6 +147,14 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_status.set(format!("server-backed demo error: {e}")),
             }
         });
+    };
+
+    let safety_number_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        match try_safety_number_demo(append) {
+            Ok(()) => set_status.set("safety numbers OK".to_string()),
+            Err(e) => set_status.set(format!("safety numbers error: {e}")),
+        }
     };
 
     let live_ws_demo = move |_| {
@@ -366,6 +375,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=persistent_group_demo>"Persistent group demo (δ.3)"</button>
                     <button class="button" on:click=multi_member_demo>"Multi-member group (3-party)"</button>
                     <button class="button" on:click=live_ws_demo>"Live WS push (γ.4 fallback)"</button>
+                    <button class="button" on:click=safety_number_demo>"Safety number (M6)"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -728,6 +738,63 @@ async fn try_server_backed_demo(
     ));
 
     log("== M4 phase γ.3 complete ==".to_string());
+    Ok(())
+}
+
+/// M6 safety numbers (ROADMAP §M6). Computes the pairwise
+/// fingerprint for Alice + Bob's hybrid identity pubkeys and shows
+/// the rendered 60-decimal-digit comparison string. Two parties
+/// reading the same string out loud over a side channel (phone
+/// call, in-person) detect a MITM that swapped one user's key
+/// bundle before they ever met on-band.
+///
+/// The render is order-independent — Alice and Bob compute the
+/// same digits regardless of who lists themselves first.
+fn try_safety_number_demo(log: impl Fn(String) + Copy) -> Result<(), String> {
+    log("== safety number demo ==".to_string());
+    let alice = make_identity(0xF1)?;
+    let bob = make_identity(0xF2)?;
+
+    // The "identity pubkey" in fingerprint terms is the packed
+    // ed25519 || ml-dsa pubkey that lives in the credential. Same
+    // bytes mls-rs sees as the leaf signing key.
+    let mut alice_pk = Vec::with_capacity(
+        alice.credential.ed25519_pub.len() + alice.credential.ml_dsa_pub.len(),
+    );
+    alice_pk.extend_from_slice(&alice.credential.ed25519_pub);
+    alice_pk.extend_from_slice(&alice.credential.ml_dsa_pub);
+    let mut bob_pk = Vec::with_capacity(
+        bob.credential.ed25519_pub.len() + bob.credential.ml_dsa_pub.len(),
+    );
+    bob_pk.extend_from_slice(&bob.credential.ed25519_pub);
+    bob_pk.extend_from_slice(&bob.credential.ml_dsa_pub);
+
+    let num_ab = fingerprint::safety_number(&alice_pk, &bob_pk);
+    let num_ba = fingerprint::safety_number(&bob_pk, &alice_pk);
+    if num_ab != num_ba {
+        return Err("safety number is not order-independent".into());
+    }
+    log(format!("alice pubkey: {} bytes", alice_pk.len()));
+    log(format!("bob pubkey:   {} bytes", bob_pk.len()));
+    log(format!("safety number: {num_ab}"));
+    log("order-independent: yes (A↔B == B↔A)".to_string());
+
+    // Sanity: a third party with different keys produces a different
+    // number — confirms the function is sensitive to its inputs.
+    let carol = make_identity(0xF3)?;
+    let mut carol_pk = Vec::with_capacity(
+        carol.credential.ed25519_pub.len() + carol.credential.ml_dsa_pub.len(),
+    );
+    carol_pk.extend_from_slice(&carol.credential.ed25519_pub);
+    carol_pk.extend_from_slice(&carol.credential.ml_dsa_pub);
+    let num_ac = fingerprint::safety_number(&alice_pk, &carol_pk);
+    log(format!("alice↔carol:   {num_ac}"));
+    if num_ab == num_ac {
+        return Err("different peers must produce different safety numbers".into());
+    }
+    log("different peer → different number: yes".to_string());
+
+    log("== M6 safety numbers complete ==".to_string());
     Ok(())
 }
 
