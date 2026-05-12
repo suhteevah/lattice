@@ -1,0 +1,82 @@
+[package]
+name = "lattice-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M7 — voice/video for Lattice. PQ-hybrid DTLS-SRTP, ICE/STUN/TURN, and call signaling over MLS. See scratch/m7-build-plan.md."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Verbose tracing is mandatory across every crate in the workspace.
+tracing.workspace = true
+
+# Domain errors via thiserror, infra via anyhow.
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Wire types for call signaling.
+serde = { workspace = true, features = ["derive"] }
+serde_bytes.workspace = true
+bytes.workspace = true
+
+# Post-quantum KEM — ML-KEM-768 secret folded into the SRTP key
+# derivation per the PQ-hybrid construction in
+# scratch/pq-dtls-srtp-construction.md.
+ml-kem.workspace = true
+
+# Classical primitives for the call-invite signature path.
+ed25519-dalek.workspace = true
+
+# KDF / hash for the SRTP master derivation.
+hkdf.workspace = true
+sha2.workspace = true
+
+# Zeroize sensitive material.
+zeroize.workspace = true
+subtle.workspace = true
+
+# RNG.
+rand.workspace = true
+rand_core.workspace = true
+
+# Async runtime. Voice/video paths are inherently async because of
+# the underlying webrtc-rs ecosystem; we expose async APIs to match.
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+
+# Lattice crates we depend on. Call signaling is just an
+# `ApplicationMessage` payload variant, so we pull wire types from
+# lattice-protocol; we don't run MLS ops here — that's lattice-crypto.
+lattice-protocol = { path = "../lattice-protocol" }
+
+# webrtc-rs lower-level crates, pinned at v0.17.1 — the final
+# feature release of the Tokio-coupled async line. Phase A research
+# (scratch/webrtc-rs-api.md) found we can drive the call pipeline
+# directly from these without going through `webrtc::RTCPeerConnection`,
+# so we don't pull the top-level `webrtc` crate.
+#
+# Pinned versions:
+#   * dtls v0.17.1 — note the crates.io name changed from `webrtc-dtls`
+#     to `dtls`; the old name is stuck at 0.12.0.
+#   * webrtc-srtp v0.17.1 — `Context::new(master_key, master_salt, …)`
+#     accepts our HKDF-folded keys directly (D-18 amended 2026-05-11).
+#   * webrtc-ice v0.17.1 — `Agent` drives candidate gathering;
+#     candidates ride MLS application messages (Phase C wire types).
+#   * webrtc-util v0.17.1 — `KeyingMaterialExporter` trait (the
+#     dtls↔srtp seam) lives here.
+#
+# webrtc-mdns is intentionally omitted for now (LAN-only host
+# candidate resolution; we always have STUN/TURN per D-19). Add if
+# integration testing needs it.
+dtls = "0.17.1"
+webrtc-srtp = "0.17.1"
+webrtc-ice = "0.17.1"
+webrtc-util = "0.17.1"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+rand_chacha = "0.3"

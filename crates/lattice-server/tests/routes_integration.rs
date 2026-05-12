@@ -78,7 +78,7 @@ async fn well_known_returns_federation_pubkey() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["wire_version"], 3);
+    assert_eq!(r["wire_version"], 4);
     assert_eq!(r["federation_pubkey_b64"], state.federation_pubkey_b64);
 }
 

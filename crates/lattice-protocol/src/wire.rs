@@ -148,6 +148,114 @@ pub struct ApplicationMessage {
     pub mls_application_message: Vec<u8>,
 }
 
+// ===== M7 voice/video call signaling =====
+//
+// These types are the *plaintext payload* the application encodes
+// before handing to MLS for encryption. The server only ever sees
+// the MLS-encrypted `ApplicationMessage.mls_application_message`
+// bytes that wrap them.
+
+/// One ICE candidate line, opaque to Lattice. RFC 8839 SDP format.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallIceCandidateLine {
+    /// SDP-format ICE candidate line.
+    pub sdp_line: String,
+    /// Which m-line this candidate applies to (0 = audio, 1 = video).
+    pub sdp_mline_index: u32,
+}
+
+/// Caller's invite. Carries the ML-KEM-768 encapsulation key + the
+/// caller's local ICE candidates. Signed by caller's Ed25519
+/// identity key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallInvite {
+    /// Per-call random identifier (16 bytes).
+    pub call_id: Vec<u8>,
+    /// ML-KEM-768 encapsulation key, 1184 bytes.
+    pub pq_encapsulation_key: Vec<u8>,
+    /// Local ICE candidates known at invite time. Additional
+    /// candidates are trickled via `CallIceCandidate`.
+    pub ice_candidates: Vec<CallIceCandidateLine>,
+    /// Ed25519 signature over the canonical transcript bytes, 64
+    /// bytes. Transcript covers `CALL_INVITE_TRANSCRIPT_PREFIX ||
+    /// call_id || pq_encapsulation_key || ice_candidates`.
+    pub sig: Vec<u8>,
+}
+
+/// Callee's accept. Carries the ML-KEM-768 ciphertext (which the
+/// caller decapsulates to recover the shared PQ secret) + the
+/// callee's local ICE candidates. Signed by callee's Ed25519
+/// identity key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallAccept {
+    /// Echoed from the corresponding `CallInvite`.
+    pub call_id: Vec<u8>,
+    /// ML-KEM-768 ciphertext, 1088 bytes.
+    pub pq_ciphertext: Vec<u8>,
+    /// Callee's local ICE candidates known at accept time.
+    pub ice_candidates: Vec<CallIceCandidateLine>,
+    /// Ed25519 signature, 64 bytes.
+    pub sig: Vec<u8>,
+}
+
+/// A single trickled ICE candidate sent after the invite/accept
+/// exchange. Either party may send these during the connection-
+/// checks phase. Signed by sender's Ed25519 identity key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallIceCandidate {
+    /// Echoed from the active call's `CallInvite`.
+    pub call_id: Vec<u8>,
+    /// The candidate line being trickled.
+    pub candidate: CallIceCandidateLine,
+    /// Ed25519 signature, 64 bytes.
+    pub sig: Vec<u8>,
+}
+
+/// Reason a call ended. Mirrors `lattice_media::call::EndReason`
+/// — the wire integer is the discriminant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallEndReason {
+    /// Remote side hung up.
+    #[default]
+    RemoteHangup,
+    /// Local side hung up.
+    LocalHangup,
+    /// Remote declined the invite.
+    Declined,
+    /// ICE candidate pair could not connect.
+    IceFailed,
+    /// DTLS handshake failed.
+    DtlsFailed,
+    /// PQ KEM encap or decap failed.
+    PqKexFailed,
+}
+
+/// Sent by either party to end a call.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallEnd {
+    /// Echoed from the active call's `CallInvite`.
+    pub call_id: Vec<u8>,
+    /// Why the call ended.
+    pub reason: CallEndReason,
+    /// Ed25519 signature, 64 bytes.
+    pub sig: Vec<u8>,
+}
+
+/// One in-call signaling message. The application encodes a
+/// `CallSignal` as the plaintext payload of an MLS application
+/// message. Decoders dispatch on the variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallSignal {
+    /// Caller's initial invite.
+    Invite(CallInvite),
+    /// Callee's accept.
+    Accept(CallAccept),
+    /// Trickled ICE candidate.
+    IceCandidate(CallIceCandidate),
+    /// Call ended.
+    End(CallEnd),
+}
+
 /// Trait implemented by every wire type — encode to / decode from a
 /// Cap'n Proto packed byte string.
 pub trait WireType: Sized {
@@ -531,6 +639,378 @@ impl WireType for ApplicationMessage {
     }
 }
 
+// ===== M7 call signaling impls =====
+
+fn build_ice_candidate_line(
+    src: &CallIceCandidateLine,
+    mut b: lattice_capnp::call_ice_candidate_line::Builder,
+) {
+    b.set_sdp_line(&src.sdp_line);
+    b.set_sdp_mline_index(src.sdp_mline_index);
+}
+
+fn read_ice_candidate_line(
+    r: lattice_capnp::call_ice_candidate_line::Reader,
+) -> crate::Result<CallIceCandidateLine> {
+    Ok(CallIceCandidateLine {
+        sdp_line: r
+            .get_sdp_line()
+            .map_err(|e| crate::Error::Decode(format!("sdp_line: {e}")))?
+            .to_str()
+            .map_err(|e| crate::Error::Decode(format!("sdp_line utf8: {e}")))?
+            .to_string(),
+        sdp_mline_index: r.get_sdp_mline_index(),
+    })
+}
+
+#[allow(clippy::cast_possible_truncation)] // candidate counts well under u32::MAX
+fn build_ice_candidate_list(
+    src: &[CallIceCandidateLine],
+    mut builder: capnp::struct_list::Builder<'_, lattice_capnp::call_ice_candidate_line::Owned>,
+) {
+    for (i, c) in src.iter().enumerate() {
+        let slot = builder.reborrow().get(i as u32);
+        build_ice_candidate_line(c, slot);
+    }
+}
+
+fn read_ice_candidate_list(
+    list: capnp::struct_list::Reader<'_, lattice_capnp::call_ice_candidate_line::Owned>,
+) -> crate::Result<Vec<CallIceCandidateLine>> {
+    let mut out = Vec::with_capacity(list.len() as usize);
+    for r in list {
+        out.push(read_ice_candidate_line(r)?);
+    }
+    Ok(out)
+}
+
+impl WireType for CallIceCandidateLine {
+    fn encode_capnp(&self) -> Vec<u8> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let root = message.init_root::<lattice_capnp::call_ice_candidate_line::Builder>();
+            build_ice_candidate_line(self, root);
+        }
+        write_message(&message)
+    }
+    fn decode_capnp(bytes: &[u8]) -> crate::Result<Self> {
+        let reader = read_message(bytes)?;
+        let root = reader
+            .get_root::<lattice_capnp::call_ice_candidate_line::Reader>()
+            .map_err(|e| crate::Error::Decode(format!("call_ice_candidate_line root: {e}")))?;
+        read_ice_candidate_line(root)
+    }
+}
+
+impl WireType for CallInvite {
+    #[allow(clippy::cast_possible_truncation)]
+    fn encode_capnp(&self) -> Vec<u8> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut root = message.init_root::<lattice_capnp::call_invite::Builder>();
+            root.set_call_id(&self.call_id);
+            root.set_pq_encapsulation_key(&self.pq_encapsulation_key);
+            root.set_sig(&self.sig);
+            let candidates = root
+                .reborrow()
+                .init_ice_candidates(self.ice_candidates.len() as u32);
+            build_ice_candidate_list(&self.ice_candidates, candidates);
+        }
+        write_message(&message)
+    }
+    fn decode_capnp(bytes: &[u8]) -> crate::Result<Self> {
+        let reader = read_message(bytes)?;
+        let r = reader
+            .get_root::<lattice_capnp::call_invite::Reader>()
+            .map_err(|e| crate::Error::Decode(format!("call_invite root: {e}")))?;
+        Ok(Self {
+            call_id: r
+                .get_call_id()
+                .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                .to_vec(),
+            pq_encapsulation_key: r
+                .get_pq_encapsulation_key()
+                .map_err(|e| crate::Error::Decode(format!("pq_encapsulation_key: {e}")))?
+                .to_vec(),
+            ice_candidates: read_ice_candidate_list(
+                r.get_ice_candidates()
+                    .map_err(|e| crate::Error::Decode(format!("ice_candidates: {e}")))?,
+            )?,
+            sig: r
+                .get_sig()
+                .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                .to_vec(),
+        })
+    }
+}
+
+impl WireType for CallAccept {
+    #[allow(clippy::cast_possible_truncation)]
+    fn encode_capnp(&self) -> Vec<u8> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut root = message.init_root::<lattice_capnp::call_accept::Builder>();
+            root.set_call_id(&self.call_id);
+            root.set_pq_ciphertext(&self.pq_ciphertext);
+            root.set_sig(&self.sig);
+            let candidates = root
+                .reborrow()
+                .init_ice_candidates(self.ice_candidates.len() as u32);
+            build_ice_candidate_list(&self.ice_candidates, candidates);
+        }
+        write_message(&message)
+    }
+    fn decode_capnp(bytes: &[u8]) -> crate::Result<Self> {
+        let reader = read_message(bytes)?;
+        let r = reader
+            .get_root::<lattice_capnp::call_accept::Reader>()
+            .map_err(|e| crate::Error::Decode(format!("call_accept root: {e}")))?;
+        Ok(Self {
+            call_id: r
+                .get_call_id()
+                .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                .to_vec(),
+            pq_ciphertext: r
+                .get_pq_ciphertext()
+                .map_err(|e| crate::Error::Decode(format!("pq_ciphertext: {e}")))?
+                .to_vec(),
+            ice_candidates: read_ice_candidate_list(
+                r.get_ice_candidates()
+                    .map_err(|e| crate::Error::Decode(format!("ice_candidates: {e}")))?,
+            )?,
+            sig: r
+                .get_sig()
+                .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                .to_vec(),
+        })
+    }
+}
+
+impl WireType for CallIceCandidate {
+    fn encode_capnp(&self) -> Vec<u8> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut root = message.init_root::<lattice_capnp::call_ice_candidate::Builder>();
+            root.set_call_id(&self.call_id);
+            root.set_sig(&self.sig);
+            build_ice_candidate_line(&self.candidate, root.reborrow().init_candidate());
+        }
+        write_message(&message)
+    }
+    fn decode_capnp(bytes: &[u8]) -> crate::Result<Self> {
+        let reader = read_message(bytes)?;
+        let r = reader
+            .get_root::<lattice_capnp::call_ice_candidate::Reader>()
+            .map_err(|e| crate::Error::Decode(format!("call_ice_candidate root: {e}")))?;
+        Ok(Self {
+            call_id: r
+                .get_call_id()
+                .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                .to_vec(),
+            candidate: read_ice_candidate_line(
+                r.get_candidate()
+                    .map_err(|e| crate::Error::Decode(format!("candidate: {e}")))?,
+            )?,
+            sig: r
+                .get_sig()
+                .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                .to_vec(),
+        })
+    }
+}
+
+impl From<CallEndReason> for lattice_capnp::CallEndReason {
+    fn from(r: CallEndReason) -> Self {
+        match r {
+            CallEndReason::RemoteHangup => Self::RemoteHangup,
+            CallEndReason::LocalHangup => Self::LocalHangup,
+            CallEndReason::Declined => Self::Declined,
+            CallEndReason::IceFailed => Self::IceFailed,
+            CallEndReason::DtlsFailed => Self::DtlsFailed,
+            CallEndReason::PqKexFailed => Self::PqKexFailed,
+        }
+    }
+}
+
+impl From<lattice_capnp::CallEndReason> for CallEndReason {
+    fn from(r: lattice_capnp::CallEndReason) -> Self {
+        match r {
+            lattice_capnp::CallEndReason::RemoteHangup => Self::RemoteHangup,
+            lattice_capnp::CallEndReason::LocalHangup => Self::LocalHangup,
+            lattice_capnp::CallEndReason::Declined => Self::Declined,
+            lattice_capnp::CallEndReason::IceFailed => Self::IceFailed,
+            lattice_capnp::CallEndReason::DtlsFailed => Self::DtlsFailed,
+            lattice_capnp::CallEndReason::PqKexFailed => Self::PqKexFailed,
+        }
+    }
+}
+
+impl WireType for CallEnd {
+    fn encode_capnp(&self) -> Vec<u8> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut root = message.init_root::<lattice_capnp::call_end::Builder>();
+            root.set_call_id(&self.call_id);
+            root.set_reason(self.reason.into());
+            root.set_sig(&self.sig);
+        }
+        write_message(&message)
+    }
+    fn decode_capnp(bytes: &[u8]) -> crate::Result<Self> {
+        let reader = read_message(bytes)?;
+        let r = reader
+            .get_root::<lattice_capnp::call_end::Reader>()
+            .map_err(|e| crate::Error::Decode(format!("call_end root: {e}")))?;
+        Ok(Self {
+            call_id: r
+                .get_call_id()
+                .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                .to_vec(),
+            reason: r
+                .get_reason()
+                .map_err(|e| crate::Error::Decode(format!("reason: {e}")))?
+                .into(),
+            sig: r
+                .get_sig()
+                .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                .to_vec(),
+        })
+    }
+}
+
+impl WireType for CallSignal {
+    fn encode_capnp(&self) -> Vec<u8> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let root = message.init_root::<lattice_capnp::call_signal::Builder>();
+            let body = root.init_body();
+            match self {
+                Self::Invite(inv) => {
+                    let mut b = body.init_invite();
+                    b.set_call_id(&inv.call_id);
+                    b.set_pq_encapsulation_key(&inv.pq_encapsulation_key);
+                    b.set_sig(&inv.sig);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let candidates = b.reborrow().init_ice_candidates(inv.ice_candidates.len() as u32);
+                    build_ice_candidate_list(&inv.ice_candidates, candidates);
+                }
+                Self::Accept(acc) => {
+                    let mut b = body.init_accept();
+                    b.set_call_id(&acc.call_id);
+                    b.set_pq_ciphertext(&acc.pq_ciphertext);
+                    b.set_sig(&acc.sig);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let candidates = b.reborrow().init_ice_candidates(acc.ice_candidates.len() as u32);
+                    build_ice_candidate_list(&acc.ice_candidates, candidates);
+                }
+                Self::IceCandidate(ic) => {
+                    let mut b = body.init_ice_candidate();
+                    b.set_call_id(&ic.call_id);
+                    b.set_sig(&ic.sig);
+                    build_ice_candidate_line(&ic.candidate, b.reborrow().init_candidate());
+                }
+                Self::End(e) => {
+                    let mut b = body.init_end_call();
+                    b.set_call_id(&e.call_id);
+                    b.set_reason(e.reason.into());
+                    b.set_sig(&e.sig);
+                }
+            }
+        }
+        write_message(&message)
+    }
+    fn decode_capnp(bytes: &[u8]) -> crate::Result<Self> {
+        use lattice_capnp::call_signal::body::Which as BodyWhich;
+
+        let reader = read_message(bytes)?;
+        let r = reader
+            .get_root::<lattice_capnp::call_signal::Reader>()
+            .map_err(|e| crate::Error::Decode(format!("call_signal root: {e}")))?;
+        let body = r.get_body();
+        match body
+            .which()
+            .map_err(|e| crate::Error::Decode(format!("call_signal body union: {e}")))?
+        {
+            BodyWhich::Invite(b) => {
+                let b = b.map_err(|e| crate::Error::Decode(format!("invite body: {e}")))?;
+                Ok(Self::Invite(CallInvite {
+                    call_id: b
+                        .get_call_id()
+                        .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                        .to_vec(),
+                    pq_encapsulation_key: b
+                        .get_pq_encapsulation_key()
+                        .map_err(|e| crate::Error::Decode(format!("pq_encapsulation_key: {e}")))?
+                        .to_vec(),
+                    ice_candidates: read_ice_candidate_list(
+                        b.get_ice_candidates()
+                            .map_err(|e| crate::Error::Decode(format!("ice_candidates: {e}")))?,
+                    )?,
+                    sig: b
+                        .get_sig()
+                        .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                        .to_vec(),
+                }))
+            }
+            BodyWhich::Accept(b) => {
+                let b = b.map_err(|e| crate::Error::Decode(format!("accept body: {e}")))?;
+                Ok(Self::Accept(CallAccept {
+                    call_id: b
+                        .get_call_id()
+                        .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                        .to_vec(),
+                    pq_ciphertext: b
+                        .get_pq_ciphertext()
+                        .map_err(|e| crate::Error::Decode(format!("pq_ciphertext: {e}")))?
+                        .to_vec(),
+                    ice_candidates: read_ice_candidate_list(
+                        b.get_ice_candidates()
+                            .map_err(|e| crate::Error::Decode(format!("ice_candidates: {e}")))?,
+                    )?,
+                    sig: b
+                        .get_sig()
+                        .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                        .to_vec(),
+                }))
+            }
+            BodyWhich::IceCandidate(b) => {
+                let b = b.map_err(|e| crate::Error::Decode(format!("ice_candidate body: {e}")))?;
+                Ok(Self::IceCandidate(CallIceCandidate {
+                    call_id: b
+                        .get_call_id()
+                        .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                        .to_vec(),
+                    candidate: read_ice_candidate_line(
+                        b.get_candidate()
+                            .map_err(|e| crate::Error::Decode(format!("candidate: {e}")))?,
+                    )?,
+                    sig: b
+                        .get_sig()
+                        .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                        .to_vec(),
+                }))
+            }
+            BodyWhich::EndCall(b) => {
+                let b = b.map_err(|e| crate::Error::Decode(format!("end_call body: {e}")))?;
+                Ok(Self::End(CallEnd {
+                    call_id: b
+                        .get_call_id()
+                        .map_err(|e| crate::Error::Decode(format!("call_id: {e}")))?
+                        .to_vec(),
+                    reason: b
+                        .get_reason()
+                        .map_err(|e| crate::Error::Decode(format!("reason: {e}")))?
+                        .into(),
+                    sig: b
+                        .get_sig()
+                        .map_err(|e| crate::Error::Decode(format!("sig: {e}")))?
+                        .to_vec(),
+                }))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -692,5 +1172,140 @@ mod tests {
     fn decode_rejects_garbage() {
         let result: crate::Result<IdentityClaim> = decode(b"not capnp");
         assert!(matches!(result, Err(crate::Error::Decode(_))));
+    }
+
+    // ===== M7 call signaling round-trip tests =====
+
+    fn sample_ice_candidate(index: u32, body: &str) -> CallIceCandidateLine {
+        CallIceCandidateLine {
+            sdp_line: format!("candidate:foundation 1 udp 12345 192.0.2.1 12345 typ host {body}"),
+            sdp_mline_index: index,
+        }
+    }
+
+    #[test]
+    fn call_invite_round_trip() {
+        let inv = CallInvite {
+            call_id: vec![0xc1; 16],
+            pq_encapsulation_key: vec![0xc2; 1184],
+            ice_candidates: vec![sample_ice_candidate(0, "a"), sample_ice_candidate(1, "b")],
+            sig: vec![0xc3; 64],
+        };
+        let bytes = encode(&inv);
+        let decoded: CallInvite = decode(&bytes).expect("decode");
+        assert_eq!(decoded, inv);
+    }
+
+    #[test]
+    fn call_accept_round_trip() {
+        let acc = CallAccept {
+            call_id: vec![0xc1; 16],
+            pq_ciphertext: vec![0xc4; 1088],
+            ice_candidates: vec![sample_ice_candidate(0, "x")],
+            sig: vec![0xc5; 64],
+        };
+        let bytes = encode(&acc);
+        let decoded: CallAccept = decode(&bytes).expect("decode");
+        assert_eq!(decoded, acc);
+    }
+
+    #[test]
+    fn call_ice_candidate_round_trip() {
+        let ic = CallIceCandidate {
+            call_id: vec![0xc1; 16],
+            candidate: sample_ice_candidate(1, "trickled"),
+            sig: vec![0xc6; 64],
+        };
+        let bytes = encode(&ic);
+        let decoded: CallIceCandidate = decode(&bytes).expect("decode");
+        assert_eq!(decoded, ic);
+    }
+
+    #[test]
+    fn call_end_round_trip() {
+        for reason in [
+            CallEndReason::RemoteHangup,
+            CallEndReason::LocalHangup,
+            CallEndReason::Declined,
+            CallEndReason::IceFailed,
+            CallEndReason::DtlsFailed,
+            CallEndReason::PqKexFailed,
+        ] {
+            let e = CallEnd {
+                call_id: vec![0xc1; 16],
+                reason,
+                sig: vec![0xc7; 64],
+            };
+            let bytes = encode(&e);
+            let decoded: CallEnd = decode(&bytes).expect("decode");
+            assert_eq!(decoded, e);
+        }
+    }
+
+    #[test]
+    fn call_signal_dispatches_by_variant() {
+        // Each variant round-trips through CallSignal and decodes
+        // back into the same variant, not a different one.
+        let invite = CallSignal::Invite(CallInvite {
+            call_id: vec![1; 16],
+            pq_encapsulation_key: vec![2; 1184],
+            ice_candidates: vec![],
+            sig: vec![3; 64],
+        });
+        let bytes = encode(&invite);
+        let decoded: CallSignal = decode(&bytes).expect("decode invite");
+        assert_eq!(decoded, invite);
+
+        let accept = CallSignal::Accept(CallAccept {
+            call_id: vec![4; 16],
+            pq_ciphertext: vec![5; 1088],
+            ice_candidates: vec![sample_ice_candidate(0, "a")],
+            sig: vec![6; 64],
+        });
+        let bytes = encode(&accept);
+        let decoded: CallSignal = decode(&bytes).expect("decode accept");
+        assert_eq!(decoded, accept);
+
+        let ice = CallSignal::IceCandidate(CallIceCandidate {
+            call_id: vec![7; 16],
+            candidate: sample_ice_candidate(1, "b"),
+            sig: vec![8; 64],
+        });
+        let bytes = encode(&ice);
+        let decoded: CallSignal = decode(&bytes).expect("decode ice");
+        assert_eq!(decoded, ice);
+
+        let end = CallSignal::End(CallEnd {
+            call_id: vec![9; 16],
+            reason: CallEndReason::IceFailed,
+            sig: vec![10; 64],
+        });
+        let bytes = encode(&end);
+        let decoded: CallSignal = decode(&bytes).expect("decode end");
+        assert_eq!(decoded, end);
+    }
+
+    #[test]
+    fn call_invite_with_no_ice_candidates_round_trips() {
+        // ICE candidates can legitimately be empty at invite time;
+        // the caller may not have gathered any yet (mDNS-only setup
+        // or pre-gather invite).
+        let inv = CallInvite {
+            call_id: vec![1; 16],
+            pq_encapsulation_key: vec![2; 1184],
+            ice_candidates: vec![],
+            sig: vec![3; 64],
+        };
+        let bytes = encode(&inv);
+        let decoded: CallInvite = decode(&bytes).expect("decode");
+        assert_eq!(decoded, inv);
+    }
+
+    #[test]
+    fn wire_version_is_v4_at_m7() {
+        // Bumped when call signaling landed (M7 Phase C). If this
+        // assertion fails, the schema changed without bumping the
+        // version — fix one or the other.
+        assert_eq!(crate::WIRE_VERSION, 4);
     }
 }

@@ -39,7 +39,13 @@ use uuid::Uuid;
 ///   `routes::federation` still use Prost — those are signing-
 ///   transcript helpers, not wire-format types, and live in a
 ///   future polish pass.
-pub const WIRE_VERSION: u32 = 3;
+/// * v4 (M7 Phase C): M7 call signaling — `CallInvite`,
+///   `CallAccept`, `CallIceCandidate`, `CallEnd`, and the
+///   discriminated `CallSignal` wrapper. The new types live inside
+///   MLS-encrypted `ApplicationMessage` payloads — wire envelope is
+///   unchanged, but a decoder that recognizes the new variants
+///   needs v4-aware code, hence the bump.
+pub const WIRE_VERSION: u32 = 4;
 
 /// Identifier for a Lattice user. UUIDv7 — embeds timestamp for
 /// natural ordering and debuggability.

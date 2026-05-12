@@ -105,3 +105,90 @@ struct Commit {
 struct ApplicationMessage {
     mlsApplicationMessage  @0 :Data;
 }
+
+# ---- M7 voice/video call signaling ---------------------------------
+#
+# These types are the *plaintext payload* that gets encrypted by MLS
+# before becoming `ApplicationMessage.mlsApplicationMessage`. The
+# server never sees them in cleartext. The structures match the
+# construction in `scratch/pq-dtls-srtp-construction.md`.
+#
+# Wire version bumped 3 -> 4 when these structs land. M7 Phase C.
+
+# Single ICE candidate carried over the MLS application channel.
+# `sdpLine` is opaque to Lattice — it's the standard ICE SDP
+# candidate line format (RFC 8839). `sdpMlineIndex` is 0 for the
+# audio m-line and 1 for video.
+struct CallIceCandidateLine {
+    sdpLine          @0 :Text;
+    sdpMlineIndex    @1 :UInt32;
+}
+
+# CallInvite — sent by the caller (Alice) to start a 1:1 call.
+#
+# The caller generates a fresh ML-KEM-768 keypair for this call and
+# attaches the encapsulation key here. ICE candidates are also
+# bundled so the callee can start connectivity checks immediately.
+# Signed by the caller's Ed25519 identity key over the canonical
+# transcript bytes (see CALL_INVITE_TRANSCRIPT_PREFIX in
+# lattice-media::constants).
+struct CallInvite {
+    callId               @0 :Data;     # 16 random bytes (CallId)
+    pqEncapsulationKey   @1 :Data;     # ML-KEM-768 ek, 1184 B
+    iceCandidates        @2 :List(CallIceCandidateLine);
+    sig                  @3 :Data;     # Ed25519 sig, 64 B
+}
+
+# CallAccept — sent by the callee (Bob) in response to a CallInvite.
+#
+# Carries the ML-KEM-768 ciphertext that the caller decapsulates to
+# recover the shared PQ secret, plus the callee's local ICE
+# candidates. Signed by the callee's Ed25519 identity key.
+struct CallAccept {
+    callId           @0 :Data;     # 16 bytes
+    pqCiphertext     @1 :Data;     # ML-KEM-768 ct, 1088 B
+    iceCandidates    @2 :List(CallIceCandidateLine);
+    sig              @3 :Data;     # Ed25519 sig, 64 B
+}
+
+# CallIceCandidate — trickled ICE candidate after the initial
+# invite/accept exchange. Both sides may send these throughout the
+# connection-checks phase.
+struct CallIceCandidate {
+    callId          @0 :Data;
+    candidate       @1 :CallIceCandidateLine;
+    sig             @2 :Data;     # Ed25519 sig, 64 B
+}
+
+# Reason a call ended. Mirrors lattice-media::call::EndReason; the
+# wire integer maps to the Rust enum variant.
+enum CallEndReason {
+    remoteHangup    @0;
+    localHangup     @1;
+    declined        @2;
+    iceFailed       @3;
+    dtlsFailed      @4;
+    pqKexFailed     @5;
+}
+
+# CallEnd — sent when one side hangs up or the call fails. Either
+# party may send this. Signed by sender's Ed25519 identity key.
+struct CallEnd {
+    callId          @0 :Data;
+    reason          @1 :CallEndReason;
+    sig             @2 :Data;     # Ed25519 sig, 64 B
+}
+
+# Discriminated union for call signaling — one CallSignal per MLS
+# application message during a voice/video call. The application
+# layer parses an MLS application message body as a CallSignal when
+# the surrounding MLS group has an active call_id; otherwise it
+# falls back to plain text framing.
+struct CallSignal {
+    body :union {
+        invite        @0 :CallInvite;
+        accept        @1 :CallAccept;
+        iceCandidate  @2 :CallIceCandidate;
+        endCall       @3 :CallEnd;
+    }
+}
