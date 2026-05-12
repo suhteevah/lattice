@@ -12,7 +12,7 @@ lands.
 | Field | Value |
 |---|---|
 | Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
-| Last shipped | M7 Phase G.2 (Linux SS + macOS Keychain) + chat-app chunk A (2026-05-12) |
+| Last shipped | M7 G.1 + G.2 keystore impls + chat chunks A + C (real DM flow, two-tab MLS chat verified 2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 

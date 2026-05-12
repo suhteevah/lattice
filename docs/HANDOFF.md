@@ -3,14 +3,15 @@
 **Last updated:** 2026-05-12 (M7 Phases G.1 + G.2 shipped:
 `lattice-media::keystore` trait + DPAPI Windows / Secret Service
 Linux / Keychain macOS impls + five Tauri IPC commands. **Chat-app
-chunk A** shipped: sidebar/thread/composer is now the default
-lattice-web view; legacy demo grid is behind a collapsed
-`<details>`. See §16 + §17 below.)
+chunks A + C** shipped: real DM flow over MLS — two browser tabs
+on the same lattice-server send & receive encrypted messages
+end-to-end. See §16 + §17 + §18 below.)
 **Owner:** Matt Gates (suhteevah)
-**Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6
-all shipped**, **M7 Phases A–F + G.1 + G.2 shipped**. Open: G.3
-(TPM 2.0 + Secure Enclave binding) + Tauri mobile (H) + cover-
-traffic (I) + chat-app chunks B/C/D/E/F. See
+**Status:** 🟢 Working — **chat actually works**. Steps 1+2;
+**M1 / M2 / M3 / M4 / M5 / M6 all shipped**, **M7 Phases A–F +
+G.1 + G.2 + chat chunks A + C shipped**. Open: G.3 (TPM 2.0 +
+Secure Enclave binding) + Tauri mobile (H) + cover-traffic (I)
++ chat-app chunks B/D/E/F. See
 [`scratch/next-session-plan.md`](../scratch/next-session-plan.md)
 for the prioritized ordering. Browser tab is a full Lattice
 client; server live at `http://127.0.0.1:8080`. Wire version is 4
@@ -175,7 +176,9 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | F — Tauri desktop shell | ✅ shipped 2026-05-12 | This session. See above + §15. |
 | G.1 — Keystore trait + DPAPI Windows impl | ✅ shipped 2026-05-12 | `lattice-media::keystore` + 5 IPC commands. See §16, DECISIONS §D-26. |
 | G.2 — Linux Secret Service + macOS Keychain | ✅ shipped 2026-05-12 | OS-keychain seal on all 3 desktops. See §17. |
-| G.3 — TPM 2.0 (Windows) + Secure Enclave (macOS) + tss-esapi opt-in (Linux) | ⬜ next | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
+| G.3 — TPM 2.0 (Windows) + Secure Enclave (macOS) + tss-esapi opt-in (Linux) | ⬜ | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
+| Chat chunks A + C — sidebar/thread/composer + real DM flow | ✅ shipped 2026-05-12 | End-to-end MLS chat verified across two browser tabs. See §17 + §18. |
+| Chat chunks B / D / E / F | ⬜ next | Onboarding, WebSocket push + group-state persist, server config, polish. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -1710,3 +1713,91 @@ the "chat works" gate.
 - Chat chunks B / D / E / F. Each is its own scoped chunk; size
   estimates carried in next-session plan Track 3.
 - Tauri Mobile shells (Phase H) and cover-traffic (Phase I).
+
+---
+
+## 18. Chat-app chunk C — real DM flow (shipped 2026-05-12)
+
+The gating chunk for "chat actually works." Plumbs the chunk-A
+sidebar/thread/composer onto the existing `api.rs` server
+primitives via a new `chat_state.rs` module.
+
+### What shipped
+
+| Surface | Where |
+|---|---|
+| `ChatState` (Arc<Mutex>-backed; identity bundle + active conversations) | `apps/lattice-web/src/chat_state.rs` |
+| Identity bootstrap (load saved / generate + register + publish KP + persist plaintext) | `chat_state::ChatState::bootstrap_identity` |
+| In-flight guard (`AtomicBool` debouncing concurrent bootstraps) | `chat_state::ChatState::bootstrap_identity` |
+| Deterministic 1:1 group_id (`blake3("lattice/dm/v1/" \|\| sorted(uid_a, uid_b))[..16]`) | `chat_state::derive_group_id` |
+| `add_conversation` (try fetch_welcome → join; else fetch_kp → create_group → submit_commit → invite) | `chat_state::ChatState::add_conversation` |
+| `send_message` (encrypt + POST /messages) | `chat_state::ChatState::send_message` |
+| `poll_all` (5s loop; fetch_messages since last_seq; decrypt; advance last_seq) | `chat_state::ChatState::poll_all` |
+| "Add conversation" inline form (peer user_id hex + label) | `chat::AddConversationForm` |
+| Composer Send → optimistic local-append + async POST | `chat::ChatShell::on_send` |
+
+### Verified end-to-end on kokonoe
+
+Two browser tabs against a fresh local lattice-server on
+127.0.0.1:8080:
+
+- Tab A on `http://localhost:5173` (Alice — random user_id
+  `042e6a17…`).
+- Tab B on `http://127.0.0.1:5173` (Bob — random user_id
+  `630d3bd6…`). Distinct hostnames give distinct localStorages,
+  so each tab gets an independent identity.
+
+1. Both tabs auto-generate identity + register + publish KP on
+   first load.
+2. Bob clicks +, pastes Alice's hex, submits → invite path fires
+   (`fetch_kp` → `create_group` → `submit_commit` →
+   `apply_commit`). Sidebar shows "Alice".
+3. Alice clicks +, pastes Bob's hex, submits → join path fires
+   (`fetch_welcome` succeeds → `process_welcome`). Sidebar shows
+   "Bob".
+4. Bob sends "hi alice — final test", "second test message",
+   "third" → all three decrypt cleanly in Alice's tab via 5-sec
+   poll.
+5. Alice replies "hi back from alice" → Bob's tab decrypts on
+   next poll.
+
+Both sides display the full thread with `me (prefix)` for sent
+and the peer's label for received.
+
+### Known gaps tracked as follow-ups
+
+- **Group state persistence.** `GroupHandle` lives only in
+  `Arc<Mutex<HashMap<gid, ConvoState>>>`. Page reload drops the
+  MLS state — the saved identity blob alone isn't enough to
+  resume an active conversation, and the second `process_welcome`
+  fails with `WelcomeKeyPackageNotFound` because
+  `InMemoryKeyPackageStorage` is in-memory only. Chunk D pulls in
+  a δ.3-style `LocalStorageGroupStateStorage` hook so reloads
+  pick up where they left off.
+- **WebSocket push.** Polling is 5s; chunk D drops in
+  `api::open_messages_ws` for instant delivery.
+- **Onboarding.** "Paste user_id hex" works for the smoke test
+  but isn't a real onboarding flow — chunk B adds contact list +
+  share-link / QR.
+- **Encrypted identity blobs.** Chunk C only handles plaintext
+  v1 blobs. v2 (Argon2id-encrypted) and v3 (PRF-encrypted) blobs
+  still go through the legacy debug-grid unlock — they need
+  in-chat-shell UI plumbing.
+
+### Bugs surfaced + fixed during smoke
+
+- **Concurrent bootstrap race.** Leptos 0.8 component bodies (and
+  the `spawn_local` calls inside them) can fire multiple times
+  during initial mount. The first iteration of `bootstrap_identity`
+  was racing with itself, generating 3 identities per page load.
+  Fixed by the `bootstrap_in_flight: AtomicBool` guard +
+  `compare_exchange` check.
+- **Send + Sync on component callbacks.** Leptos 0.8 requires
+  closure prop types to be `Send + Sync` even in CSR mode. Original
+  draft used `Rc<RefCell>` for `ChatState`; switched to
+  `Arc<Mutex<>>` so the closures type-check. In single-threaded
+  WASM the mutex never contends; it's a pure type-system gate.
+- **`Mutex` lock held across `.await`.** Several places needed
+  refactoring to scope lock borrows tightly so they don't span the
+  async server calls. Documented inline at each call site.
+
