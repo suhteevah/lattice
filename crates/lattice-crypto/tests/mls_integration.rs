@@ -236,3 +236,64 @@ fn unknown_user_id_rejected_at_credential_decode() {
     let _: ExtensionList = ExtensionList::default();
     let _ = LATTICE_HYBRID_V1;
 }
+
+#[test]
+fn hidden_membership_omits_ratchet_tree_from_welcome() {
+    // M6 / D-16 acceptance: a server inspecting the Welcome bytes for
+    // a hidden-membership group must NOT be able to enumerate
+    // member identities. mls-rs marshals this property via the
+    // `ratchet_tree_extension` CommitOption — when false, the
+    // Welcome doesn't carry the leaf nodes.
+    use lattice_crypto::mls::{create_hidden_group, InMemoryGroupStateStorage};
+    use mls_rs::MlsMessage;
+    use mls_rs::extension::built_in::RatchetTreeExt;
+    use mls_rs_codec::MlsDecode;
+    use mls_rs_core::extension::MlsCodecExtension;
+
+    let alice = make_identity(0xAA);
+    let bob = make_identity(0xBB);
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+
+    let group_id = *b"hidden-roster-1!";
+    let mut alice_group = create_hidden_group(
+        &alice,
+        alice_psk.clone(),
+        &group_id,
+        InMemoryGroupStateStorage::default(),
+    )
+    .expect("create hidden group");
+
+    let bob_kp = generate_key_package(&bob, bob_psk.clone()).expect("bob kp");
+    let commit = add_member(&mut alice_group, &bob_kp).expect("add_member");
+    let welcome = commit.welcomes.into_iter().next().expect("welcome present");
+
+    // Parse the Welcome bytes server-side-style and confirm the
+    // RatchetTree extension is absent. The server-side inspector
+    // has no special access — just the bytes that flow through it.
+    let mls_welcome =
+        MlsMessage::mls_decode(&mut &*welcome.mls_welcome).expect("decode welcome");
+
+    // The Welcome's secrets section is encrypted per joiner; only
+    // metadata + wrapped secrets are observable in plaintext. The
+    // RatchetTree extension would normally appear here for joiners
+    // — under hidden membership it's omitted, so observers can't
+    // enumerate members.
+    let dump = format!("{mls_welcome:?}");
+    let tree_ext_marker = format!("{:?}", RatchetTreeExt::extension_type());
+    assert!(
+        !dump.contains(&tree_ext_marker),
+        "hidden-membership Welcome leaked the ratchet tree extension marker — \
+         observer would be able to enumerate the roster: {tree_ext_marker} found in {dump}"
+    );
+
+    // Sanity: the message-flow still works end-to-end. Bob can't
+    // process the welcome without the tree in this minimal test
+    // (the out-of-band tree-delivery flow is the M6 polish item),
+    // but Alice can encrypt for the group — proving the group is
+    // alive and that hiding only affects the observer view, not
+    // the in-group functionality.
+    let ct = encrypt_application(&mut alice_group, b"hidden ping")
+        .expect("alice encrypts in hidden group");
+    assert!(!ct.is_empty(), "ciphertext shouldn't be empty");
+}

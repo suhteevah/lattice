@@ -110,11 +110,12 @@ pub struct LatticeIdentity {
 /// per group. Generic over the group state storage backend `G` —
 /// defaults to `InMemoryGroupStateStorage` so non-browser callers
 /// (CLI, server, tests) get the same behavior they had before.
-pub struct GroupHandle<G = InMemoryGroupStateStorage>
+pub struct GroupHandle<G = InMemoryGroupStateStorage, R = DefaultMlsRules>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
-    inner: mls_rs::Group<LatticeMlsConfig<G>>,
+    inner: mls_rs::Group<LatticeMlsConfig<G, R>>,
     psk_store: LatticePskStorage,
     /// The local ML-KEM-768 keypair; needed to open PqWelcomePayloads
     /// targeted at this group member when subsequent commits rotate the
@@ -125,9 +126,10 @@ where
     kem_keypair: KemKeyPair,
 }
 
-impl<G> GroupHandle<G>
+impl<G, R> GroupHandle<G, R>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     /// Current MLS epoch of this group handle. Increments on every
     /// successfully-applied commit. Sealed-sender membership certs
@@ -191,16 +193,87 @@ pub struct LatticeWelcome {
 }
 
 /// Concrete [`MlsConfig`] type alias for Lattice clients, parameterized
-/// over the on-disk group state storage backend. Defaults to
-/// in-memory so existing callers (CLI, tests, server) keep working
-/// unchanged; the browser client opts in by passing a localStorage-
-/// backed type for `G`.
-pub type LatticeMlsConfig<G = mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage> =
-    self::client_config::LatticeClientConfig<G>;
+/// over the on-disk group state storage backend AND the `MlsRules`
+/// implementation. Both default — `G = InMemoryGroupStateStorage`,
+/// `R = DefaultMlsRules` — so existing callers (CLI, tests, server)
+/// keep working unchanged.
+///
+/// The browser client opts in to localStorage-backed state by passing
+/// a different `G`. The hidden-membership group flow (M6 / D-16) opts
+/// in by passing a `DefaultMlsRules` instance whose `CommitOptions`
+/// have `ratchet_tree_extension = false`, which makes mls-rs omit the
+/// ratchet tree from Welcome messages so observers can't enumerate
+/// members.
+pub type LatticeMlsConfig<
+    G = mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage,
+    R = mls_rs::mls_rules::DefaultMlsRules,
+> = self::client_config::LatticeClientConfig<G, R>;
 
 /// Re-export the in-memory group state storage so callers that just
 /// want the default behavior don't need a direct `mls-rs` dep.
 pub use mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage;
+/// Re-export `DefaultMlsRules` so callers building custom rules
+/// (hidden-membership groups, external-commit groups) start from the
+/// known-good defaults.
+pub use mls_rs::mls_rules::DefaultMlsRules;
+
+/// Build a `DefaultMlsRules` instance configured for hidden-membership
+/// groups (M6 / D-16). The key knob is
+/// `CommitOptions::with_ratchet_tree_extension(false)` — mls-rs then
+/// omits the ratchet tree from Welcome messages, so observers
+/// parsing the Welcome bytes server-side can't enumerate member
+/// identities. New joiners receive the tree out-of-band via a
+/// future server route (the M6 polish landing alongside multi-
+/// server store-and-forward).
+///
+/// `always_out_of_band_ratchet_tree` is left at default — callers
+/// who want the more aggressive "even external commits don't carry
+/// the tree" mode can opt in by passing their own `DefaultMlsRules`
+/// through [`build_client`].
+#[must_use]
+pub fn hidden_membership_rules() -> DefaultMlsRules {
+    DefaultMlsRules::new().with_commit_options(
+        mls_rs::mls_rules::CommitOptions::default().with_ratchet_tree_extension(false),
+    )
+}
+
+/// Create a fresh group with [`hidden_membership_rules`] applied.
+/// Wraps [`create_group_with_storage`] + the hidden-rules knob; same
+/// trade-offs as the docs on [`hidden_membership_rules`].
+///
+/// # Errors
+///
+/// Same as [`create_group_with_storage`].
+pub fn create_hidden_group<G>(
+    identity: &LatticeIdentity,
+    psk_store: LatticePskStorage,
+    group_id: &[u8],
+    group_state_storage: G,
+) -> Result<GroupHandle<G, DefaultMlsRules>>
+where
+    G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+{
+    let client = build_client(
+        identity,
+        psk_store.clone(),
+        group_state_storage,
+        hidden_membership_rules(),
+    )?;
+    let kp_extensions =
+        key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
+    let group = client
+        .create_group_with_id(group_id.to_vec(), ExtensionList::new(), kp_extensions, None)
+        .map_err(|e| Error::Mls(format!("create_hidden_group: {e:?}")))?;
+    tracing::debug!(
+        group_id_len = group_id.len(),
+        "MLS hidden-membership group created"
+    );
+    Ok(GroupHandle {
+        inner: group,
+        psk_store,
+        kem_keypair: identity.kem_keypair.duplicate(),
+    })
+}
 
 pub mod client_config {
     //! Concrete `MlsConfig` shapes for Lattice clients.
@@ -216,22 +289,25 @@ pub mod client_config {
     };
     use mls_rs::client_builder::{
         BaseConfig, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider,
-        WithKeyPackageRepo, WithPskStore,
+        WithKeyPackageRepo, WithMlsRules, WithPskStore,
     };
     use mls_rs::storage_provider::in_memory::InMemoryKeyPackageStorage;
 
     /// `MlsConfig` shape used by Lattice clients. Order of `With*` layers
     /// is dictated by the `ClientBuilder` chain order — match what we
     /// actually call in [`super::build_client`].
-    pub type LatticeClientConfig<G> = WithKeyPackageRepo<
+    pub type LatticeClientConfig<G, R> = WithKeyPackageRepo<
         InMemoryKeyPackageStorage,
         WithPskStore<
             LatticePskStorage,
             WithGroupStateStorage<
                 G,
-                WithCryptoProvider<
-                    LatticeCryptoProvider,
-                    WithIdentityProvider<LatticeIdentityProvider, BaseConfig>,
+                WithMlsRules<
+                    R,
+                    WithCryptoProvider<
+                        LatticeCryptoProvider,
+                        WithIdentityProvider<LatticeIdentityProvider, BaseConfig>,
+                    >,
                 >,
             >,
         >,
@@ -249,13 +325,15 @@ pub mod client_config {
 /// supply a localStorage-backed implementation. CLI / server tests
 /// pass `InMemoryGroupStateStorage::default()` to get the original
 /// behavior.
-pub fn build_client<G>(
+pub fn build_client<G, R>(
     identity: &LatticeIdentity,
     psk_store: LatticePskStorage,
     group_state_storage: G,
-) -> Result<Client<LatticeMlsConfig<G>>>
+    mls_rules: R,
+) -> Result<Client<LatticeMlsConfig<G, R>>>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     let credential_bytes = identity
         .credential
@@ -284,6 +362,7 @@ where
     Ok(Client::builder()
         .identity_provider(LatticeIdentityProvider::new())
         .crypto_provider(LatticeCryptoProvider::new())
+        .mls_rules(mls_rules)
         .group_state_storage(group_state_storage)
         .psk_store(psk_store)
         .key_package_repo(identity.key_package_repo.clone())
@@ -359,11 +438,16 @@ pub fn create_group_with_storage<G>(
     psk_store: LatticePskStorage,
     group_id: &[u8],
     group_state_storage: G,
-) -> Result<GroupHandle<G>>
+) -> Result<GroupHandle<G, DefaultMlsRules>>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
 {
-    let client = build_client(identity, psk_store.clone(), group_state_storage)?;
+    let client = build_client(
+        identity,
+        psk_store.clone(),
+        group_state_storage,
+        DefaultMlsRules::default(),
+    )?;
     let kp_extensions =
         key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
     let group = client
@@ -391,7 +475,12 @@ pub fn generate_key_package(
     identity: &LatticeIdentity,
     psk_store: LatticePskStorage,
 ) -> Result<Vec<u8>> {
-    let client = build_client(identity, psk_store, InMemoryGroupStateStorage::default())?;
+    let client = build_client(
+        identity,
+        psk_store,
+        InMemoryGroupStateStorage::default(),
+        DefaultMlsRules::default(),
+    )?;
     let kp_extensions =
         key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
     let kp = client
@@ -409,12 +498,13 @@ pub fn generate_key_package(
 /// a `LatticeKemPubkey` LeafNode extension, or if mls-rs rejects the
 /// commit.
 #[instrument(level = "debug", skip(group, joiner_key_package))]
-pub fn add_member<G>(
-    group: &mut GroupHandle<G>,
+pub fn add_member<G, R>(
+    group: &mut GroupHandle<G, R>,
     joiner_key_package: &[u8],
 ) -> Result<CommitOutput>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     let kp = MlsMessage::mls_decode(&mut &*joiner_key_package)
         .map_err(|e| Error::Mls(format!("decode joiner KeyPackage: {e:?}")))?;
@@ -505,12 +595,13 @@ where
 /// `LatticeKemPubkey` extension, PQ seal failure, mls-rs commit /
 /// welcome build, or MLS encode failure.
 #[instrument(level = "debug", skip(group, joiner_key_packages), fields(joiner_count = joiner_key_packages.len()))]
-pub fn add_members<G>(
-    group: &mut GroupHandle<G>,
+pub fn add_members<G, R>(
+    group: &mut GroupHandle<G, R>,
     joiner_key_packages: &[&[u8]],
 ) -> Result<CommitOutput>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     if joiner_key_packages.is_empty() {
         return Err(Error::Mls(
@@ -604,9 +695,10 @@ where
 /// Returns [`Error::Mls`] if there is no pending commit or storage write
 /// fails.
 #[instrument(level = "debug", skip(group))]
-pub fn apply_commit<G>(group: &mut GroupHandle<G>) -> Result<()>
+pub fn apply_commit<G, R>(group: &mut GroupHandle<G, R>) -> Result<()>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     group
         .inner
@@ -654,7 +746,7 @@ pub fn process_welcome_with_storage<G>(
     psk_store: LatticePskStorage,
     welcome: &LatticeWelcome,
     group_state_storage: G,
-) -> Result<GroupHandle<G>>
+) -> Result<GroupHandle<G, DefaultMlsRules>>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
 {
@@ -671,7 +763,12 @@ where
     let mls_welcome = MlsMessage::mls_decode(&mut &*welcome.mls_welcome)
         .map_err(|e| Error::Mls(format!("decode welcome: {e:?}")))?;
 
-    let client = build_client(identity, psk_store.clone(), group_state_storage)?;
+    let client = build_client(
+        identity,
+        psk_store.clone(),
+        group_state_storage,
+        DefaultMlsRules::default(),
+    )?;
     let (group, _new_member_info) = client
         .join_group(None, &mls_welcome, None)
         .map_err(|e| Error::Mls(format!("join_group: {e:?}")))?;
@@ -695,9 +792,13 @@ where
 /// Returns [`Error::Mls`] if the group has a pending commit (per
 /// mls-rs's "commit required" rule) or encryption fails.
 #[instrument(level = "trace", skip(group, plaintext), fields(pt_len = plaintext.len()))]
-pub fn encrypt_application<G>(group: &mut GroupHandle<G>, plaintext: &[u8]) -> Result<Vec<u8>>
+pub fn encrypt_application<G, R>(
+    group: &mut GroupHandle<G, R>,
+    plaintext: &[u8],
+) -> Result<Vec<u8>>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     let msg = group
         .inner
@@ -722,9 +823,10 @@ where
 ///
 /// Returns [`Error::Mls`] on decode or state-machine rejection.
 #[instrument(level = "trace", skip(group, ciphertext), fields(ct_len = ciphertext.len()))]
-pub fn decrypt<G>(group: &mut GroupHandle<G>, ciphertext: &[u8]) -> Result<Vec<u8>>
+pub fn decrypt<G, R>(group: &mut GroupHandle<G, R>, ciphertext: &[u8]) -> Result<Vec<u8>>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     let msg = MlsMessage::mls_decode(&mut &*ciphertext)
         .map_err(|e| Error::Mls(format!("decode incoming: {e:?}")))?;
@@ -764,9 +866,10 @@ where
 /// `Error::Mls` if `leaf_index` is invalid, mls-rs commit build
 /// fails, or the encode step fails.
 #[instrument(level = "debug", skip(group))]
-pub fn remove_member<G>(group: &mut GroupHandle<G>, leaf_index: u32) -> Result<CommitOutput>
+pub fn remove_member<G, R>(group: &mut GroupHandle<G, R>, leaf_index: u32) -> Result<CommitOutput>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     let commit_output = group
         .inner
@@ -800,9 +903,10 @@ where
 /// Returns [`Error::Mls`] on multi-member groups (deferred to M5.5)
 /// or any mls-rs failure.
 #[instrument(level = "debug", skip(group))]
-pub fn commit<G>(group: &mut GroupHandle<G>) -> Result<CommitOutput>
+pub fn commit<G, R>(group: &mut GroupHandle<G, R>) -> Result<CommitOutput>
 where
     G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
 {
     let member_count = group.inner.roster().members_iter().count();
     if member_count > 2 {
