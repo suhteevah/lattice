@@ -419,14 +419,53 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Chunk A — chat shell signals. Seeded with one mock conversation
+    // so the panes feel populated; chunk C wires this to real MLS
+    // state and removes the seed. Display name defaults to a short
+    // user_id prefix once we restore an identity; falls back to "me".
+    let (chat_convos_seed, chat_messages_seed) = crate::chat::mock_seed();
+    let chat_convos = RwSignal::new(chat_convos_seed);
+    let chat_messages = RwSignal::new(chat_messages_seed);
+    let chat_view = RwSignal::new(crate::chat::ChatView::Empty);
+    let chat_display_name = Signal::derive(move || {
+        match persist::probe() {
+            Ok(persist::BlobShape::Plaintext) => persist::load(None)
+                .ok()
+                .flatten()
+                .map(|id| {
+                    let prefix = &B64.encode(id.credential.user_id)[..6];
+                    format!("me ({prefix})")
+                })
+                .unwrap_or_else(|| "me".to_string()),
+            _ => "me".to_string(),
+        }
+    });
+
+    // Toggle the legacy debug grid open/closed. Default closed so the
+    // chat shell is the visible default; one click opens debug.
+    let (debug_open, set_debug_open) = signal(false);
+
     view! {
         <main class="page">
             <section class="card" aria-labelledby="lattice-heading">
                 <h1 id="lattice-heading">"Lattice"</h1>
-                <p class="tagline">"Post-quantum encrypted messaging. M4 in-browser preview."</p>
+                <p class="tagline">"Post-quantum encrypted messaging."</p>
                 <div class="status" role="status" aria-live="polite">
                     {move || status.get()}
                 </div>
+                <crate::chat::ChatShell
+                    conversations=chat_convos
+                    messages=chat_messages
+                    current_view=chat_view
+                    display_name=chat_display_name
+                />
+                <details class="debug-details" open=move || debug_open.get()>
+                    <summary
+                        class="debug-summary"
+                        on:click=move |_| set_debug_open.update(|b| *b = !*b)
+                    >
+                        "Debug tools (legacy demo grid)"
+                    </summary>
                 <CapabilitiesPanel/>
                 <div class="button-row" role="group" aria-label="demo actions">
                     <button class="button" on:click=run_primitives>"Run primitives demo"</button>
@@ -473,6 +512,7 @@ pub fn App() -> impl IntoView {
                         {move || log_lines.get().join("\n")}
                     </pre>
                 </Show>
+                </details>
                 <footer class="footer">
                     <span class="dot-sage" aria-hidden="true"></span>
                     <span class="muted">"End-to-end encrypted • PQ-hybrid"</span>
