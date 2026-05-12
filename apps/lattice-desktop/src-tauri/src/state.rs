@@ -1,32 +1,39 @@
 //! Mutable state owned by the Tauri app and shared across IPC commands.
 //!
-//! Phase F scope: a tiny call registry plus build-info constants. The
-//! registry is keyed by [`CallId`] so future signaling can look up
-//! in-flight calls without re-running the orchestrator.
+//! Phase F shipped the call registry; Phase G adds a `Keystore` handle
+//! used by the new `keystore_*` IPC commands. Both are stored on the
+//! same `DesktopState` so a single `State<'_, DesktopState>` injection
+//! in any command can reach both.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use lattice_media::call::{CallId, CallOutcome};
+use lattice_media::keystore::Keystore;
 use tokio::sync::Mutex;
 
 /// Mutable application state shared across Tauri IPC commands.
 ///
 /// Tauri's `manage` API stores this `Send + Sync` instance inside the
 /// app handle; commands retrieve it via `tauri::State<DesktopState>`.
-#[derive(Default)]
 pub struct DesktopState {
-    /// Completed-call outcomes, keyed by [`CallId`]. Right now Phase F
-    /// only records the result of the loopback smoke run, but the
-    /// shape generalizes — once cross-machine signaling lands, this
-    /// is where in-progress calls live too.
+    /// Completed-call outcomes, keyed by [`CallId`].
     pub calls: Mutex<HashMap<CallId, CallOutcome>>,
+    /// Hardware-backed (or DPAPI-backed on Windows) identity keystore.
+    /// Constructed once at boot in `lib.rs::run()`; the trait object is
+    /// `Send + Sync` so it can move across Tauri's async runtime
+    /// without locking.
+    pub keystore: Arc<dyn Keystore>,
 }
 
 impl DesktopState {
-    /// Construct an empty `DesktopState`. Equivalent to `default()`;
-    /// the named constructor makes call sites read clearly.
+    /// Construct a fresh `DesktopState` with an empty call registry and
+    /// the supplied keystore.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(keystore: Arc<dyn Keystore>) -> Self {
+        Self {
+            calls: Mutex::new(HashMap::new()),
+            keystore,
+        }
     }
 }

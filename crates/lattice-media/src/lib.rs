@@ -50,7 +50,13 @@
 //! considered and rejected on 2026-05-11. Voice/video ships PQ-hybrid
 //! or it doesn't ship.
 
-#![forbid(unsafe_code)]
+// Workspace baseline is `forbid(unsafe_code)`. We demote to `deny` at
+// the crate level so the Windows DPAPI FFI in `keystore::windows`
+// can opt in via `#![allow(unsafe_code)]` with `// SAFETY:` blocks
+// per the CLAUDE.md FFI carve-out. Every other module stays unsafe-
+// free, and `deny` keeps any accidental unsafe outside the carve-out
+// a hard compile error.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
@@ -59,6 +65,7 @@ pub mod constants;
 pub mod error;
 pub mod handshake;
 pub mod ice;
+pub mod keystore;
 pub mod rendezvous;
 pub mod srtp;
 

@@ -18,8 +18,11 @@
 //! presentation. Replace with a structured error enum once the UI
 //! needs branching on error variant.
 
+use std::sync::Arc;
+
 use lattice_media::call::{CallId, CallOutcome, run_loopback_call};
 use lattice_media::error::MediaError;
+use lattice_media::keystore::{KeyHandle, Keystore, StoredKey};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tracing::{info, instrument, warn};
@@ -227,4 +230,174 @@ fn outcome_to_report(call_id: CallId, outcome: CallOutcome) -> StartCallReport {
         protected_rtp_len: outcome.protected_rtp_len,
         recovered_rtp_len: outcome.recovered_rtp_len,
     }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Phase G — keystore IPC commands
+// ──────────────────────────────────────────────────────────────────
+
+/// JSON-friendly mirror of a [`StoredKey`] for IPC. All bytes hex-
+/// encoded; `created_at_unix` is seconds-since-epoch.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeystoreEntryReport {
+    /// Hex-encoded 16-byte [`KeyHandle`].
+    pub handle_hex: String,
+    /// Hex-encoded ML-DSA-65 verifying key (1952 bytes raw).
+    pub ml_dsa_pk_hex: String,
+    /// Hex-encoded Ed25519 verifying key (32 bytes raw).
+    pub ed25519_pk_hex: String,
+    /// User-supplied label.
+    pub label: String,
+    /// Seconds since UNIX epoch when the key was generated.
+    pub created_at_unix: u64,
+}
+
+impl KeystoreEntryReport {
+    fn from_stored(stored: &StoredKey) -> Self {
+        Self {
+            handle_hex: stored.handle.to_hex(),
+            ml_dsa_pk_hex: hex::encode(&stored.public.ml_dsa_pk),
+            ed25519_pk_hex: hex::encode(stored.public.ed25519_pk),
+            label: stored.label.clone(),
+            created_at_unix: stored
+                .created_at
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// JSON-friendly mirror of a [`lattice_crypto::identity::HybridSignature`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HybridSignatureReport {
+    /// Hex-encoded ML-DSA-65 signature (3309 bytes raw).
+    pub ml_dsa_sig_hex: String,
+    /// Hex-encoded Ed25519 signature (64 bytes raw).
+    pub ed25519_sig_hex: String,
+}
+
+/// Generate a fresh hybrid identity keypair and seal it via the
+/// platform keystore.
+///
+/// # Errors
+///
+/// Returns the stringified [`lattice_media::keystore::KeystoreError`]
+/// if generation, sealing, or disk IO fails.
+#[tauri::command(rename_all = "snake_case")]
+#[instrument(level = "info", skip(state))]
+pub async fn keystore_generate(
+    label: String,
+    state: State<'_, DesktopState>,
+) -> Result<KeystoreEntryReport, String> {
+    let keystore: Arc<dyn Keystore> = state.keystore.clone();
+    let stored = tokio::task::spawn_blocking(move || keystore.generate(&label))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| e.to_string())?;
+    info!(handle = %stored.handle, label = %stored.label, "keystore_generate complete");
+    Ok(KeystoreEntryReport::from_stored(&stored))
+}
+
+/// Fetch the public-key bundle for a stored handle without unsealing
+/// the secret bytes.
+///
+/// # Errors
+///
+/// Returns an error if the hex parse fails, the handle is unknown,
+/// or the sidecar can't be read.
+#[tauri::command(rename_all = "snake_case")]
+#[instrument(level = "debug", skip(state))]
+pub async fn keystore_pubkey(
+    handle_hex: String,
+    state: State<'_, DesktopState>,
+) -> Result<KeystoreEntryReport, String> {
+    let handle = KeyHandle::from_hex(&handle_hex).map_err(|e| e.to_string())?;
+    let keystore: Arc<dyn Keystore> = state.keystore.clone();
+    // pubkey() doesn't unseal, but it still hits the disk on Windows —
+    // route through spawn_blocking so a slow disk can't block the
+    // Tokio worker.
+    let public = tokio::task::spawn_blocking(move || keystore.pubkey(&handle))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(KeystoreEntryReport {
+        handle_hex,
+        ml_dsa_pk_hex: hex::encode(&public.ml_dsa_pk),
+        ed25519_pk_hex: hex::encode(public.ed25519_pk),
+        // Label / created_at aren't on the public bundle alone; the UI
+        // calls `keystore_list` when it wants those. Leave them empty
+        // rather than re-reading the sidecar a second time.
+        label: String::new(),
+        created_at_unix: 0,
+    })
+}
+
+/// Unseal, sign, zeroize. The `message_hex` payload is hex-decoded by
+/// this command — Tauri's JSON layer doesn't preserve raw bytes
+/// cleanly, and the UI already handles base64/hex.
+///
+/// # Errors
+///
+/// Returns an error if the hex parse fails for either input, the
+/// handle is unknown, the OS unseal primitive fails (corrupted blob,
+/// wrong user, …), or the signing operation itself fails.
+#[tauri::command(rename_all = "snake_case")]
+#[instrument(level = "info", skip(state, message_hex))]
+pub async fn keystore_sign(
+    handle_hex: String,
+    message_hex: String,
+    state: State<'_, DesktopState>,
+) -> Result<HybridSignatureReport, String> {
+    let handle = KeyHandle::from_hex(&handle_hex).map_err(|e| e.to_string())?;
+    let message = hex::decode(&message_hex).map_err(|e| format!("message hex decode: {e}"))?;
+    let keystore: Arc<dyn Keystore> = state.keystore.clone();
+    let signature = tokio::task::spawn_blocking(move || keystore.sign(&handle, &message))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(HybridSignatureReport {
+        ml_dsa_sig_hex: hex::encode(&signature.ml_dsa_sig),
+        ed25519_sig_hex: hex::encode(signature.ed25519_sig),
+    })
+}
+
+/// Delete a stored keypair. Returns whether the handle was present.
+///
+/// # Errors
+///
+/// Returns an error if the hex parse fails or a disk IO operation
+/// fails partway through (one file deleted but not the other).
+#[tauri::command(rename_all = "snake_case")]
+#[instrument(level = "info", skip(state))]
+pub async fn keystore_delete(
+    handle_hex: String,
+    state: State<'_, DesktopState>,
+) -> Result<bool, String> {
+    let handle = KeyHandle::from_hex(&handle_hex).map_err(|e| e.to_string())?;
+    let keystore: Arc<dyn Keystore> = state.keystore.clone();
+    let was_present = tokio::task::spawn_blocking(move || keystore.delete(&handle))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(was_present)
+}
+
+/// Enumerate all stored keys.
+///
+/// # Errors
+///
+/// Returns an error if the keystore directory cannot be read or a
+/// sidecar file is malformed.
+#[tauri::command(rename_all = "snake_case")]
+#[instrument(level = "debug", skip(state))]
+pub async fn keystore_list(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<KeystoreEntryReport>, String> {
+    let keystore: Arc<dyn Keystore> = state.keystore.clone();
+    let entries = tokio::task::spawn_blocking(move || keystore.list())
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(entries.iter().map(KeystoreEntryReport::from_stored).collect())
 }

@@ -1,18 +1,23 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-12 (M7 Phase F shipped: Tauri 2 desktop
-shell + IPC bridge + real `webrtc-srtp::Context` RTP round trip
-through the PQ-folded master + a `run_loopback_call` orchestrator
-the Tauri `start_call` command drives. See §15 below.)
+**Last updated:** 2026-05-12 (M7 Phase G.1 shipped:
+`lattice-media::keystore` trait + DPAPI-backed `WindowsKeystore`
+under `%LOCALAPPDATA%\Lattice\keystore` + five new Tauri IPC
+commands. See §16 below.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6
-all shipped**, **M7 Phases A–F all shipped, G is next.** Browser
+all shipped**, **M7 Phases A–F shipped, G.1 shipped, G.2 (macOS /
+Linux) + G.3 (TPM 2.0 / Windows Hello) + H + I remain.** Browser
 tab is a full Lattice client; server live at `http://127.0.0.1:8080`.
 Wire version is 4 (M7 call signaling, bumped during Phase C).
-**186 workspace tests pass** with `LATTICE_NET_TESTS=1` set (182
-without). `cargo check --workspace`, `cargo check -p
-lattice-desktop`, `cargo check -p lattice-core --target
-wasm32-unknown-unknown` all green.
+**200 workspace tests pass** (LATTICE_NET_TESTS only changes
+whether the 4 network-binding tests run their full payload or
+early-return; total count is the same either way — see
+`crates/lattice-media/tests/*loopback.rs`). 14 new tests this
+session: 12 inline keystore + 2 trait-object integration.
+`cargo check --workspace`, `cargo check -p lattice-desktop`,
+`cargo check -p lattice-core --target wasm32-unknown-unknown` all
+green.
 
 **Phase E.2 cryptographic smoke test is green.** A same-process
 loopback drives two `IceAgent`s through full connectivity checks,
@@ -163,7 +168,9 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | D — webrtc-rs deps + exporter helper | ✅ shipped | Phase D baseline. |
 | E — PQ-hybrid DTLS-SRTP construction | ✅ shipped | Phase E baseline + `tests/pq_dtls_srtp_loopback.rs`. |
 | F — Tauri desktop shell | ✅ shipped 2026-05-12 | This session. See above + §15. |
-| G — Hardware-backed key storage | ⬜ next | Windows Hello / TPM 2.0 + Secure Enclave + Secret Service. Phase F's IPC surface is the seam where Phase G's `keystore::sign(...)` commands attach. |
+| G.1 — Keystore trait + DPAPI Windows impl | ✅ shipped 2026-05-12 | `lattice-media::keystore` + 5 IPC commands. See §16, DECISIONS §D-26. |
+| G.2 — Linux Secret Service + macOS Secure Enclave | ⬜ next | Same trait surface, platform-specific seal primitives. |
+| G.3 — Windows TPM 2.0 / NCrypt upgrade | ⬜ | Swap DPAPI for `tss-esapi` or NCrypt MS_PLATFORM_CRYPTO_PROVIDER without touching the trait. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -1496,3 +1503,107 @@ cargo tauri build
 to bring up trunk inside the MSVC environment. The browser-shell
 fallback still works (`cd apps\lattice-web; .\scripts\serve.ps1`)
 for any work that doesn't need native voice/video.
+
+---
+
+## 16. M7 Phase G.1 — Keystore trait + Windows DPAPI (shipped 2026-05-12)
+
+Captured here as the design / decision reference. Day-by-day session
+notes live in the top-of-file session log.
+
+### Goal
+
+Identity private keys (the 32-byte ML-DSA-65 seed + the 32-byte
+Ed25519 signing key from
+`lattice_crypto::identity::IdentitySecretKey`) live behind a
+platform-specific seal on native shells. Callers hold an opaque
+`KeyHandle`; the keystore signs on their behalf. The seal protects
+keys *at rest*; during `Keystore::sign` the bytes are unsealed into
+a `Zeroizing` buffer in process RAM, signed, and wiped on drop.
+
+### What shipped
+
+| Surface | Where |
+|---|---|
+| `Keystore` trait + `KeyHandle` + `KeystoreError` + `StoredKey` | `crates/lattice-media/src/keystore/mod.rs` |
+| `MemoryKeystore` (in-process, volatile; non-Windows default) | `crates/lattice-media/src/keystore/memory.rs` |
+| `WindowsKeystore` (DPAPI seal under `%LOCALAPPDATA%\Lattice\keystore\`) | `crates/lattice-media/src/keystore/windows.rs` |
+| Five IPC commands (`keystore_generate`, `keystore_pubkey`, `keystore_sign`, `keystore_delete`, `keystore_list`) | `apps/lattice-desktop/src-tauri/src/commands.rs` |
+| `DesktopState::keystore: Arc<dyn Keystore>` plumb-through | `apps/lattice-desktop/src-tauri/src/state.rs` + `lib.rs::build_keystore` |
+| 12 inline unit tests + 2 trait-object integration tests | `crates/lattice-media/src/keystore/{mod,memory,windows}.rs` + `crates/lattice-media/tests/keystore_trait_object.rs` |
+| DPAPI-vs-TPM posture | DECISIONS §D-26 |
+| Phase G design rationale | `scratch/m7-phase-g-plan.md` |
+
+### Key design choices
+
+- **DPAPI for G.1; TPM 2.0 / Windows Hello is G.3.** NCrypt's KSP set
+  (including the Microsoft Passport KSP that fronts Windows Hello)
+  does not natively support Ed25519 or ML-DSA-65 — only RSA / ECDSA
+  on the NIST curves. HANDOFF §8 pins Ed25519 + ML-DSA-65; we don't
+  silently swap the algorithm choice on Windows. DPAPI seals the
+  secret bytes at rest under the user's Windows credential; G.3 swaps
+  the seal primitive for TPM-bound wrapping via `tss-esapi`. Full
+  reasoning in DECISIONS §D-26.
+- **Sync trait, async commands.** All known platform seal primitives
+  (DPAPI, Secret Service, Secure Enclave) expose sync APIs and the
+  signing op is CPU-bound. Tauri commands wrap each call in
+  `tokio::task::spawn_blocking` so a slow disk can't block the worker;
+  the trait stays free of `async_trait` overhead.
+- **`Arc<dyn Keystore>` shared across the IPC layer.** `Keystore:
+  Send + Sync` means the trait object is cheaply cloneable for each
+  spawn_blocking call. `DesktopState::keystore` holds the one canonical
+  Arc; every command clones it.
+- **Public-key sidecar + sealed-blob pair.** `WindowsKeystore` writes
+  two files per identity: `<handle_hex>.dpapi` (sealed secret bytes)
+  + `<handle_hex>.pub` (JSON public bundle + label + created_at).
+  `list()` and `pubkey()` only read the sidecar; sign is the only
+  operation that hits DPAPI. Stale sidecars (sidecar without a
+  matching seal) are filtered out of `list()` rather than erroring,
+  so partial-delete races don't make the keystore unusable.
+- **Workspace `forbid(unsafe_code)` carve-out.** `lattice-media`'s
+  `[lints.rust]` table demotes the workspace `forbid` to `deny`;
+  the `keystore::windows` module then `#[allow(unsafe_code)]`s and
+  documents each `unsafe` block with a `// SAFETY:` comment. Every
+  other module in the crate stays unsafe-free per the original
+  workspace posture.
+
+### Verification
+
+- `cargo check --workspace` ✅ (GNU host toolchain on kokonoe).
+- `cargo test -p lattice-media --lib keystore` ✅ 12 tests pass.
+- `cargo test -p lattice-media --test keystore_trait_object` ✅ 2 tests pass.
+- `cargo check -p lattice-desktop` ✅.
+- `cargo check -p lattice-core --target wasm32-unknown-unknown` ✅
+  (keystore is native-only; the WASM target is unaffected because
+  `lattice-media` isn't a `lattice-core` dep).
+- Grep for `todo!()` / `unimplemented!()` / `FIXME` in keystore +
+  desktop command additions → 0.
+
+### Open follow-ups (Phase G.2 and G.3)
+
+- **G.2: Linux Secret Service** via `secret-service` crate (D-Bus to
+  KDE Wallet / GNOME Keyring). Same `Keystore` trait; the only
+  per-platform code change is the seal primitive.
+- **G.2: macOS Secure Enclave** via `security-framework`. Secure
+  Enclave doesn't sign Ed25519 / ML-DSA-65 either (P-256 only), so
+  it's a wrapping primitive — same RAM-window posture as Windows.
+- **G.3: Windows TPM 2.0** via `tss-esapi` over TBS, or NCrypt against
+  `MS_PLATFORM_CRYPTO_PROVIDER`. Either approach replaces DPAPI's
+  user-credential seal with a TPM-bound seal; the trait surface and
+  IPC commands don't change.
+- **Identity export / import flow.** Once G.2 / G.3 are in place, a
+  paranoid user will want a "move this keypair to a new machine" path
+  that doesn't depend on plaintext export. Plan: passphrase-keyed
+  Argon2id wrap that lives outside the keystore boundary; the user
+  re-imports on the target machine and the keystore re-seals under
+  the new platform credential. Out of scope for G.1.
+- **Browser passkey ↔ desktop keystore handoff.** The Leptos UI in a
+  browser tab uses the WebAuthn / PRF flow (Phase ε); the same UI
+  in a Tauri shell will eventually use the keystore. The conversion
+  step is a separate phase — keystore handles cannot be reused as
+  WebAuthn credential IDs, so the UI needs a per-host "which identity
+  store am I using" toggle.
+- **HKDF info string for keystore re-seal during G.3 migration.**
+  When G.3 lands, existing DPAPI-sealed blobs need a one-shot re-seal
+  through TPM. Define the migration HKDF info string (`b"lattice/
+  keystore/migrate-dpapi-to-tpm/v1"`) before the migration commit.

@@ -40,6 +40,7 @@ the **Trade-off accepted** so future readers know what we knew.
 | D-23 | Push notification timing | HANDOFF §10 | Locked (= D-17, lands M6) |
 | D-24 | Moderation model | HANDOFF §10 | Locked |
 | D-25 | Monetization pricing | HANDOFF §10 | **Open — needs Matt** |
+| D-26 | Native keystore primitive (Windows) | M7 Phase G | Locked |
 
 ---
 
@@ -975,6 +976,60 @@ the numbers in.
 
 **Action:** Matt to revisit post-M5 with usage data + comparable-pricing
 research (Matrix.org, Mattermost, Wire, etc.).
+
+---
+
+## D-26 — Native keystore primitive (Windows)
+
+**Decision:** Phase G.1 ships the Windows keystore on **DPAPI**
+(`CryptProtectData` / `CryptUnprotectData`) under
+`%LOCALAPPDATA%\Lattice\keystore\`. TPM 2.0 / Windows Hello via
+NCrypt is tracked as Phase G.3 — same `Keystore` trait, different
+seal primitive. Linux Secret Service + macOS Secure Enclave are
+Phase G.2.
+
+**Rationale:** Microsoft's NCrypt KSP (and the Microsoft Passport
+KSP that fronts Windows Hello) does not natively support Ed25519 or
+ML-DSA-65 — only RSA + ECDSA over the NIST curves. Lattice's identity
+spec (HANDOFF §8) pins Ed25519 + ML-DSA-65, so the TPM is a wrapping
+primitive at best, not a signing primitive. Once we accept that
+"hardware-backed" on Windows really means "platform-bound seal" for
+this algorithm set, DPAPI is the right starting point: zero new
+crypto primitives, user-bound at-rest seal, and the trait is a drop-
+in replacement target when G.3 lands. The full posture rationale lives
+in `scratch/m7-phase-g-plan.md`.
+
+**Implementation:**
+
+- `crates/lattice-media/src/keystore/mod.rs` — `Keystore` trait
+  surface (`generate`, `pubkey`, `sign`, `delete`, `list`),
+  `KeyHandle` opaque identifier, `KeystoreError` enum.
+- `crates/lattice-media/src/keystore/memory.rs` — `MemoryKeystore`
+  for tests and non-Windows G.1 fallback.
+- `crates/lattice-media/src/keystore/windows.rs` — `WindowsKeystore`,
+  DPAPI seal under `%LOCALAPPDATA%\Lattice\keystore\<handle>.dpapi`
+  + `.pub` sidecar.
+- `apps/lattice-desktop/src-tauri/src/commands.rs` — five IPC
+  commands (`keystore_generate` / `keystore_pubkey` / `keystore_sign`
+  / `keystore_delete` / `keystore_list`).
+
+**Trade-off accepted:** During [`Keystore::sign`] the secret bytes
+are unsealed into a `Zeroizing` buffer in process RAM, signed, and
+wiped on drop. True hardware signing — where the key never leaves
+the secure module — is not achievable for Ed25519/ML-DSA-65 on
+Windows. G.3's TPM 2.0 upgrade narrows the at-rest attack surface
+(TPM-bound wrap key vs DPAPI's user-credential-bound wrap key) but
+does not change the RAM-window property. Auditors should treat
+"hardware-backed" in Lattice's native-shell context as "platform-
+sealed at rest, RAM-only during sign," not as full enclave-resident
+signing.
+
+**Re-open conditions:**
+
+- A standards-track Windows API gains Ed25519 / ML-DSA-65 NCrypt
+  support → reconsider the entire architecture.
+- DPAPI is found cryptographically broken or trivially extractable
+  → upgrade urgency on G.3.
 
 ---
 

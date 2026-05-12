@@ -12,7 +12,7 @@ lands.
 | Field | Value |
 |---|---|
 | Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
-| Last shipped | M6 — V1.5 hardening (2026-05-12) |
+| Last shipped | M7 Phase G.1 — Keystore trait + DPAPI Windows impl (2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 
@@ -64,6 +64,19 @@ from 182 in Phase E). `cargo check --workspace`, `cargo check
 -p lattice-desktop`, `cargo check -p lattice-core --target
 wasm32-unknown-unknown` all green. Phase G (hardware-backed keys)
 is next.
+
+### M7 Phase G.1 shipped 2026-05-12
+
+`lattice-media::keystore` trait + `MemoryKeystore` (in-process,
+volatile) + `WindowsKeystore` (DPAPI under
+`%LOCALAPPDATA%\Lattice\keystore`). Five new Tauri IPC commands
+(`keystore_generate`, `keystore_pubkey`, `keystore_sign`,
+`keystore_delete`, `keystore_list`) plumbed through
+`DesktopState::keystore: Arc<dyn Keystore>`. 14 new tests pass
+(12 inline + 2 trait-object integration). DPAPI posture +
+NCrypt/Ed25519 limitation captured in DECISIONS §D-26;
+Linux Secret Service + macOS Secure Enclave are G.2, TPM 2.0 via
+NCrypt is G.3. See HANDOFF §16.
 
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for

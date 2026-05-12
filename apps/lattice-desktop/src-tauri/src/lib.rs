@@ -25,7 +25,11 @@
 //!   E.2 loopback in-process — the cryptographic smoke proof that the
 //!   IPC bridge can drive `lattice-media` end-to-end. Real MLS-routed
 //!   call invites land in a later M7 phase.
-//! - Hardware-backed keys (Phase G).
+//! - Hardware-backed keys via TPM 2.0 / Windows Hello (Phase G.3).
+//!   Phase G.1 ships the [`lattice_media::keystore`] trait and a
+//!   DPAPI-backed Windows implementation; G.2 lands macOS Secure
+//!   Enclave and Linux Secret Service; G.3 swaps the Windows seal
+//!   primitive from DPAPI to NCrypt-via-TPM.
 //! - Mobile shells (Phase H).
 
 #![forbid(unsafe_code)]
@@ -58,7 +62,8 @@ pub fn run() {
         "lattice-desktop booting"
     );
 
-    let state = state::DesktopState::new();
+    let keystore: std::sync::Arc<dyn lattice_media::keystore::Keystore> = build_keystore();
+    let state = state::DesktopState::new(keystore);
 
     tauri::Builder::default()
         .manage(state)
@@ -68,9 +73,34 @@ pub fn run() {
             commands::end_call,
             commands::call_status,
             commands::desktop_info,
+            commands::keystore_generate,
+            commands::keystore_pubkey,
+            commands::keystore_sign,
+            commands::keystore_delete,
+            commands::keystore_list,
         ])
         .run(tauri::generate_context!())
         .expect("tauri run");
+}
+
+/// Construct the platform-default keystore. Boot fails if the OS-keychain
+/// directory cannot be created — there is no useful degraded mode.
+fn build_keystore() -> std::sync::Arc<dyn lattice_media::keystore::Keystore> {
+    #[cfg(target_os = "windows")]
+    {
+        let ks = lattice_media::keystore::windows::WindowsKeystore::at_default_location()
+            .expect("WindowsKeystore::at_default_location");
+        tracing::info!("keystore: WindowsKeystore (DPAPI) at default location");
+        std::sync::Arc::new(ks)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        tracing::warn!(
+            "keystore: MemoryKeystore (volatile) — Linux Secret Service and macOS Secure Enclave \
+             land in M7 Phase G.2"
+        );
+        std::sync::Arc::new(lattice_media::keystore::memory::MemoryKeystore::new())
+    }
 }
 
 fn init_tracing() {

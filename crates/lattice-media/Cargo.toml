@@ -7,8 +7,27 @@ license.workspace = true
 authors.workspace = true
 description = "M7 — voice/video for Lattice. PQ-hybrid DTLS-SRTP, ICE/STUN/TURN, and call signaling over MLS. See scratch/m7-build-plan.md."
 
-[lints]
-workspace = true
+[lints.rust]
+# Workspace baseline is `forbid(unsafe_code)`. Demote to `deny` here so
+# the Windows DPAPI FFI in `keystore::windows` can opt-in via a single
+# `#[allow(unsafe_code)]` with documented `// SAFETY:` blocks per the
+# CLAUDE.md FFI carve-out. Every other module in the crate stays
+# unsafe-free.
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+significant_drop_tightening = "allow"
 
 [dependencies]
 # Verbose tracing is mandatory across every crate in the workspace.
@@ -50,7 +69,23 @@ tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 # Lattice crates we depend on. Call signaling is just an
 # `ApplicationMessage` payload variant, so we pull wire types from
 # lattice-protocol; we don't run MLS ops here — that's lattice-crypto.
+# lattice-crypto is added in M7 Phase G — the keystore module wraps
+# identity::{generate_identity, sign, verify} behind a platform seal.
 lattice-protocol = { path = "../lattice-protocol" }
+lattice-crypto = { path = "../lattice-crypto" }
+
+# JSON for the public-key sidecar files the WindowsKeystore writes
+# alongside each sealed `.dpapi` blob.
+serde_json = { workspace = true }
+
+# Hex encoding for KeyHandle / public-key sidecars.
+hex = { workspace = true }
+
+# Platform directory discovery for the WindowsKeystore default
+# location (`%LOCALAPPDATA%\Lattice\keystore`). Pulled unconditionally
+# so the `MemoryKeystore`-only build path on non-Windows targets can
+# still locate user-scoped state if needed in a later phase.
+dirs = "5"
 
 # webrtc-rs lower-level crates, pinned at v0.17.1 — the final
 # feature release of the Tokio-coupled async line. Phase A research
@@ -89,3 +124,14 @@ rustls = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 rand_chacha = "0.3"
+tempfile = "3"
+
+# Windows-only deps for the DPAPI-backed keystore. windows = 0.58
+# matches the version Tauri 2 already pulls in (verified via
+# cargo tree -i windows), so feature unification stays a no-op.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+] }
