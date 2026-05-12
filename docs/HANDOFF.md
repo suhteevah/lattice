@@ -1,23 +1,28 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-12 (M7 Phase G.1 shipped:
-`lattice-media::keystore` trait + DPAPI-backed `WindowsKeystore`
-under `%LOCALAPPDATA%\Lattice\keystore` + five new Tauri IPC
-commands. See §16 below.)
+**Last updated:** 2026-05-12 (M7 Phases G.1 + G.2 shipped:
+`lattice-media::keystore` trait + DPAPI Windows / Secret Service
+Linux / Keychain macOS impls + five Tauri IPC commands. **Chat-app
+chunk A** shipped: sidebar/thread/composer is now the default
+lattice-web view; legacy demo grid is behind a collapsed
+`<details>`. See §16 + §17 below.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6
-all shipped**, **M7 Phases A–F shipped, G.1 shipped, G.2 (macOS /
-Linux) + G.3 (TPM 2.0 / Windows Hello) + H + I remain.** Browser
-tab is a full Lattice client; server live at `http://127.0.0.1:8080`.
-Wire version is 4 (M7 call signaling, bumped during Phase C).
+all shipped**, **M7 Phases A–F + G.1 + G.2 shipped**. Open: G.3
+(TPM 2.0 + Secure Enclave binding) + Tauri mobile (H) + cover-
+traffic (I) + chat-app chunks B/C/D/E/F. See
+[`scratch/next-session-plan.md`](../scratch/next-session-plan.md)
+for the prioritized ordering. Browser tab is a full Lattice
+client; server live at `http://127.0.0.1:8080`. Wire version is 4
+(M7 call signaling, bumped during Phase C).
 **200 workspace tests pass** (LATTICE_NET_TESTS only changes
 whether the 4 network-binding tests run their full payload or
 early-return; total count is the same either way — see
 `crates/lattice-media/tests/*loopback.rs`). 14 new tests this
 session: 12 inline keystore + 2 trait-object integration.
 `cargo check --workspace`, `cargo check -p lattice-desktop`,
-`cargo check -p lattice-core --target wasm32-unknown-unknown` all
-green.
+`cargo check -p lattice-core --target wasm32-unknown-unknown`,
+`trunk build --release` (lattice-web, 54s) all green.
 
 **Phase E.2 cryptographic smoke test is green.** A same-process
 loopback drives two `IceAgent`s through full connectivity checks,
@@ -169,8 +174,8 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | E — PQ-hybrid DTLS-SRTP construction | ✅ shipped | Phase E baseline + `tests/pq_dtls_srtp_loopback.rs`. |
 | F — Tauri desktop shell | ✅ shipped 2026-05-12 | This session. See above + §15. |
 | G.1 — Keystore trait + DPAPI Windows impl | ✅ shipped 2026-05-12 | `lattice-media::keystore` + 5 IPC commands. See §16, DECISIONS §D-26. |
-| G.2 — Linux Secret Service + macOS Secure Enclave | ⬜ next | Same trait surface, platform-specific seal primitives. |
-| G.3 — Windows TPM 2.0 / NCrypt upgrade | ⬜ | Swap DPAPI for `tss-esapi` or NCrypt MS_PLATFORM_CRYPTO_PROVIDER without touching the trait. |
+| G.2 — Linux Secret Service + macOS Keychain | ✅ shipped 2026-05-12 | OS-keychain seal on all 3 desktops. See §17. |
+| G.3 — TPM 2.0 (Windows) + Secure Enclave (macOS) + tss-esapi opt-in (Linux) | ⬜ next | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -1607,3 +1612,101 @@ a `Zeroizing` buffer in process RAM, signed, and wiped on drop.
   When G.3 lands, existing DPAPI-sealed blobs need a one-shot re-seal
   through TPM. Define the migration HKDF info string (`b"lattice/
   keystore/migrate-dpapi-to-tpm/v1"`) before the migration commit.
+
+---
+
+## 17. M7 Phase G.2 + chat chunk A (shipped 2026-05-12)
+
+Two follow-on commits after Phase G.1 landed.
+
+### Phase G.2 — Linux Secret Service + macOS Keychain (commit `699dbef`)
+
+Two new platform-specific `Keystore` impls so the non-Windows
+desktop shells stop falling back to `MemoryKeystore`.
+
+| Surface | Where |
+|---|---|
+| `LinuxKeystore` (FreeDesktop Secret Service via pure-Rust `secret-service` over `zbus`) | `crates/lattice-media/src/keystore/linux.rs` |
+| `MacosKeystore` (login Keychain via `security-framework`) | `crates/lattice-media/src/keystore/macos.rs` |
+| Platform-selection matrix in `build_keystore()` | `apps/lattice-desktop/src-tauri/src/lib.rs` |
+
+Both impls store the 64-byte identity secret in the OS-keychain
+vault and a JSON public-key sidecar on disk (same shape as Windows
+DPAPI, just different seal primitive). The trait is sync; the
+Linux `secret-service` v4 crate is async-first, so `LinuxKeystore`
+owns a dedicated single-threaded tokio runtime and `block_on`s
+each call.
+
+Functional-test paths gated behind opt-in env vars
+(`LATTICE_SS_TESTS=1` for Linux, `LATTICE_KC_TESTS=1` for macOS)
+so cross-platform check runs that don't have a session keyring up
+don't fail spuriously.
+
+**Verification posture:** `cargo check -p lattice-media` green on
+Windows host. Linux + macOS modules are `#[cfg(target_os = ...)]`-
+gated; functional behaviour will be verified the first time those
+modules deploy.
+
+**TPM 2.0 / Secure Enclave binding (Phase G.3)** is the next-tier
+seal primitive — tracked in
+[`scratch/next-session-plan.md`](../scratch/next-session-plan.md)
+Track 2. Same trait surface, same IPC commands; the only change is
+the at-rest seal mechanism (NCrypt `MS_PLATFORM_CRYPTO_PROVIDER`
+ECDH wrap on Windows; `SecKey` with `kSecAttrTokenIDSecureEnclave`
+ECDH wrap on macOS; `tss-esapi` opt-in feature flag on Linux).
+
+### Chat-app chunk A — sidebar / thread / composer (commit `606705e`)
+
+Replaces the button-grid as the default `lattice-web` view with a
+classic three-pane chat layout. The legacy demo grid lives behind
+a collapsed `<details>` element ("Debug tools (legacy demo grid)")
+so the protocol surface stays one click away.
+
+| Surface | Where |
+|---|---|
+| `Conversation` / `ChatMessage` / `ChatView` types + `ChatShell` + `ConversationSidebar` / `ThreadPane` / `MessageComposer` components | `apps/lattice-web/src/chat.rs` |
+| Chat-shell CSS (sidebar list, thread bubbles, composer, dark-mode preserved) | `apps/lattice-web/styles.css` |
+| Integration: `chat_convos` / `chat_messages` / `chat_view` signals + `<ChatShell>` mount above the existing demo grid | `apps/lattice-web/src/app.rs` |
+
+The chunk-A shell renders against **mock data** — `mock_seed()`
+returns one placeholder conversation so the panes feel populated.
+Composer Send is local-only this chunk; it appends to the in-
+memory `messages` signal and updates the sidebar preview.
+
+**Chunk C** (real DM flow) is the gating chunk for "chat actually
+works." Concrete plan + size estimate in
+[`scratch/next-session-plan.md`](../scratch/next-session-plan.md)
+Track 1: deterministic group_id derivation from sorted user_ids,
+identity bootstrap on app boot, conversation state in
+`Rc<RefCell<HashMap<group_id, GroupHandle>>>`, polled message
+fetch (WS push lands in chunk D). Estimated ~400 LOC + ~100 LOC
+of integration changes.
+
+### Verification gate (this session)
+
+- `cargo check --workspace` ✅
+- `cargo test --workspace` ✅ 200 tests pass (14 new — all in
+  G.1; no test additions in G.2 or chunk A because each side
+  needs a Linux / macOS / browser to exercise functionally).
+- `cargo check -p lattice-core --target wasm32-unknown-unknown` ✅
+- `cargo check --target wasm32-unknown-unknown --bin lattice-web` ✅
+- `trunk build` ✅ (clean dist/ bundle in 54s)
+- `cargo check -p lattice-desktop` ✅
+- Grep for new `todo!()` / `unimplemented!()` / `FIXME` → 0.
+
+Visual browser smoke of the chat shell — opening it in Chrome via
+trunk serve — was deliberately deferred to the next session's
+hands-on verification: this commit is a scaffold checkpoint, not
+the "chat works" gate.
+
+### What this session deliberately did NOT do
+
+- Phase G.3 (TPM 2.0 / Secure Enclave binding). Sized in
+  next-session plan Track 2; ~400 LOC NCrypt FFI + ~300 LOC SecKey
+  FFI + workspace `p256` dep. One focused session each.
+- Chat chunk C (real DM flow). The chunk-A shell is a mockup
+  until C plumbs MLS state through it. Sized in next-session plan
+  Track 1.
+- Chat chunks B / D / E / F. Each is its own scoped chunk; size
+  estimates carried in next-session plan Track 3.
+- Tauri Mobile shells (Phase H) and cover-traffic (Phase I).

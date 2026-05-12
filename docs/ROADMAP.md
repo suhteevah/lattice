@@ -12,7 +12,7 @@ lands.
 | Field | Value |
 |---|---|
 | Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
-| Last shipped | M7 Phase G.1 — Keystore trait + DPAPI Windows impl (2026-05-12) |
+| Last shipped | M7 Phase G.2 (Linux SS + macOS Keychain) + chat-app chunk A (2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 
@@ -74,9 +74,27 @@ volatile) + `WindowsKeystore` (DPAPI under
 `keystore_delete`, `keystore_list`) plumbed through
 `DesktopState::keystore: Arc<dyn Keystore>`. 14 new tests pass
 (12 inline + 2 trait-object integration). DPAPI posture +
-NCrypt/Ed25519 limitation captured in DECISIONS §D-26;
-Linux Secret Service + macOS Secure Enclave are G.2, TPM 2.0 via
-NCrypt is G.3. See HANDOFF §16.
+NCrypt/Ed25519 limitation captured in DECISIONS §D-26. See
+HANDOFF §16.
+
+### M7 Phase G.2 + chat-app chunk A shipped 2026-05-12
+
+Phase G.2: `LinuxKeystore` (FreeDesktop Secret Service via
+pure-Rust `secret-service` over `zbus`) + `MacosKeystore` (login
+Keychain via `security-framework`). Same `Keystore` trait
+surface; `lattice-desktop` `build_keystore()` selects per
+`target_os`. Functional tests gated behind opt-in env vars
+(`LATTICE_SS_TESTS=1`, `LATTICE_KC_TESTS=1`). G.3 (TPM 2.0
+on Windows + Secure-Enclave-bound ECDH wrap on macOS + optional
+`tss-esapi` on Linux) is the next "more secure" tier — sized in
+`scratch/next-session-plan.md` Track 2.
+
+Chat-app chunk A: `lattice-web` default view is now a classic
+chat layout (sidebar / thread / composer) rendered against
+in-memory mock data. Legacy button-grid lives behind a
+collapsed `<details>` element. Real MLS state plumbing is
+chunk C (the gating chunk for "chat actually works"); sized in
+`scratch/next-session-plan.md` Track 1. See HANDOFF §17.
 
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for
