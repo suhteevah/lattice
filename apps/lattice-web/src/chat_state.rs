@@ -38,15 +38,20 @@ use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider
 use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
-    GroupHandle, LatticeIdentity, add_member, apply_commit, create_group, decrypt,
-    encrypt_application, generate_key_package, process_welcome,
+    GroupHandle, LatticeIdentity, add_member, apply_commit, create_group_with_storage,
+    decrypt, encrypt_application, generate_key_package, load_group_with_storage,
+    process_welcome_with_storage,
 };
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 use rand::RngCore;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use crate::api;
 use crate::persist;
+use crate::storage::{
+    LocalStorageGroupStateStorage, restore_kp_repo_from_storage, sync_kp_repo_to_storage,
+};
 
 /// 16-byte deterministic group id derived from sorted user_ids.
 pub type GroupId = [u8; 16];
@@ -57,15 +62,34 @@ pub struct ConvoState {
     pub peer_user_id: [u8; USER_ID_LEN],
     /// User-supplied label (e.g. "Bob (iMac)").
     pub label: String,
-    /// Live MLS group state. Mutated on every encrypt/decrypt; not
-    /// `Clone` so we hold it inside the `Rc<RefCell<_>>`.
-    pub group: GroupHandle,
+    /// Live MLS group state. Mutated on every encrypt/decrypt;
+    /// persists through `LocalStorageGroupStateStorage` so page
+    /// reloads can re-hydrate via [`load_group_with_storage`].
+    pub group: GroupHandle<LocalStorageGroupStateStorage>,
     /// PSK storage shared with `group`; needed for sealed-sender +
     /// future commit-rotation paths.
     pub psk: LatticePskStorage,
     /// Highest server sequence number consumed by `poll_messages`.
     pub last_seq: u64,
 }
+
+/// Persisted shape for the per-conversation chat metadata
+/// (peer + label + last_seq). The MLS state itself lives in
+/// `LocalStorageGroupStateStorage`; this index drives sidebar
+/// restoration on reload.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ConvoRecord {
+    /// 16-byte group_id, hex-encoded.
+    group_id_hex: String,
+    /// 32-byte peer user_id, hex-encoded.
+    peer_user_id_hex: String,
+    /// User-supplied label.
+    label: String,
+    /// Highest server sequence number consumed so far.
+    last_seq: u64,
+}
+
+const CONVOS_KEY: &str = "lattice/conversations/v1";
 
 /// Shared mutable chat state.
 ///
@@ -173,7 +197,18 @@ impl ChatState {
                         "chat: loaded saved identity user_id={}",
                         hex::encode(&loaded.credential.user_id[..6]),
                     ));
+                    // Restore the in-memory KeyPackage repo from
+                    // localStorage so process_welcome can find the
+                    // matching private leaf init keys for any
+                    // conversation we're invited to (or already in).
+                    let restored = restore_kp_repo_from_storage(&loaded.key_package_repo)
+                        .map_err(|e| format!("restore_kp: {e}"))?;
+                    log(format!("chat: restored {restored} key packages from localStorage"));
                     *self.identity.lock().map_err(poisoned)? = Some(loaded);
+                    // Re-hydrate active conversations from the
+                    // persisted index + the MLS group state in
+                    // localStorage.
+                    self.restore_conversations(log)?;
                     return Ok(());
                 }
             }
@@ -199,9 +234,86 @@ impl ChatState {
         log(format!(
             "chat: registered + published KP (server ts={published_at})"
         ));
+        // Shadow-persist the KPs that generate_random_identity +
+        // publish_key_package generated. mls-rs stored their private
+        // leaf init keys inside identity.key_package_repo; we mirror
+        // those into localStorage so the next page load can resume
+        // an invited conversation.
+        sync_kp_repo_to_storage(&identity.key_package_repo)
+            .map_err(|e| format!("sync_kp: {e}"))?;
+        log("chat: synced KP repo to localStorage".to_string());
         persist::save(&identity, None)?;
         log("chat: persisted plaintext identity to localStorage".to_string());
         *self.identity.lock().map_err(poisoned)? = Some(identity);
+        Ok(())
+    }
+
+    /// Reload conversations from the localStorage index. Called once
+    /// at the end of `bootstrap_inner` whenever a saved identity was
+    /// found. Each entry's MLS state is re-hydrated via
+    /// `load_group_with_storage`; entries whose MLS state failed to
+    /// load are dropped from the index.
+    fn restore_conversations(
+        &self,
+        log: impl Fn(String) + Copy,
+    ) -> Result<(), String> {
+        let records = load_convo_index()?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let identity_guard = self.identity.lock().map_err(poisoned)?;
+        let identity = identity_guard
+            .as_ref()
+            .ok_or_else(|| "identity not set before restore".to_string())?;
+
+        let mut surviving: Vec<ConvoRecord> = Vec::with_capacity(records.len());
+        let mut active = self.active.lock().map_err(poisoned)?;
+        for record in records {
+            let group_id = match decode_gid_hex(&record.group_id_hex) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let peer_user_id = match decode_user_id_hex(&record.peer_user_id_hex) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let psk = LatticePskStorage::new();
+            match load_group_with_storage(
+                identity,
+                psk.clone(),
+                &group_id,
+                LocalStorageGroupStateStorage,
+            ) {
+                Ok(group) => {
+                    active.insert(
+                        group_id,
+                        ConvoState {
+                            peer_user_id,
+                            label: record.label.clone(),
+                            group,
+                            psk,
+                            last_seq: record.last_seq,
+                        },
+                    );
+                    surviving.push(record);
+                }
+                Err(e) => {
+                    log(format!(
+                        "chat: failed to restore group {}: {} (dropping from index)",
+                        record.group_id_hex, e
+                    ));
+                }
+            }
+        }
+        drop(active);
+        drop(identity_guard);
+        // Persist the pruned index so dead entries don't keep
+        // erroring every reload.
+        save_convo_index(&surviving)?;
+        log(format!(
+            "chat: restored {} active conversation(s) from localStorage",
+            surviving.len()
+        ));
         Ok(())
     }
 
@@ -254,19 +366,36 @@ impl ChatState {
                     let identity = guard
                         .as_ref()
                         .ok_or_else(|| "identity not bootstrapped".to_string())?;
-                    process_welcome(identity, psk.clone(), &welcome_bundle)
-                        .map_err(|e| format!("process_welcome: {e}"))?
+                    let g = process_welcome_with_storage(
+                        identity,
+                        psk.clone(),
+                        &welcome_bundle,
+                        LocalStorageGroupStateStorage,
+                    )
+                    .map_err(|e| format!("process_welcome: {e}"))?;
+                    // After mls-rs consumes a leaf KP into a group,
+                    // it removes it from the in-memory repo. Sync
+                    // the deletion to localStorage too.
+                    sync_kp_repo_to_storage(&identity.key_package_repo)
+                        .map_err(|e| format!("sync_kp post-welcome: {e}"))?;
+                    g
                 };
                 self.active.lock().map_err(poisoned)?.insert(
                     group_id,
                     ConvoState {
                         peer_user_id,
-                        label,
+                        label: label.clone(),
                         group,
                         psk,
                         last_seq: 0,
                     },
                 );
+                persist_convo_record(&ConvoRecord {
+                    group_id_hex: hex::encode(group_id),
+                    peer_user_id_hex: hex::encode(peer_user_id),
+                    label: label.clone(),
+                    last_seq: 0,
+                })?;
                 return Ok(group_id);
             }
             Err(e) if e.contains("404") || e.contains("not found") => {
@@ -288,8 +417,13 @@ impl ChatState {
             let identity = guard
                 .as_ref()
                 .ok_or_else(|| "identity not bootstrapped".to_string())?;
-            let mut g = create_group(identity, psk.clone(), &group_id)
-                .map_err(|e| format!("create_group: {e}"))?;
+            let mut g = create_group_with_storage(
+                identity,
+                psk.clone(),
+                &group_id,
+                LocalStorageGroupStateStorage,
+            )
+            .map_err(|e| format!("create_group: {e}"))?;
             let commit_output =
                 add_member(&mut g, &peer_kp).map_err(|e| format!("add_member: {e}"))?;
             let welcome = commit_output
@@ -315,12 +449,18 @@ impl ChatState {
             group_id,
             ConvoState {
                 peer_user_id,
-                label,
+                label: label.clone(),
                 group,
                 psk,
                 last_seq: 0,
             },
         );
+        persist_convo_record(&ConvoRecord {
+            group_id_hex: hex::encode(group_id),
+            peer_user_id_hex: hex::encode(peer_user_id),
+            label: label.clone(),
+            last_seq: 0,
+        })?;
         Ok(group_id)
     }
 
@@ -408,6 +548,9 @@ impl ChatState {
                 convo.last_seq = latest_seq;
                 pts
             };
+            // Persist the new last_seq so a reload picks up where
+            // we left off and doesn't replay the entire history.
+            let _ = update_convo_last_seq(&gid, latest_seq);
             for (seq, pt) in plaintexts {
                 out.push(PolledMessage {
                     group_id: gid,
@@ -450,6 +593,85 @@ impl ChatState {
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> String {
     "chat-state mutex poisoned".to_string()
+}
+
+fn decode_gid_hex(hex_str: &str) -> Result<GroupId, String> {
+    let raw = hex::decode(hex_str).map_err(|e| format!("group_id hex decode: {e}"))?;
+    if raw.len() != 16 {
+        return Err(format!(
+            "group_id wrong length: got {}, want 16",
+            raw.len()
+        ));
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&raw);
+    Ok(out)
+}
+
+fn decode_user_id_hex(hex_str: &str) -> Result<[u8; USER_ID_LEN], String> {
+    let raw = hex::decode(hex_str).map_err(|e| format!("user_id hex decode: {e}"))?;
+    if raw.len() != USER_ID_LEN {
+        return Err(format!(
+            "user_id wrong length: got {}, want {}",
+            raw.len(),
+            USER_ID_LEN
+        ));
+    }
+    let mut out = [0u8; USER_ID_LEN];
+    out.copy_from_slice(&raw);
+    Ok(out)
+}
+
+fn local_storage() -> Result<web_sys::Storage, String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    window
+        .local_storage()
+        .map_err(|e| format!("window.localStorage: {e:?}"))?
+        .ok_or_else(|| "localStorage unavailable".to_string())
+}
+
+fn load_convo_index() -> Result<Vec<ConvoRecord>, String> {
+    let storage = local_storage()?;
+    let Some(json) = storage
+        .get_item(CONVOS_KEY)
+        .map_err(|e| format!("read convos: {e:?}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&json).map_err(|e| format!("decode convos: {e}"))
+}
+
+fn save_convo_index(records: &[ConvoRecord]) -> Result<(), String> {
+    let storage = local_storage()?;
+    let json = serde_json::to_string(records).map_err(|e| format!("encode convos: {e}"))?;
+    storage
+        .set_item(CONVOS_KEY, &json)
+        .map_err(|e| format!("set convos: {e:?}"))
+}
+
+fn persist_convo_record(record: &ConvoRecord) -> Result<(), String> {
+    let mut records = load_convo_index().unwrap_or_default();
+    // Replace any existing entry for this group_id (e.g. user
+    // re-adds a previously dropped conversation).
+    records.retain(|r| r.group_id_hex != record.group_id_hex);
+    records.push(record.clone());
+    save_convo_index(&records)
+}
+
+fn update_convo_last_seq(gid: &GroupId, last_seq: u64) -> Result<(), String> {
+    let target = hex::encode(gid);
+    let mut records = load_convo_index().unwrap_or_default();
+    let mut changed = false;
+    for r in &mut records {
+        if r.group_id_hex == target && r.last_seq != last_seq {
+            r.last_seq = last_seq;
+            changed = true;
+        }
+    }
+    if changed {
+        save_convo_index(&records)?;
+    }
+    Ok(())
 }
 
 async fn wait_ms(ms: u32) {

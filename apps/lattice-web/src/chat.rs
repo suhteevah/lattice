@@ -184,6 +184,18 @@ pub fn ChatShell(
         }
     };
 
+    // Pull restored conversations into the sidebar after the bootstrap
+    // task finishes — `bootstrap_identity` rebuilds the `active` map
+    // from localStorage but the view signal needs an explicit poke.
+    {
+        let refresh = refresh_conversations.clone();
+        Effect::new(move |_prev: Option<()>| {
+            if bootstrap_complete.get() {
+                refresh();
+            }
+        });
+    }
+
     // Add-conversation submit handler.
     let on_add_submit = {
         let state = state.clone();

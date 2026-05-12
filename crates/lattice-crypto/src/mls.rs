@@ -450,10 +450,56 @@ where
     )?;
     let kp_extensions =
         key_package_extensions(&identity.credential.kem_pubkey_view(&identity.kem_keypair))?;
-    let group = client
+    let mut group = client
         .create_group_with_id(group_id.to_vec(), ExtensionList::new(), kp_extensions, None)
         .map_err(|e| Error::Mls(format!("create_group: {e:?}")))?;
+    // Persist the freshly-created group so callers reloading from
+    // the backing storage can resume it. mls-rs doesn't auto-flush
+    // on construction; without this, `LocalStorageGroupStateStorage`
+    // never sees the epoch-0 state and `load_group` later fails
+    // with "group not found."
+    group
+        .write_to_storage()
+        .map_err(|e| Error::Mls(format!("write_to_storage after create_group: {e:?}")))?;
     tracing::debug!(group_id_len = group_id.len(), "MLS group created");
+    Ok(GroupHandle {
+        inner: group,
+        psk_store,
+        kem_keypair: identity.kem_keypair.duplicate(),
+    })
+}
+
+/// Reload a previously-persisted group from the configured
+/// `GroupStateStorage` backend.
+///
+/// Returns a `GroupHandle` ready for `encrypt_application` /
+/// `decrypt` / `commit`. Used by the browser client on page-reload
+/// to resume an active conversation without re-running the full
+/// MLS handshake.
+///
+/// # Errors
+///
+/// Returns [`Error::Mls`] if the storage doesn't hold a state
+/// record for `group_id` or mls-rs rejects the reconstructed
+/// state.
+pub fn load_group_with_storage<G>(
+    identity: &LatticeIdentity,
+    psk_store: LatticePskStorage,
+    group_id: &[u8],
+    group_state_storage: G,
+) -> Result<GroupHandle<G, DefaultMlsRules>>
+where
+    G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+{
+    let client = build_client(
+        identity,
+        psk_store.clone(),
+        group_state_storage,
+        DefaultMlsRules::default(),
+    )?;
+    let group = client
+        .load_group(group_id)
+        .map_err(|e| Error::Mls(format!("load_group: {e:?}")))?;
     Ok(GroupHandle {
         inner: group,
         psk_store,
@@ -769,9 +815,15 @@ where
         group_state_storage,
         DefaultMlsRules::default(),
     )?;
-    let (group, _new_member_info) = client
+    let (mut group, _new_member_info) = client
         .join_group(None, &mls_welcome, None)
         .map_err(|e| Error::Mls(format!("join_group: {e:?}")))?;
+    // Flush the post-join group state to storage so a later
+    // `load_group_with_storage` (e.g. on browser reload) finds the
+    // record. mls-rs's `join_group` doesn't auto-write.
+    group
+        .write_to_storage()
+        .map_err(|e| Error::Mls(format!("write_to_storage after join_group: {e:?}")))?;
 
     tracing::debug!(
         epoch_after_join = welcome.pq_payload.epoch,

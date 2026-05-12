@@ -14,6 +14,8 @@
 //! lattice/mls/group/{group_id_b64url}/epoch/{n} → epoch.data (b64 std)
 //! lattice/mls/group/{group_id_b64url}/max_epoch → max epoch_id (u64 decimal)
 //! lattice/mls/groups                            → JSON array of group ids
+//! lattice/mls/kp/{kp_id_b64url}                 → MLS-codec KeyPackageData (b64 std)
+//! lattice/mls/kp_ids                            → JSON array of KP ids
 //! ```
 //!
 //! ## Send + Sync
@@ -277,5 +279,135 @@ fn index_remove_group(group_id: &[u8]) -> Result<(), LocalStorageError> {
     storage
         .set_item(INDEX_KEY, &json)
         .map_err(|e| LocalStorageError(format!("set index: {e:?}")))?;
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────
+// KeyPackage shadow-persistence
+// ────────────────────────────────────────────────────────────────
+//
+// `lattice_crypto::mls::build_client` hardcodes `key_package_repo`
+// to `InMemoryKeyPackageStorage` (the type lives on `LatticeIdentity`).
+// Rather than refactor lattice-crypto to generalize that, we
+// shadow-sync the in-memory storage to / from localStorage from
+// the browser side:
+//
+// - After every `generate_key_package` call, `sync_kp_repo_to_storage`
+//   enumerates the in-memory entries and writes any new ones.
+// - On boot, `restore_kp_repo_from_storage` reads localStorage and
+//   inserts each entry into a fresh in-memory storage so
+//   `process_welcome` can find the matching private leaf init keys.
+//
+// Each `KeyPackageData` is serialized via mls-rs-codec, base64'd,
+// and stored under `lattice/mls/kp/{kp_id_b64url}`. The list of
+// known KP ids lives at `lattice/mls/kp_ids` so we can restore
+// without scanning every localStorage key.
+
+use mls_rs_codec::{MlsDecode, MlsEncode};
+use mls_rs_core::key_package::KeyPackageData;
+use mls_rs::storage_provider::in_memory::InMemoryKeyPackageStorage;
+
+const KP_INDEX_KEY: &str = "lattice/mls/kp_ids";
+
+fn kp_key(id: &[u8]) -> String {
+    format!("lattice/mls/kp/{}", B64URL.encode(id))
+}
+
+/// Write any in-memory KeyPackage entries that aren't yet persisted
+/// to localStorage.
+///
+/// # Errors
+///
+/// Bubbles up localStorage write failures or MLS-codec encoding
+/// errors.
+pub fn sync_kp_repo_to_storage(
+    repo: &InMemoryKeyPackageStorage,
+) -> Result<(), LocalStorageError> {
+    let storage = local_storage()?;
+    let mut index: Vec<String> = match storage
+        .get_item(KP_INDEX_KEY)
+        .map_err(|e| LocalStorageError(format!("read kp_ids: {e:?}")))?
+    {
+        Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let known: std::collections::HashSet<String> = index.iter().cloned().collect();
+
+    for (id, pkg) in repo.key_packages() {
+        let id_b64url = B64URL.encode(&id);
+        if known.contains(&id_b64url) {
+            continue;
+        }
+        let encoded = pkg
+            .mls_encode_to_vec()
+            .map_err(|e| LocalStorageError(format!("encode KeyPackageData: {e}")))?;
+        storage
+            .set_item(&kp_key(&id), &B64.encode(&encoded))
+            .map_err(|e| LocalStorageError(format!("set kp: {e:?}")))?;
+        index.push(id_b64url);
+    }
+    let json = serde_json::to_string(&index)
+        .map_err(|e| LocalStorageError(format!("encode kp_ids: {e}")))?;
+    storage
+        .set_item(KP_INDEX_KEY, &json)
+        .map_err(|e| LocalStorageError(format!("set kp_ids: {e:?}")))?;
+    Ok(())
+}
+
+/// Read all persisted KeyPackage entries from localStorage and
+/// insert them into `repo`. Idempotent — entries already present
+/// are silently overwritten with the persisted copy.
+///
+/// # Errors
+///
+/// Bubbles up localStorage read failures, base64 decode errors,
+/// or MLS-codec decoding errors.
+pub fn restore_kp_repo_from_storage(
+    repo: &InMemoryKeyPackageStorage,
+) -> Result<usize, LocalStorageError> {
+    let Some(json) = get_item(KP_INDEX_KEY)? else {
+        return Ok(0);
+    };
+    let entries: Vec<String> =
+        serde_json::from_str(&json).map_err(|e| LocalStorageError(format!("kp_ids decode: {e}")))?;
+    let mut restored = 0;
+    for id_b64url in entries {
+        let id = B64URL
+            .decode(id_b64url.as_bytes())
+            .map_err(|e| LocalStorageError(format!("kp id decode: {e}")))?;
+        let Some(b64) = get_item(&kp_key(&id))? else {
+            continue;
+        };
+        let bytes = B64
+            .decode(b64.as_bytes())
+            .map_err(|e| LocalStorageError(format!("kp data decode: {e}")))?;
+        let data = KeyPackageData::mls_decode(&mut bytes.as_slice())
+            .map_err(|e| LocalStorageError(format!("kp data MLS-decode: {e}")))?;
+        repo.insert(id, data);
+        restored += 1;
+    }
+    Ok(restored)
+}
+
+/// Delete every persisted KeyPackage entry. Used on identity
+/// reset / clear.
+///
+/// # Errors
+///
+/// Bubbles up localStorage write failures.
+pub fn clear_kp_storage() -> Result<(), LocalStorageError> {
+    let storage = local_storage()?;
+    if let Some(json) = storage
+        .get_item(KP_INDEX_KEY)
+        .map_err(|e| LocalStorageError(format!("read kp_ids: {e:?}")))?
+    {
+        let entries: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+        for id_b64url in entries {
+            if let Ok(id) = B64URL.decode(id_b64url.as_bytes()) {
+                let _ = storage.remove_item(&kp_key(&id));
+            }
+        }
+    }
+    let _ = storage.remove_item(KP_INDEX_KEY);
     Ok(())
 }
