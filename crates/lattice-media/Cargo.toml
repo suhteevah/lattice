@@ -126,6 +126,11 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 rand_chacha = "0.3"
 tempfile = "3"
 
+# ChaCha20-Poly1305 wrap on macOS / Linux for the secret-blob seal that
+# wraps the OS-keychain-bound material. Workspace dep, just listed
+# explicitly here so the cfg-gated impls compile.
+chacha20poly1305 = { workspace = true }
+
 # Windows-only deps for the DPAPI-backed keystore. windows = 0.58
 # matches the version Tauri 2 already pulls in (verified via
 # cargo tree -i windows), so feature unification stays a no-op.
@@ -134,4 +139,20 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
 ] }
+
+# Linux-only deps for the Secret Service keystore (G.2a).
+# `secret-service` v4 talks D-Bus via the pure-Rust `zbus` stack — no
+# C deps, cross-compile friendly. The crate is async-first; we run
+# it on a dedicated single-threaded tokio runtime owned by the
+# `LinuxKeystore` to keep the trait sync.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", default-features = false, features = ["rt-tokio-crypto-rust"] }
+
+# macOS-only deps for the Secure-Enclave-backed Keychain keystore
+# (G.2b). `security-framework` 3 covers SecKey + SecAccessControl.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }
+security-framework-sys = "2"
+core-foundation = "0.10"

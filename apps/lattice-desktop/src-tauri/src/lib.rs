@@ -85,6 +85,19 @@ pub fn run() {
 
 /// Construct the platform-default keystore. Boot fails if the OS-keychain
 /// directory cannot be created — there is no useful degraded mode.
+///
+/// Selection matrix:
+///
+/// | OS | Backend | Phase |
+/// |---|---|---|
+/// | Windows | DPAPI seal under `%LOCALAPPDATA%\Lattice\keystore\` | G.1 |
+/// | Linux | FreeDesktop Secret Service (GNOME Keyring / KWallet) | G.2a |
+/// | macOS | Login Keychain (`SecItemAdd` generic password) | G.2b |
+/// | _other_ | `MemoryKeystore` (volatile; not for production) | — |
+///
+/// TPM 2.0 (Windows) and Secure-Enclave-bound wrap (macOS) are the
+/// G.3 upgrade — same trait, different seal primitive, no caller-side
+/// change.
 fn build_keystore() -> std::sync::Arc<dyn lattice_media::keystore::Keystore> {
     #[cfg(target_os = "windows")]
     {
@@ -93,11 +106,24 @@ fn build_keystore() -> std::sync::Arc<dyn lattice_media::keystore::Keystore> {
         tracing::info!("keystore: WindowsKeystore (DPAPI) at default location");
         std::sync::Arc::new(ks)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let ks = lattice_media::keystore::linux::LinuxKeystore::at_default_location()
+            .expect("LinuxKeystore::at_default_location");
+        tracing::info!("keystore: LinuxKeystore (Secret Service) at default location");
+        std::sync::Arc::new(ks)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let ks = lattice_media::keystore::macos::MacosKeystore::at_default_location()
+            .expect("MacosKeystore::at_default_location");
+        tracing::info!("keystore: MacosKeystore (Keychain) at default location");
+        std::sync::Arc::new(ks)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         tracing::warn!(
-            "keystore: MemoryKeystore (volatile) — Linux Secret Service and macOS Secure Enclave \
-             land in M7 Phase G.2"
+            "keystore: MemoryKeystore (volatile) — no platform keystore impl for this OS"
         );
         std::sync::Arc::new(lattice_media::keystore::memory::MemoryKeystore::new())
     }
