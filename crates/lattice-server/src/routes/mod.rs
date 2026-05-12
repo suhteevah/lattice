@@ -43,4 +43,5 @@ pub mod federation;
 pub mod groups;
 pub mod health;
 pub mod identity;
+pub mod push;
 pub mod well_known;

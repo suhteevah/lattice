@@ -411,3 +411,100 @@ async fn replication_peers_round_trip() {
         .collect();
     assert_eq!(got_peers, peers);
 }
+
+#[tokio::test]
+async fn push_subscription_round_trip() {
+    // M6 / D-17: a client registers a Web Push API subscription
+    // and reads it back. Multiple endpoints per user (UnifiedPush
+    // primary + FCM/APNS fallback) coexist.
+    let (base, _state) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = make_identity(0xCD);
+    let user_id_b64 = B64.encode(alice.credential.user_id);
+
+    // Initially empty.
+    let r: serde_json::Value = client
+        .get(format!("{base}/push/subscriptions/{user_id_b64}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["subscriptions"].as_array().unwrap().len(), 0);
+
+    // Register a UnifiedPush subscription.
+    let r: serde_json::Value = client
+        .post(format!("{base}/push/subscribe"))
+        .json(&serde_json::json!({
+            "user_id_b64": user_id_b64,
+            "endpoint": "https://up.example.org/push/abc123",
+            "p256dh_b64": B64.encode([1u8; 65]),
+            "auth_b64": B64.encode([2u8; 16]),
+            "distributor": "unifiedpush",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["new_subscription"], true);
+    assert_eq!(r["total_subscriptions"], 1);
+
+    // Add an FCM fallback subscription for the same user.
+    let r: serde_json::Value = client
+        .post(format!("{base}/push/subscribe"))
+        .json(&serde_json::json!({
+            "user_id_b64": user_id_b64,
+            "endpoint": "https://fcm.googleapis.com/fcm/send/xyz",
+            "p256dh_b64": B64.encode([3u8; 65]),
+            "auth_b64": B64.encode([4u8; 16]),
+            "distributor": "fcm",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["new_subscription"], true);
+    assert_eq!(r["total_subscriptions"], 2);
+
+    // Re-register the FCM endpoint with new keys (rotation case).
+    let r: serde_json::Value = client
+        .post(format!("{base}/push/subscribe"))
+        .json(&serde_json::json!({
+            "user_id_b64": user_id_b64,
+            "endpoint": "https://fcm.googleapis.com/fcm/send/xyz",
+            "p256dh_b64": B64.encode([5u8; 65]),
+            "auth_b64": B64.encode([6u8; 16]),
+            "distributor": "fcm",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["new_subscription"], false);
+    assert_eq!(r["total_subscriptions"], 2);
+
+    // List and verify both endpoints + distributors are present.
+    let r: serde_json::Value = client
+        .get(format!("{base}/push/subscriptions/{user_id_b64}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let subs = r["subscriptions"].as_array().unwrap();
+    assert_eq!(subs.len(), 2);
+    let distributors: Vec<&str> = subs
+        .iter()
+        .map(|s| s["distributor"].as_str().unwrap())
+        .collect();
+    assert!(distributors.contains(&"unifiedpush"));
+    assert!(distributors.contains(&"fcm"));
+}

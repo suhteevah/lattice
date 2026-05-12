@@ -162,6 +162,34 @@ pub struct ServerState {
     /// doesn't carry an explicit `remote_routing`, so clients don't
     /// need to repeat the topology on every send.
     pub group_replication: Arc<RwLock<HashMap<[u8; 16], Vec<String>>>>,
+    /// Per-user push subscriptions (M6 / D-17). One user may have
+    /// multiple endpoints — primary UnifiedPush distributor plus
+    /// FCM/APNS fallback. The server emits Web Push API-format
+    /// encrypted payloads to each endpoint when a message arrives
+    /// for that user.
+    pub push_subscriptions: Arc<RwLock<HashMap<[u8; 32], Vec<PushSubscription>>>>,
+}
+
+/// Web Push API subscription registered by a client. The `endpoint`
+/// + `keys.p256dh` + `keys.auth` triple is the standard subscription
+/// shape returned by `PushManager.subscribe()` in the browser; the
+/// server emits payloads via the `web-push`-compatible encryption
+/// path so both UnifiedPush and FCM/APNS endpoints work uniformly.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PushSubscription {
+    /// Push-provider endpoint URL.
+    pub endpoint: String,
+    /// Recipient public key (P-256), base64-encoded per RFC 8291.
+    pub p256dh_b64: String,
+    /// 16-byte authentication secret, base64-encoded per RFC 8291.
+    pub auth_b64: String,
+    /// Unix-epoch seconds when this subscription was registered.
+    pub created_at: i64,
+    /// Source distributor label — `"unifiedpush" | "fcm" | "apns" |
+    /// "web-push"`. Used purely for UI hints (D-17 wants to surface
+    /// "FCM/APNS metadata-posture warning" to users on those paths);
+    /// the encryption format is identical.
+    pub distributor: String,
 }
 
 impl ServerState {
@@ -189,6 +217,7 @@ impl ServerState {
             federation_http: http,
             subscribers: Arc::default(),
             group_replication: Arc::default(),
+            push_subscriptions: Arc::default(),
         }
     }
 
