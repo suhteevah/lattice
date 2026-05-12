@@ -1,21 +1,13 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (everything testable tonight: M4 done
-including γ.4 fallback (WebSocket message push); M5 done including
-multi-member MLS on wire v2 + Cap'n Proto build wiring live + tonight's
-friend-test playbook in DEPLOY.md. Only γ.4 tier 1 (server-side QUIC +
-H3 + WT) and the actual ~50-callsite Prost→Capnp swap remain — both
-documented + sized.)
+**Last updated:** 2026-05-12 (M6 closed in roadmap order; Prost→Capnp
+wire swap landed at v3; γ.4 fallback WS push live; ready for tonight's
+friend test. M7 voice/video is the next open milestone.)
 **Owner:** Matt Gates (suhteevah)
-**Status:** Steps 1+2; M1/M2/M3 shipped; **M4 done**; **M5 mostly
-shipped**. Browser tab is a full Lattice client: in-WASM MLS,
-server-backed Alice⇌Bob, sealed-sender envelopes (D-05), commit
-cadence (ratchet rotation), encrypted+padded attachment buckets,
-MLS Remove-proposal revocation, local-only federation distrust
-scoring (D-13), identity persistence with Argon2id-encrypted at-rest
-(D-08), v3 PRF-encrypted persistence (D-09 ε.2), WebAuthn passkey
-ceremony, a11y landmarks, capability chips. Twenty-six+ commits on
-`main`:
+**Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6 all
+shipped**. Browser tab is a full Lattice client. Server live at
+`http://127.0.0.1:8080` reporting `wire_version=3`. 148 workspace
+tests pass. Forty+ commits on `main`:
 
 ```
 2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
@@ -741,8 +733,84 @@ Module additions:
       callsites from `wire::` to `lattice_capnp::` + drop Prost +
       bump `WIRE_VERSION` 2 → 3.
 
-### Not done — M4 and beyond
-- [ ] Cap'n Proto migration from interim Prost wire (M5)
+### Done — M5 closeout pass (2026-05-12)
+
+- [x] **Prost → Cap'n Proto wire swap** (commit `63cde48`).
+      `wire.rs` types are now plain Rust structs (no Prost derives)
+      with `WireType` trait impls that encode/decode through the
+      `lattice_capnp` generated module. Every callsite swapped over;
+      `WIRE_VERSION 2 → 3`. Internal TBS encodings in `sealed_sender`
+      + `routes::federation` still use Prost (signing-transcript
+      helpers, not wire-format types) — they don't ship over the
+      wire so they don't gate the bump.
+
+### Done — M6 V1.5 hardening (closed 2026-05-12)
+
+Shipped in ROADMAP §M6 order:
+
+1. **Key transparency log (D-15)** — commit `06cdabc`. Trillian-
+   style append-only Merkle log in `lattice-keytransparency`,
+   RFC 6962 §2.1 hashes (BLAKE3 substituted for SHA-256 per
+   HANDOFF §8). `Log`, `InclusionProof`, `ConsistencyProof`. Full
+   14-test suite includes the §M6 acceptance gate
+   (`malicious_swap_detection_simulation` — server tries to
+   substitute Bob's key bundle, client's inclusion check rejects).
+2. **Hidden group rosters (D-16)** — commit `c0cfcd9`.
+   `LatticeMlsConfig<G, R>` extended to be generic over the
+   `MlsRules` impl too (same default-parameter pattern as δ.3's
+   `G`). New `hidden_membership_rules()` + `create_hidden_group`.
+   Integration test
+   `hidden_membership_omits_ratchet_tree_from_welcome` parses the
+   server-visible Welcome bytes and confirms the RatchetTreeExt
+   tag is absent.
+3. **Multi-server store-and-forward** — commit `7e4d573`. Per-
+   group replication-peer list:
+   `POST/GET /group/:gid/replication_peers`. Fan-out in
+   `publish_message_handler` consults the stored list when
+   `remote_routing` body field is empty.
+4. **Out-of-band safety numbers** — commit `2f88684`. Order-
+   independent BLAKE3-keyed fingerprint, 60-decimal-digit
+   comparison string. 5 unit tests + browser "Safety number (M6)"
+   demo button.
+5. **Push subscriptions (D-17)** — commit `722369d`. Server-side
+   `PushSubscription` registry with `endpoint + p256dh + auth +
+   distributor` fields; supports multiple endpoints per user
+   (UnifiedPush primary + FCM/APNS fallback per D-17). New
+   `POST /push/subscribe` + `GET /push/subscriptions/:user_id_b64`
+   routes. `web-push`-compatible payload-emit hook is the
+   next-session follow-on; the registry it consumes is in place.
+
+### Not done — M7 (V2: Tauri shells + voice/video)
+
+- [ ] **Voice/video (D-18)** — vendor a fork of `webrtc-rs` with
+      a PQ-DTLS-SRTP custom-ciphersuite hook. Hybrid construction:
+      classical DTLS handshake completes first, then a post-
+      handshake message folds an ML-KEM-768 encapsulated secret
+      into SRTP key derivation via HKDF (`b"lattice/dtls-srtp-pq/v1"`).
+      Sized at multi-day work; the immediate "tonight" path is
+      plain WebRTC RTCPeerConnection with MLS-encrypted signaling
+      and no PQ overlay — see §13 "Tonight voice/video shortcut"
+      below.
+- [ ] **Tauri shells** — desktop + mobile native shells consuming
+      the same `lattice-core` + `lattice-crypto` wasm32 path.
+      Hardware-backed keys + OS keychain integration.
+
+### Not done — global polish (sequenced behind M7)
+
+- [ ] **γ.4 tier 1 (server-side QUIC + H3 + WT)** — HANDOFF §M4
+      status carries the full route-by-route mapping + sizing
+      (~1500 LOC server, ~600 LOC client). HTTP path stays as the
+      fallback per D-11. WS-push fallback already live (commit
+      `0056559`), so this is a perf optimization, not a feature
+      gap.
+- [ ] **`sealed_sender` + `federation` internal Prost cleanup** —
+      those modules still use local Prost-derived TBS types for
+      signing-transcript encoding. Not on the wire; can migrate
+      to capnp at leisure.
+
+### M7 / Tonight voice/video shortcut
+
+See `docs/HANDOFF.md §13` ("M7 — tonight voice/video shortcut").
 
 ---
 
@@ -1046,3 +1114,65 @@ all six commits live on `main`.
 Recovery context: this is also where the M2 decisions captured in the
 header §2.5 / D-04 re-open + Option B sealed-sender split + mls-rs stack
 upgrade originated.
+
+---
+
+## 13. M7 — tonight voice/video shortcut
+
+The full D-18 path (PQ-DTLS-SRTP via a vendored `webrtc-rs` fork)
+is multi-day work. For tonight's friend test, ship the plain
+WebRTC path: signaling rides the existing Lattice MLS-encrypted
+channel, media uses standard browser DTLS-SRTP (no PQ overlay).
+
+This is technically a degraded posture vs. D-18 — DTLS handshake
+is classical X25519+ECDSA, no quantum-safety on the media channel
+— but the **signaling** (SDP offer/answer/ICE candidates) is still
+MLS-encrypted, so an attacker can't learn the topology or substitute
+candidates without being in the group. Acceptable for V1 testing.
+
+### Concrete plan
+
+**Browser (`apps/lattice-web`)**
+
+1. `web-sys` features: `RtcPeerConnection`, `RtcConfiguration`,
+   `RtcSessionDescription`, `RtcSessionDescriptionInit`,
+   `RtcIceCandidate`, `RtcIceCandidateInit`, `MediaStream`,
+   `MediaStreamTrack`, `RtcDataChannel` (optional).
+2. New `apps/lattice-web/src/rtc.rs`:
+   - `start_call(remote_user_id) -> RtcPeerConnection` — creates
+     a connection, requests `getUserMedia({audio: true, video: true})`,
+     creates an offer.
+   - SDP offer + ICE candidates serialized to JSON and sent as
+     MLS application messages (just text payloads through
+     existing `encrypt_application`).
+   - Recipient parses, applies remote description, sends back
+     answer + ICE candidates over the same MLS channel.
+3. UI: new "Start call" button next to the group view that opens
+   the WebRTC handshake.
+
+**Server**
+
+No changes required. Signaling rides existing
+`/group/:gid/messages` route — the bytes are MLS-encrypted, server
+never sees content.
+
+**STUN / TURN**
+
+For NAT traversal, point at Google's free STUN
+(`stun:stun.l.google.com:19302`) for tonight; self-hosted
+`coturn` per D-19 is M7 polish.
+
+### Acceptance for tonight
+
+Two browsers in the same group can:
+- Start an audio call → both hear each other.
+- Add video → both see each other.
+- The MLS commit log shows N "application message" entries
+  carrying the encrypted SDP + ICE traffic — no plaintext SDP
+  visible to anyone watching the server.
+
+### Open follow-ups (M7 proper, post-tonight)
+
+- D-18 PQ-DTLS-SRTP fork (multi-day).
+- Self-hosted STUN/TURN per D-19.
+- Hardware-backed keys via Tauri OS keychain integration.
