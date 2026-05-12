@@ -130,7 +130,7 @@ Verify:
 
 ```bash
 curl -s http://127.0.0.1:4443/.well-known/lattice/server | jq .
-# {"wire_version":1,
+# {"wire_version":2,
 #  "federation_pubkey_b64":"<32-byte-base64>",
 #  "server_version":"0.1.0"}
 ```
@@ -247,3 +247,86 @@ separately:
 pgrep -fl 'ssh.*-fNR' | head
 kill <pid>
 ```
+
+---
+
+## Tonight's friend-test playbook (2026-05-11)
+
+Smallest path to "the boys join from their own browsers".
+
+### 1. One public-IP server
+
+```bash
+# On pixie (or any public-IP host):
+ssh pixiedust@pixie
+cd /tmp/lattice-deploy   # already has the lattice-server binary
+LATTICE__SERVER__BIND_ADDR=0.0.0.0:4443 \
+LATTICE__FEDERATION_KEY_PATH=/tmp/lattice-deploy/fed.key \
+LATTICE__SNAPSHOT_PATH=/tmp/lattice-deploy/state.json \
+RUST_LOG=lattice_server=debug,info \
+./lattice-server
+```
+
+If pixie doesn't have the current binary yet, rebuild:
+
+```powershell
+# From J:\lattice on Windows dev box:
+.\scripts\check-server.ps1 build -p lattice-server --release --bin lattice-server --target x86_64-unknown-linux-gnu
+scp target\x86_64-unknown-linux-gnu\release\lattice-server pixiedust@pixie:/tmp/lattice-deploy/
+```
+
+### 2. Point the browser client at the public server
+
+Default in `apps/lattice-web/src/app.rs` is
+`http://127.0.0.1:8080`. For tonight, either:
+
+a. Edit `DEFAULT_SERVER_URL` to your pixie URL + rebuild:
+   ```rust
+   const DEFAULT_SERVER_URL: &str = "http://207.244.232.227:4443";
+   ```
+   then `cd apps\lattice-web && trunk build --release`. Ship
+   `dist/` to wherever you host the static site, or run
+   `trunk serve --address 0.0.0.0` and share that URL.
+
+b. Or stand the browser bundle up locally and have friends
+   point their browsers at your machine via Tailscale /
+   Cloudflare Tunnel:
+   ```powershell
+   cd apps\lattice-web
+   trunk serve --address 0.0.0.0
+   # then expose 5173 via your tunnel of choice
+   ```
+
+CORS is wildcard-allow on the server (`CorsLayer::new()
+.allow_origin(Any)` in `lattice-server::app()`) so cross-origin
+hits from any browser work without extra setup.
+
+### 3. What works tonight
+
+Every demo button at `http://<browser-host>:5173/`:
+
+- Hybrid signature + KEM (in-WASM, no server)
+- In-tab MLS Alice⇌Bob
+- Server-backed Alice⇌Bob round-trip
+- Sealed-sender envelopes (D-05)
+- Multi-member 3-party group (M5 wire v2)
+- **Live WS push (γ.4 fallback)** — open two tabs on the same
+  group_id, both subscribe to `/group/:gid/messages/ws`, watch
+  messages flow in real-time
+- Device revocation
+- Identity persistence (plaintext / Argon2id-encrypted / WebAuthn-
+  PRF-encrypted)
+- Federation distrust scoring (D-13)
+
+### 4. Caveats
+
+- Demo flows hardcode user_ids by byte (Alice=0xAA, Bob=0xBB, etc).
+  Friends in different tabs share the same demo user_ids — the
+  server's `register_user` is idempotent so it'll just report
+  `new_registration=false` for the second tab onward. Each friend
+  effectively runs the demo against their own logical Alice + Bob
+  pair via the same server, not as distinct users.
+- For "friend A is Alice, friend B is Bob" you'd want fresh
+  random user_ids per tab; that's a chat-UI build, not a one-liner.
+  Roadmap candidate: M6 hardening.
+
