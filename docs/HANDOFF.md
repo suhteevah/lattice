@@ -1,42 +1,131 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-12 (M6 closed in roadmap order; Prost→Capnp
-wire swap landed at v3; γ.4 fallback WS push live; ready for tonight's
-friend test. M7 voice/video is the next open milestone.)
+**Last updated:** 2026-05-11 (M7 Phases A–E shipped: full PQ-DTLS-SRTP
+construction proved end-to-end in a same-process loopback. Wire
+version bumped 3 → 4 for call signaling. The prior "tonight
+voice/video shortcut" was retired earlier in this session per the
+no-shortcut directive; §14 documents the new posture.)
 **Owner:** Matt Gates (suhteevah)
-**Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6 all
-shipped**. Browser tab is a full Lattice client. Server live at
-`http://127.0.0.1:8080` reporting `wire_version=3`. 148 workspace
-tests pass. Forty+ commits on `main`:
+**Status:** 🟢 Working. Steps 1+2; **M1 / M2 / M3 / M4 / M5 / M6
+all shipped**, **M7 Phases A–E all shipped, F is next.** Browser
+tab is a full Lattice client; server live at `http://127.0.0.1:8080`.
+Wire version bumped 3 → 4 this session (M7 call signaling).
+**182 workspace tests pass** with `LATTICE_NET_TESTS=1` set (178
+without). `cargo check --workspace` green. `cargo clippy -p
+lattice-media --all-targets -- -D warnings` clean on the new crate.
 
-```
-2688b78 chore: Phase G — pre-commit gate green (fmt + clippy + 109 tests + WASM)
-6e6e32c feat(protocol): Phase F — sealed sender per D-05 (Option B)
-1490fdc feat(crypto): Phase D + E — MLS group ops + Alice/Bob integration test
-668edf9 feat(crypto): Phase C.2 — ML-KEM-768 LeafNode + Welcome custom extensions
-83601e6 docs(handoff): full M2 mid-flight snapshot for fresh-session pickup
-3d743c0 feat(crypto): Phase C.1 — per-epoch PSK id derivation + in-memory storage
-60550da chore(crypto): Phase F prep — remove dead sealed_sender stub + D-02 dead constants
-33121fc feat(crypto): Phase B — LatticeHybridCipherSuite (0xF000)
-02d2cf1 feat(crypto): Phase A — LatticeCredential (0xF001) + IdentityProvider
-8898460 docs(d-04): re-open and amend for PSK-injection path
-fe8868e chore: initialize repo at M1-shipped + M2-partial post-recovery state
-```
+**Phase E.2 cryptographic smoke test is green.** A same-process
+loopback drives two `IceAgent`s through full connectivity checks,
+runs DTLS handshakes concurrently over the resulting `Conn`s,
+pulls RFC 5705 keying material from both sides, performs an
+ML-KEM-768 round trip, folds the PQ secret into the SRTP master
+via HKDF, and asserts caller.local == callee.remote on the split
+session keys. Test:
+`crates/lattice-media/tests/pq_dtls_srtp_loopback.rs`. Run with
+`$env:LATTICE_NET_TESTS=1; cargo test -p lattice-media --test
+pq_dtls_srtp_loopback`.
 
-`cargo test --workspace`: **109 tests pass** (90 lattice-crypto +
-19 lattice-protocol). `cargo clippy --workspace --all-targets --
--D warnings`: clean. `cargo fmt --all -- --check`: clean. `cargo
-check -p lattice-core --target wasm32-unknown-unknown
---features lattice-crypto/wasm`: clean.
+### Session log — 2026-05-11
 
-The M2 acceptance gate (Alice + Bob round-trip with PQ-PSK injection,
-no server) is met by `lattice-crypto::tests::mls_integration`.
+Compact session diff for the incoming Claude:
 
-**Next milestone: M3 — Vertical slice (CLI E2E).** Two `lattice-server`
-instances on different ports, two `lattice-cli` clients across
-federation, "hello, lattice" delivered cross-server with QUIC + sqlx
-storage + server-side cert issuance. Matt has offered three nodes for
-M3 federation testing: pixie, cnc, kokonoe.
+- **Memory:** deleted `tonight_av_shortcut.md`, added
+  `feedback_no_av_shortcut.md`, `webrtc_rs_no_vendor.md`,
+  `lattice_net_tests_env.md`. `MEMORY.md` index updated.
+- **Docs:** rewrote HANDOFF header + §14 (M7 posture); rewrote
+  ROADMAP status + shipped block; amended DECISIONS.md §D-18
+  (no-vendor path + HKDF parameter layout pinned). New
+  `scratch/m7-build-plan.md`, `scratch/pq-dtls-srtp-construction.md`,
+  `scratch/webrtc-rs-api.md` (the last produced by a research
+  subagent).
+- **Wire schema:** `lattice-protocol/schema/lattice.capnp` gained
+  `CallIceCandidateLine`, `CallInvite`, `CallAccept`,
+  `CallIceCandidate`, `CallEnd`, `CallEndReason`, `CallSignal`.
+  `WIRE_VERSION` bumped 3 → 4. `lattice-server` `.well-known`
+  test updated to match. 29 lattice-protocol tests pass (was 22).
+- **New crate `lattice-media`:** ~1,300 LOC. Modules: `call`,
+  `constants`, `error`, `handshake`, `ice`, `rendezvous`, `srtp`.
+  ML-KEM-768 keygen/encap/decap; `extract_dtls_exporter` async
+  helper; `derive_srtp_master` HKDF fold; `split_srtp_master`
+  by Role; `IceAgent` wrapping `webrtc_ice::Agent`; `negotiate_dtls`
+  driving a DTLS handshake over an ICE `Conn`. 23 tests pass with
+  `LATTICE_NET_TESTS=1` (19 without).
+- **Smoke test:** `crates/lattice-media/tests/pq_dtls_srtp_loopback.rs`
+  proves the full PQ-DTLS-SRTP construction works end-to-end.
+- **Workspace cargo.toml:** added `crates/lattice-media`. webrtc-rs
+  crates pinned at v0.17.1 in `lattice-media/Cargo.toml` (NOT in
+  workspace deps — they're crate-specific).
+
+What this session deliberately did **not** do:
+
+- Phase F (Tauri desktop shell). Deferred to next session — it's
+  a multi-hour focused chunk on its own (Tauri 2 init, IPC bridge,
+  call UI surface, two-window manual test).
+- Real `srtp::Session::new` + RTP packet round trip. Not strictly
+  needed for the cryptographic smoke test (matching SRTP masters
+  proves the keys would decrypt). Will land in Phase F when the
+  Tauri shell actually moves frames.
+- Pre-existing workspace clippy issue in `lattice-crypto::mls` and
+  `lattice-protocol`'s build script (`too_long_first_doc_paragraph`,
+  `expect_used`). Flagged in this header earlier; fix is to either
+  reflow the affected doc comments or add the lints to the
+  workspace allow list. Not M7's regression.
+
+Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md):
+
+| Phase | Status | Notes |
+|---|---|---|
+| A — webrtc-rs API research | ✅ shipped | `scratch/webrtc-rs-api.md` + `scratch/pq-dtls-srtp-construction.md`. **Key finding:** zero vendoring needed; bypass `RTCPeerConnection` and drive `ice → dtls → srtp` directly. D-18 amended. |
+| B — `lattice-media` scaffold | ✅ shipped | crate compiles; 19 unit tests; modules: call / handshake / ice / rendezvous / srtp / constants / error |
+| C — ICE + STUN/TURN + call signaling wire types | ✅ shipped | Cap'n Proto schema + WireType impls for `CallInvite` / `CallAccept` / `CallIceCandidate` / `CallEnd` / `CallSignal` union landed in `lattice-protocol` (wire v4). `IceAgent` wrapper around `webrtc_ice::Agent` with gather / candidate exchange / dial / accept / close. Loopback test (`tests/ice_loopback.rs`) connects + round-trips a datagram. STUN/TURN client wiring is fine to defer — `IceAgent::new` already takes `Vec<webrtc_ice::url::Url>` for D-19 endpoints. |
+| D — webrtc-rs deps + exporter helper | ✅ shipped | Pinned `dtls = "0.17.1"`, `webrtc-srtp = "0.17.1"`, `webrtc-ice = "0.17.1"`, `webrtc-util = "0.17.1"`. `extract_dtls_exporter` async helper generic over `KeyingMaterialExporter + Sync`. |
+| E — PQ-hybrid DTLS-SRTP construction | ✅ shipped | ML-KEM-768 keygen / encap / decap, `derive_srtp_master` HKDF fold, `split_srtp_master` lays out session keys by Role, `negotiate_dtls` async helper over an ICE `Conn`. **Phase E.2 smoke test** (`tests/pq_dtls_srtp_loopback.rs`) drives the full pipeline — two ICE agents, DTLS handshake, exporter extract, ML-KEM round trip, PQ fold, split — and asserts caller.local == callee.remote. **Cryptographic construction is proven to work end-to-end.** Plumbing a real `srtp::Session::new` and an RTP packet round trip is Phase F polish. |
+| F — Tauri desktop shell | ⬜ next | Wrap `lattice-web` UI in Tauri 2; expose `start_call` / `accept_call` / `end_call` as Tauri commands that drive the Phase E orchestrator; minimal call-state UI surface. Two-desktop product smoke test. |
+| G — Hardware-backed key storage | ⬜ | |
+| H — Tauri mobile shells | ⬜ | |
+| I — Cover-traffic + V2 parity gate | ⬜ | |
+
+### Key M7 design decisions taken this session
+
+- **D-18 amended 2026-05-11 — no vendoring.** Phase A research
+  found `dtls::DTLSConn::connection_state()` is `pub` (returns a
+  cloned `State` that implements `webrtc_util::KeyingMaterialExporter`),
+  and `srtp::Context::new` accepts pre-derived bytes. So we
+  bypass `webrtc::RTCPeerConnection` entirely and assemble our own
+  `ice::Agent → dtls::DTLSConn → srtp::Session` pipeline. The
+  prior "vendor the webrtc-rs monorepo at v0.17.1" plan is
+  superseded; pre-2026-05-11 D-18 wording kept in DECISIONS.md
+  history block.
+- **HKDF parameter layout pinned in D-18 amendment.**
+  `ikm = dtls_exporter || pq_secret`, `salt = empty`, `info =
+  b"lattice/dtls-srtp-pq/v1" || call_id || epoch_id.to_be_bytes()`,
+  output length 60. Both sides MUST agree on this byte-for-byte or
+  media won't decrypt. Tests pin the divergence properties.
+- **DTLS 1.3 PSK injection not viable in webrtc-rs 0.17.1.**
+  `record_layer_header.rs` hard-rejects any version other than
+  DTLS 1.0/1.2. Stays at post-handshake fold. Long-horizon item:
+  revisit when webrtc 0.20+ stabilizes DTLS 1.3.
+- **Tonight voice/video shortcut is rejected.** Memory:
+  `~/.claude/.../feedback_no_av_shortcut.md`. No plain-WebRTC
+  interim path even for friend-test demos.
+
+**Pre-existing workspace gate issue not caused by M7:**
+`cargo clippy --workspace --all-targets -- -D warnings` currently
+fails with 11 `too_long_first_doc_paragraph` errors in
+`lattice-crypto::mls`. This is a newer-clippy nursery lint
+firing on prose written under an older rustc. Two fix options:
+
+- Reflow the affected doc comments so the first paragraph is shorter.
+- Add `too_long_first_doc_paragraph = "allow"` to the workspace
+  lints table in `Cargo.toml`.
+
+Neither touches code correctness; tracked here so it isn't
+miscategorized as M7 regression.
+
+**Next concrete work:** Phase A research findings land in
+`scratch/webrtc-rs-api.md`, then Phase C (ICE + call-signaling
+wire types) begins. The Cap'n Proto schema picks up a wire bump
+to v4 in Phase C.
 
 ### Key M2 decisions taken this session
 
@@ -1117,62 +1206,45 @@ upgrade originated.
 
 ---
 
-## 13. M7 — tonight voice/video shortcut
+## 14. M7 — voice/video (in progress)
 
-The full D-18 path (PQ-DTLS-SRTP via a vendored `webrtc-rs` fork)
-is multi-day work. For tonight's friend test, ship the plain
-WebRTC path: signaling rides the existing Lattice MLS-encrypted
-channel, media uses standard browser DTLS-SRTP (no PQ overlay).
+**No shortcut path.** The previous revision of this section described a
+plain-WebRTC interim path for a friend-test demo. That path is
+rejected — voice/video ships only as D-18 (PQ-hybrid DTLS-SRTP) over
+D-19 (self-hosted STUN/TURN). Don't reintroduce a non-PQ media path
+even for testing.
 
-This is technically a degraded posture vs. D-18 — DTLS handshake
-is classical X25519+ECDSA, no quantum-safety on the media channel
-— but the **signaling** (SDP offer/answer/ICE candidates) is still
-MLS-encrypted, so an attacker can't learn the topology or substitute
-candidates without being in the group. Acceptable for V1 testing.
+Full build plan lives at [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md).
+Implementation home is the `lattice-media` crate. Roadmap reference:
+[`ROADMAP.md`](ROADMAP.md) §M7.
 
-### Concrete plan
+### Locked decisions reaffirmed for M7
 
-**Browser (`apps/lattice-web`)**
+- **D-18.** Vendor a fork of `webrtc-dtls` (or `webrtc-rs` whole) to
+  expose a post-handshake hook that folds an ML-KEM-768 secret into
+  the DTLS-SRTP exporter, producing PQ-hybrid SRTP keys. Construction
+  detail in `crates/lattice-media/src/handshake.rs` doc comments.
+- **D-19.** Each home server runs its own STUN/TURN over the same
+  domain as the Lattice server. ICE candidate exchange goes through
+  the existing MLS-encrypted message path, so signaling stays PQ.
+- **Tauri shells.** Voice/video is native-only in V2. Browsers never
+  see a non-PQ fallback. If a browser visits a voice/video screen, the
+  UI shows "install the desktop or mobile shell."
 
-1. `web-sys` features: `RtcPeerConnection`, `RtcConfiguration`,
-   `RtcSessionDescription`, `RtcSessionDescriptionInit`,
-   `RtcIceCandidate`, `RtcIceCandidateInit`, `MediaStream`,
-   `MediaStreamTrack`, `RtcDataChannel` (optional).
-2. New `apps/lattice-web/src/rtc.rs`:
-   - `start_call(remote_user_id) -> RtcPeerConnection` — creates
-     a connection, requests `getUserMedia({audio: true, video: true})`,
-     creates an offer.
-   - SDP offer + ICE candidates serialized to JSON and sent as
-     MLS application messages (just text payloads through
-     existing `encrypt_application`).
-   - Recipient parses, applies remote description, sends back
-     answer + ICE candidates over the same MLS channel.
-3. UI: new "Start call" button next to the group view that opens
-   the WebRTC handshake.
+### Phase outline (detail in m7-build-plan.md)
 
-**Server**
+| Phase | Scope | Crate / file home |
+|---|---|---|
+| A | Research notes — `webrtc-rs` API surface, DTLS hook injection point, SRTP key derivation | `scratch/webrtc-rs-api.md` |
+| B | `lattice-media` crate scaffold, workspace wiring, module stubs | `crates/lattice-media/` |
+| C | ICE + STUN/TURN client wiring, candidate exchange over MLS | `lattice-media::ice` |
+| D | Vendored `webrtc-dtls` fork with PQ-handshake hook | `crates/lattice-media/vendor/webrtc-dtls/` |
+| E | Custom hybrid DTLS-SRTP construction — encap ML-KEM-768, fold into SRTP exporter | `lattice-media::handshake`, `lattice-media::srtp` |
+| F | Tauri desktop shell wraps `lattice-web` UI with `lattice-media` native | `apps/lattice-desktop/` |
+| G | Hardware-backed key integration (Secure Enclave / TPM / StrongBox) | `lattice-media::keystore` per-platform |
+| H | Tauri mobile shells (Android / iOS) + screen-recording blocking | `apps/lattice-mobile/` |
+| I | Cover-traffic toggle, audited handshake trace, V2 parity gate | `lattice-media::covertraffic` + UI |
 
-No changes required. Signaling rides existing
-`/group/:gid/messages` route — the bytes are MLS-encrypted, server
-never sees content.
-
-**STUN / TURN**
-
-For NAT traversal, point at Google's free STUN
-(`stun:stun.l.google.com:19302`) for tonight; self-hosted
-`coturn` per D-19 is M7 polish.
-
-### Acceptance for tonight
-
-Two browsers in the same group can:
-- Start an audio call → both hear each other.
-- Add video → both see each other.
-- The MLS commit log shows N "application message" entries
-  carrying the encrypted SDP + ICE traffic — no plaintext SDP
-  visible to anyone watching the server.
-
-### Open follow-ups (M7 proper, post-tonight)
-
-- D-18 PQ-DTLS-SRTP fork (multi-day).
-- Self-hosted STUN/TURN per D-19.
-- Hardware-backed keys via Tauri OS keychain integration.
+No phase ships without a passing test that exercises the PQ key
+derivation end-to-end. No phase weakens the PQ requirement to land
+faster.

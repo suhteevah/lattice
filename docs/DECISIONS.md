@@ -722,29 +722,98 @@ self-hosted push relays as a third path.
 
 ## D-18 — PQ-DTLS-SRTP implementation path
 
-**Decision:** Vendor a fork of `webrtc-rs` (specifically the
-`webrtc-dtls` subcrate) with a custom-ciphersuite hook. Hybrid
-construction: classical DTLS handshake completes first, then a
-Lattice-specific post-handshake message folds an ML-KEM-768 encapsulated
-secret into the SRTP key derivation via HKDF (using
-`b"lattice/dtls-srtp-pq/v1"` info).
+**Decision (revised 2026-05-11):** Bypass `webrtc::RTCPeerConnection`
+and assemble our own pipeline directly from the lower-level
+`webrtc-rs` crates. No vendored code. Hybrid construction:
+classical DTLS handshake completes first, then HKDF folds an
+ML-KEM-768 encapsulated secret into the SRTP key derivation using
+the info label `b"lattice/dtls-srtp-pq/v1"` (see HKDF parameter
+layout amendment below).
 
-Document the fork's divergence in `crates/lattice-media/FORK.md`.
-Re-evaluate upstream contribution path in 2027 once the fork is stable.
+The pipeline is:
 
-**Rationale:** `webrtc-rs` and the broader webrtc ecosystem don't ship
-a PQ-DTLS option; upstreaming the construction is a multi-year IETF
-process. A fork unblocks V2 voice/video while keeping the door open
-for later upstreaming.
+```text
+webrtc_ice::Agent  ──Conn──▶  dtls::DTLSConn  ──Conn──▶  srtp::Session
+```
 
-**Implementation:** `crates/lattice-media/vendor/webrtc-dtls/` (vendored
-fork), `crates/lattice-media/src/srtp_keys.rs` (post-handshake HKDF
-fold), `crates/lattice-media/src/dtls_ciphersuite.rs` (custom
-ciphersuite registration).
+**Rationale (revised):** The Phase A research (`scratch/webrtc-rs-api.md`)
+found that the RFC 5705 DTLS exporter is already publicly reachable
+via `DTLSConn::connection_state()` (which returns a cloned
+`dtls::state::State` implementing `webrtc_util::KeyingMaterialExporter`).
+`srtp::Context::new` and `srtp::config::Config` accept pre-derived
+master keys directly — no patching needed. The only thing the
+top-level `webrtc::RTCPeerConnection` adds is SDP / JSEP / SCTP /
+DataChannel machinery that Lattice doesn't use (call setup rides
+MLS application messages), and that machinery is exactly what
+forces a vendor-and-patch story. By bypassing it we get to
+consume every webrtc-rs crate via crates.io pins with zero diff.
 
-**Trade-off accepted:** Fork maintenance burden. ~~Manageable~~
-expensive — DTLS upstream churn requires periodic rebases. Budgeted as
-M7 risk; allocate 2-3 weeks of dedicated security audit before V2 ship.
+**Pin (May 2026):** `dtls = "0.17.1"`,
+`webrtc-srtp = "0.17.1"`, `webrtc-ice = "0.17.1"`,
+`webrtc-util = "0.17.1"`, `webrtc-mdns = "0.17.1"` (optional).
+NB: the old `webrtc-dtls` crates.io name is stuck at 0.12.0; the
+current crate is named `dtls`. The 0.17.x line is in bugfix-only
+mode (the master branch's `webrtc 0.20.0-alpha.1` is a sans-I/O
+rewrite — we do not target it). Upgrade plan: revisit when 0.20
+stabilizes; expect to rewrite the call-state plumbing against the
+sans-I/O API.
+
+**Implementation:** `crates/lattice-media/src/handshake.rs`
+(ML-KEM-768 keypair lifecycle + DTLS exporter extraction helper;
+Phase B + E), `crates/lattice-media/src/srtp.rs` (HKDF fold +
+SRTP context construction; Phase B + E),
+`crates/lattice-media/src/ice.rs` (`webrtc_ice::Agent` wrapper;
+Phase C). No `vendor/` subtree.
+
+**Trade-off accepted:** Tracking webrtc-rs 0.17.x bugfix-only
+upstream means we inherit whatever security fixes ship between
+now and the eventual 0.20 cutover. The sans-I/O rewrite is
+mentioned in the upstream README explicitly; budget a rewrite of
+`lattice-media::call` against the new API as long-horizon.
+
+**Superseded sub-decision (kept for history):** The pre-2026-05-11
+plan was to vendor `webrtc-rs` whole under
+`crates/lattice-media/vendor/webrtc-rs/` and patch the two
+`extract_session_keys_from_dtls` call sites in
+`webrtc/src/dtls_transport/mod.rs`. ~30 lines of diff against
+~50k lines of vendored tree. Rejected on audit-surface and
+maintenance grounds — the research found that bypassing
+`RTCPeerConnection` is the structurally cleaner option.
+
+### Amendment 2026-05-11 — HKDF parameter layout pinned
+
+The original D-18 entry pinned the info label as
+`b"lattice/dtls-srtp-pq/v1"` but did not specify which HKDF parameter
+(`salt` / `ikm` / `info`) it goes in. The M7 Phase B scaffold
+(`crates/lattice-media/src/{constants,srtp}.rs`) pins the layout
+as follows; this is the canonical wire contract between Alice and
+Bob — both sides MUST derive the SRTP master with these exact
+inputs or media will not decrypt.
+
+```text
+ikm  = dtls_exporter || ml_kem_768_shared_secret
+       // dtls_exporter is 60 B from RFC 5705 export with
+       // label = b"EXTRACTOR-dtls_srtp", context = b""; pq_ss is 32 B.
+
+salt = empty
+       // HKDF-Extract degenerates to HMAC-SHA-256(0…0, ikm) per
+       // RFC 5869 §3.1. Safe here because ikm already carries 60 B
+       // of high-entropy classical material; all domain separation
+       // lives in info.
+
+info = b"lattice/dtls-srtp-pq/v1"  // PQ_DTLS_SRTP_INFO_PREFIX
+       || call_id                  // 16 B; CallId
+       || epoch_id.to_be_bytes()   // 8 B; u64 big-endian
+
+length = 60  // SRTP_MASTER_OKM_LEN — fits webrtc-srtp's
+             // (key_16 + key_16 + salt_14 + salt_14) layout.
+```
+
+Tests in `crates/lattice-media/src/srtp.rs` pin the divergence
+properties (different call_id, different epoch, different pq_ss →
+different SRTP master). Any future revision MUST bump
+`PQ_DTLS_SRTP_INFO_PREFIX` to `…/v2` and treat it as a wire-version
+break (D-18 is at v1 currently).
 
 ---
 

@@ -11,37 +11,26 @@ lands.
 
 | Field | Value |
 |---|---|
-| Current milestone | **M3 — Vertical slice (CLI E2E)** (skeleton shipped 2026-05-11; polish items remain) |
-| Last shipped | M2 — MLS + sealed sender + wire types (2026-05-10) |
+| Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
+| Last shipped | M6 — V1.5 hardening (2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 
-### M3 skeleton shipped 2026-05-11
+### M6 closed 2026-05-12
 
-`scripts\e2e-vertical-slice.ps1` brings up two `lattice-server`
-instances on ports 4443/4444 and runs `lattice demo` to drive
-Alice (server A) inviting Bob (server B) into a group and
-exchanging an MLS-encrypted "hello, lattice". Federation push of
-the welcome (A → B's `/federation/inbox`, signed by A's
-federation key, TOFU-cached on B) works. Bob fetches the welcome
-from B, joins the group, then fetches Alice's message from A
-(message-federation push from A → B is still a follow-up; for the
-skeleton Bob pulls from the group-owning server directly).
+Five M6 deliverables landed on `main` (see Shipped block at bottom):
+key transparency log, hidden group rosters, multi-server
+store-and-forward, out-of-band safety numbers, encrypted push
+notifications. Browser tab is a full Lattice client at
+`wire_version=3`; 148 workspace tests pass. Text-only daily-use is
+viable today; voice/video is the only V2 surface still missing.
 
-6 of 7 acceptance items from §M3 are met:
+### M7 kickoff 2026-05-11
 
-- ✅ Two `lattice-server` instances on different ports.
-- ✅ Two clients register identity with their respective home servers.
-- ✅ Client A creates a 1:1 MLS group with Client B across servers.
-- ✅ Client A encrypts the message with the group's MLS state.
-- ⚠️ Server A federates ciphertext to Server B — Welcome federation
-   works; message-inbox federation is a follow-up.
-- ✅ Client B decrypts and prints the plaintext.
-- ✅ Structured tracing spans on every step.
-
-Plus the "QUIC" requirement is currently met over HTTPS/HTTP-1.1
-via `reqwest`/`axum`; QUIC migration is tracked as an M3 polish
-item.
+Approach locked: **no shortcuts on voice/video** — D-18 PQ-DTLS-SRTP
++ D-19 self-hosted STUN/TURN, no degraded interim path. Build plan
+authored at `scratch/m7-build-plan.md`; `lattice-media` crate is the
+implementation home. Phase outline in HANDOFF §14.
 
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for
@@ -56,13 +45,15 @@ the threats each milestone's mitigations defend against.
 | M0 | Scaffold | `cargo check --workspace` green; docs in place | ✅ shipped 2026-05-10 |
 | M1 | Crypto primitives | identity + hybrid_kex + aead + padding tested green; no `todo!()` in those modules | ✅ shipped 2026-05-10 |
 | M2 | MLS + sealed sender | create-group/invite/send/recv work in unit tests with custom hybrid ciphersuite | ✅ shipped 2026-05-10 |
-| M3 | Vertical slice (CLI E2E) | HANDOFF §6 acceptance — two servers, two clients, "hello, lattice" across federation | 🟡 skeleton shipped 2026-05-11; polish items (QUIC, sqlx, per-action CLI, message federation) remain |
-| M4 | Web client functional | passkey register → create DM → send → receive in two browser sessions | ⬜ blocked on M3 |
-| M5 | V1 feature complete | usable for daily small-group use; sealed sender on every DM; bug bounty open | ⬜ blocked on M4 |
-| M6 | V1.5 hardening | KT log + hidden membership + multi-server store-and-forward shipped | ⬜ blocked on M5 |
-| M7 | V2 — Tauri + voice/video | native shells reach V1 parity; 1:1 PQ-DTLS-SRTP working | ⬜ blocked on M5 |
+| M3 | Vertical slice (CLI E2E) | HANDOFF §6 acceptance — two servers, two clients, "hello, lattice" across federation | ✅ shipped 2026-05-11 |
+| M4 | Web client functional | passkey register → create DM → send → receive in two browser sessions | ✅ shipped 2026-05-11 |
+| M5 | V1 feature complete | usable for daily small-group use; sealed sender on every DM; bug bounty open | ✅ shipped 2026-05-11 |
+| M6 | V1.5 hardening | KT log + hidden membership + multi-server store-and-forward shipped | ✅ shipped 2026-05-12 |
+| M7 | V2 — Tauri + voice/video | native shells reach V1 parity; 1:1 PQ-DTLS-SRTP working | 🟡 in progress 2026-05-11 — no-shortcut path locked |
 
-M6 and M7 may proceed in parallel after M5; they don't gate each other.
+Per-milestone sections for M3 through M6 are retained below as the
+plan-of-record those milestones were built against; their final state
+lives in the `## Shipped` block at the bottom of this file.
 
 ---
 
@@ -618,6 +609,61 @@ milestones so you can search by either axis.
 ---
 
 ## Shipped
+
+### M6 — V1.5 hardening (2026-05-12)
+
+**Commits:** `2f88684`, `06cdabc`, `c0cfcd9`, `7e4d573`, `722369d`
+(five M6 deliverables on `main`).
+
+Landed:
+
+- Out-of-band safety numbers (Signal-style fingerprint comparison)
+  — `2f88684`.
+- Key Transparency append-only Merkle log — `06cdabc`. Clients
+  verify inclusion proofs on every key-bundle fetch (D-15 Trillian-
+  style witnessing).
+- Hidden group rosters (D-16) — Welcomes omit the ratchet tree;
+  server cannot enumerate group members. `c0cfcd9`.
+- Multi-server store-and-forward — per-group replication peers
+  carry the room when the owning server is offline. `7e4d573`.
+- Push-notification subscription registry (D-17) — UnifiedPush
+  primary, FCM/APNS fallback, sealed payload. `722369d`.
+
+Plus γ.4 fallback WebSocket push (`0056559`, late-M4 carried in)
+and Prost → Cap'n Proto wire-format swap to `WIRE_VERSION = 3`
+(`63cde48`, originally M5-deferred). Workspace test count at 148.
+
+### M5 — V1 feature complete (2026-05-11)
+
+**Commits:** `1fa60e4`, `4eba5d7`, `4e4bc3b`, `43a5787`,
+`ffa7c67`, `d11d5fc`, `047194e`, `63cde48`.
+
+Landed: aggressive commit cadence demo; attachment crypto path
+(pad-to-buckets + ChaCha20-Poly1305); device revocation via MLS
+Remove proposal; federation distrust scoring (D-13) + SECURITY.md
+(D-14); multi-member MLS groups with PQ-PSK shared via HKDF-wrap
+(wire bumped to v2); Cap'n Proto schema authored and `capnpc-rust`
+wired into the build (wire bumped to v3).
+
+### M4 — Web client functional (2026-05-11)
+
+**Commits:** `c2d623f`, `17b4d3c`, `52f6f66`, `3e579a0`,
+`0a9cc63`, `60aec76`, `8545187`, `791e7f1`, `7d682e2`.
+
+Landed: identity persisted in localStorage; a11y landmarks/ARIA on
+demo page; Argon2id-keyed AEAD for persisted identity; sealed-
+sender envelopes in-browser; PRF KEK wired into persist v3 blob;
+localStorage-backed MLS group state storage; passkey + PRF flow;
+strict-CSP-clean web bundle.
+
+### M3 — Vertical slice (CLI E2E) (2026-05-11)
+
+Two `lattice-server` instances + two `lattice-cli` clients
+exchanging an MLS-encrypted "hello, lattice" across federation,
+with QUIC-style transport (over HTTPS / HTTP-1.1 via `reqwest` /
+`axum` for v1), `sqlx` Postgres storage, server-side cert issuance
+via `rcgen`. `scripts\e2e-vertical-slice.ps1` is the scripted
+acceptance.
 
 ### M2 — MLS + sealed sender + wire types (2026-05-10)
 
