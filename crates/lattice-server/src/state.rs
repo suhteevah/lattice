@@ -29,7 +29,7 @@ use base64::Engine;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use rand_core::RngCore;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,17 @@ pub struct ServerState {
     /// `reqwest` client for outbound federation pushes. One per
     /// process; reused.
     pub federation_http: reqwest::Client,
+    /// Live-subscription broadcast channels keyed by group_id. Each
+    /// successful `append_message` fires `(seq, envelope_bytes)` to
+    /// every subscriber attached to that group. WebSocket clients
+    /// (D-11 fallback tier of γ.4) subscribe via
+    /// `GET /group/:gid/messages/ws`.
+    ///
+    /// Capacity 64 is a soft buffer per group — if a subscriber
+    /// can't keep up, `broadcast::Receiver` returns `Lagged(_)` and
+    /// the WS handler closes the stream so the client knows to
+    /// re-poll from the HTTP path.
+    pub subscribers: Arc<RwLock<HashMap<[u8; 16], broadcast::Sender<(u64, Vec<u8>)>>>>,
 }
 
 impl ServerState {
@@ -170,7 +181,19 @@ impl ServerState {
             peers: Arc::default(),
             next_seq: Arc::new(RwLock::new(0)),
             federation_http: http,
+            subscribers: Arc::default(),
         }
+    }
+
+    /// Get-or-create the broadcast `Sender` for `group_id` so a fresh
+    /// subscriber can attach. Returns a new `Receiver` each call —
+    /// the caller is the WebSocket task.
+    pub async fn subscribe(&self, group_id: [u8; 16]) -> broadcast::Receiver<(u64, Vec<u8>)> {
+        let mut subs = self.subscribers.write().await;
+        let sender = subs
+            .entry(group_id)
+            .or_insert_with(|| broadcast::channel(64).0);
+        sender.subscribe()
     }
 
     /// Build a fresh state with a freshly-generated federation key.
@@ -200,9 +223,22 @@ pub async fn append_message(state: &ServerState, group_id: [u8; 16], envelope: V
     let inbox = messages.entry(group_id).or_default();
     inbox.push(StoredAppMessage {
         group_id,
-        envelope,
+        envelope: envelope.clone(),
         seq,
     });
+    drop(messages);
+
+    // Push to any live WebSocket subscribers. Failed sends are
+    // silently dropped — the subscriber will catch up via the
+    // HTTP /messages?since=N path. `try_send` would actively close
+    // a saturated channel; we let `send` block-or-drop instead.
+    let subs = state.subscribers.read().await;
+    if let Some(sender) = subs.get(&group_id) {
+        // `broadcast::Sender::send` returns Err only when there are
+        // zero active receivers — that's just "no subscribers", not
+        // a failure worth surfacing.
+        let _ = sender.send((seq, envelope));
+    }
     seq
 }
 

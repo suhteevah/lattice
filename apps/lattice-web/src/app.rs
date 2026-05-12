@@ -148,6 +148,20 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let live_ws_demo = move |_| {
+        set_log_lines.set(Vec::new());
+        set_status.set("opening WS subscription…".to_string());
+        let log = append;
+        spawn_local(async move {
+            match try_live_ws_demo(DEFAULT_SERVER_URL, log).await {
+                Ok(count) => {
+                    set_status.set(format!("WS push OK ({count} message(s) received)"))
+                }
+                Err(e) => set_status.set(format!("WS error: {e}")),
+            }
+        });
+    };
+
     let multi_member_demo = move |_| {
         set_log_lines.set(Vec::new());
         match try_multi_member_demo(append) {
@@ -351,6 +365,7 @@ pub fn App() -> impl IntoView {
                     <button class="button" on:click=distrust_demo>"Federation distrust demo"</button>
                     <button class="button" on:click=persistent_group_demo>"Persistent group demo (δ.3)"</button>
                     <button class="button" on:click=multi_member_demo>"Multi-member group (3-party)"</button>
+                    <button class="button" on:click=live_ws_demo>"Live WS push (γ.4 fallback)"</button>
                     <button class="button" on:click=save_identity>"Save identity"</button>
                     <button class="button" on:click=save_encrypted>"Save encrypted"</button>
                     <button class="button" on:click=load_encrypted>"Load encrypted"</button>
@@ -714,6 +729,166 @@ async fn try_server_backed_demo(
 
     log("== M4 phase γ.3 complete ==".to_string());
     Ok(())
+}
+
+/// M4 γ.4 fallback: WebSocket message push. D-11 names WebTransport
+/// as the preferred transport and WebSocket as the fallback when
+/// WT isn't available. Full WT server-side ships in a focused
+/// session (sized at ~1500 LOC in HANDOFF §M4 status); this is the
+/// fallback path running today.
+///
+/// Flow:
+/// 1. Register + publish KP for a fresh user.
+/// 2. Create a 1:1 group (group_id stable so multiple tabs can join
+///    the same conversation).
+/// 3. Open `/group/:gid/messages/ws`.
+/// 4. Publish a message via the HTTP POST path.
+/// 5. Verify it arrives on the WS subscription.
+///
+/// Returns the number of WS pushes observed. Production callers
+/// would keep the socket live for the duration of the session, not
+/// close it after one message.
+async fn try_live_ws_demo(
+    server: &str,
+    log: impl Fn(String) + Copy + 'static,
+) -> Result<u32, String> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    log(format!("== live WS push demo against {server} =="));
+    let alice = make_identity(0xD0)?;
+    let bob = make_identity(0xD1)?;
+    let alice_psk = LatticePskStorage::new();
+    let bob_psk = LatticePskStorage::new();
+    api::register(server, &alice).await?;
+    api::register(server, &bob).await?;
+    let _ = api::publish_key_package(server, &bob, &bob_psk).await?;
+    let bob_kp_bytes = api::fetch_key_package(server, &bob.credential.user_id).await?;
+
+    let group_id: [u8; 16] = *b"lattice-ws-live!";
+    let mut alice_group = create_group(&alice, alice_psk.clone(), &group_id)
+        .map_err(|e| format!("create_group: {e}"))?;
+    let commit_output =
+        add_member(&mut alice_group, &bob_kp_bytes).map_err(|e| format!("add_member: {e}"))?;
+    let welcome = commit_output
+        .welcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no welcome".to_string())?;
+    let _ = api::submit_commit(
+        server,
+        &group_id,
+        welcome.pq_payload.epoch,
+        &commit_output.commit,
+        &welcome,
+        &bob.credential.user_id,
+    )
+    .await?;
+    apply_commit(&mut alice_group).map_err(|e| format!("apply_commit: {e}"))?;
+    let mut bob_group = process_welcome(&bob, bob_psk.clone(), &welcome)
+        .map_err(|e| format!("process_welcome: {e}"))?;
+    log("group ready; opening WS subscription…".to_string());
+
+    let ws = api::open_messages_ws(server, &group_id)?;
+    let received: Rc<RefCell<Vec<api::WsPush>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let received_for_open = received.clone();
+    let on_open = Closure::wrap(Box::new(move |_evt: web_sys::Event| {
+        log("WS open".to_string());
+        // touch received so the closure captures it (otherwise the
+        // borrow checker drops it before on_message runs).
+        let _ = received_for_open.clone();
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    on_open.forget();
+
+    let received_for_msg = received.clone();
+    let on_message = Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
+        if let Some(s) = evt.data().as_string() {
+            match api::parse_ws_push(&s) {
+                Ok(push) => {
+                    log(format!(
+                        "WS push: seq={}, envelope {} bytes",
+                        push.seq,
+                        push.envelope.len()
+                    ));
+                    received_for_msg.borrow_mut().push(push);
+                }
+                Err(e) => log(format!("WS parse error: {e}")),
+            }
+        }
+    }) as Box<dyn FnMut(web_sys::MessageEvent)>);
+    ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
+
+    // Wait a beat for the WS to attach before we publish — the
+    // server-side broadcast::Sender is created lazily by
+    // `subscribe()`, so the publisher firing before subscription is
+    // attached would deliver to nobody.
+    sleep_ms(200).await;
+
+    log("publishing 2 messages via HTTP POST…".to_string());
+    let ct1 = encrypt_application(&mut alice_group, b"ws push #1")
+        .map_err(|e| format!("encrypt #1: {e}"))?;
+    let _ = api::publish_message(server, &group_id, &ct1).await?;
+    let ct2 = encrypt_application(&mut alice_group, b"ws push #2")
+        .map_err(|e| format!("encrypt #2: {e}"))?;
+    let _ = api::publish_message(server, &group_id, &ct2).await?;
+
+    // Wait for the pushes to land on the WS.
+    for _ in 0..40 {
+        if received.borrow().len() >= 2 {
+            break;
+        }
+        sleep_ms(50).await;
+    }
+
+    let pushes = received.borrow();
+    let count = u32::try_from(pushes.len()).unwrap_or(u32::MAX);
+    if pushes.len() < 2 {
+        return Err(format!(
+            "expected ≥ 2 WS pushes, got {count} (server saw broadcast subscriber late?)"
+        ));
+    }
+
+    // Verify Bob can decrypt the pushed envelopes off the WS stream
+    // (rather than via the HTTP fetch path).
+    let pt1 = decrypt(&mut bob_group, &pushes[0].envelope)
+        .map_err(|e| format!("bob decrypt #1: {e}"))?;
+    let pt2 = decrypt(&mut bob_group, &pushes[1].envelope)
+        .map_err(|e| format!("bob decrypt #2: {e}"))?;
+    log(format!(
+        "bob decrypted from WS: {:?}, {:?}",
+        std::str::from_utf8(&pt1).unwrap_or("?"),
+        std::str::from_utf8(&pt2).unwrap_or("?"),
+    ));
+
+    let _ = ws.close();
+    log("== M4 γ.4 fallback (WS) complete ==".to_string());
+    Ok(count)
+}
+
+/// Tiny sleep helper backed by `setTimeout`. Used to give the
+/// browser event loop a chance to run async network callbacks
+/// before the demo flow continues.
+async fn sleep_ms(ms: i32) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen_futures::JsFuture;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = web_sys::window() {
+            let cb = Closure::once_into_js(move || {
+                let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+            });
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                ms,
+            );
+        }
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 /// M5: multi-member MLS group with shared PSK injection. Three

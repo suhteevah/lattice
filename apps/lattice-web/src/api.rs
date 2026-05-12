@@ -550,3 +550,70 @@ pub fn encode_sealed(envelope: &SealedEnvelope) -> Vec<u8> {
 pub fn decode_sealed(bytes: &[u8]) -> Result<SealedEnvelope, String> {
     SealedEnvelope::decode(bytes).map_err(|e| format!("prost decode SealedEnvelope: {e}"))
 }
+
+/// `GET /group/:gid/messages/ws` — open a live message-subscription
+/// WebSocket. The browser receives a JSON `{seq, envelope_b64}`
+/// text frame each time a new message lands on the server. D-11
+/// fallback tier of γ.4; the WebTransport equivalent ships once the
+/// server-side QUIC stack is in place.
+///
+/// Returns the raw `web_sys::WebSocket` so the caller can hook
+/// `set_onmessage` / `set_onclose` and stash it in a Leptos signal
+/// to keep it alive. Closing the socket happens automatically when
+/// the returned handle is dropped — keep it live for the duration
+/// of the subscription.
+///
+/// # Errors
+///
+/// Returns the JS-side error description if `WebSocket::new` rejects
+/// (bad URL, mixed-content block, etc).
+pub fn open_messages_ws(
+    server: &str,
+    group_id: &[u8; 16],
+) -> Result<web_sys::WebSocket, String> {
+    // Translate http(s)://… → ws(s)://… for the WS handshake host.
+    let base = if let Some(rest) = server.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = server.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        server.to_string()
+    };
+    let url = format!(
+        "{base}/group/{}/messages/ws",
+        B64URL.encode(group_id)
+    );
+    web_sys::WebSocket::new(&url).map_err(|e| format!("WebSocket::new({url}): {e:?}"))
+}
+
+/// One pushed message decoded from a WS frame.
+pub struct WsPush {
+    /// Monotonic seq the server assigned.
+    pub seq: u64,
+    /// Envelope bytes (raw MLS application ciphertext OR a
+    /// Prost-encoded `SealedEnvelope`, depending on the publisher).
+    pub envelope: Vec<u8>,
+}
+
+/// Parse one `MessageEvent.data` payload off the WS. JSON shape is
+/// `{ "seq": <u64>, "envelope_b64": "<base64>" }`.
+///
+/// # Errors
+///
+/// JSON parse / base64 decode failures, surfaced as strings.
+pub fn parse_ws_push(text: &str) -> Result<WsPush, String> {
+    #[derive(serde::Deserialize)]
+    struct Frame {
+        seq: u64,
+        envelope_b64: String,
+    }
+    let parsed: Frame = serde_json::from_str(text)
+        .map_err(|e| format!("ws frame parse: {e}"))?;
+    let envelope = B64
+        .decode(&parsed.envelope_b64)
+        .map_err(|e| format!("ws frame envelope_b64: {e}"))?;
+    Ok(WsPush {
+        seq: parsed.seq,
+        envelope,
+    })
+}

@@ -3,8 +3,12 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{
+        Path, Query, State,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
 use base64::Engine;
@@ -359,5 +363,75 @@ pub fn router() -> Router<ServerState> {
             "/group/{gid_b64}/messages",
             post(publish_message_handler).get(fetch_messages_handler),
         )
+        .route("/group/{gid_b64}/messages/ws", get(messages_ws_handler))
         .route("/group/{gid_b64}/issue_cert", post(issue_cert_handler))
+}
+
+/// `GET /group/:gid/messages/ws` — WebSocket upgrade. Each
+/// `(seq, envelope_bytes)` posted to the group via
+/// `POST /group/:gid/messages` after the connection is established
+/// is pushed to the client as a JSON text frame
+/// `{ "seq": …, "envelope_b64": "…" }`.
+///
+/// Catch-up before subscribe: clients should query
+/// `GET /group/:gid/messages?since=N` once on connect; the WS stream
+/// covers only messages received AFTER the broadcast subscription
+/// attached.
+///
+/// γ.4 D-11 fallback tier — WebTransport gets a similar handler
+/// once the server-side QUIC stack lands.
+async fn messages_ws_handler(
+    State(state): State<ServerState>,
+    Path(gid_b64): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let gid: [u8; 16] = decode_b64(&gid_b64)?;
+    Ok(ws.on_upgrade(move |socket| handle_messages_ws(state, gid, socket)))
+}
+
+async fn handle_messages_ws(
+    state: ServerState,
+    gid: [u8; 16],
+    mut socket: WebSocket,
+) {
+    let mut rx = state.subscribe(gid).await;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    tracing::info!(gid_prefix = ?&gid[..4], "ws subscriber attached");
+    loop {
+        tokio::select! {
+            push = rx.recv() => match push {
+                Ok((seq, envelope)) => {
+                    let frame = serde_json::json!({
+                        "seq": seq,
+                        "envelope_b64": b64.encode(&envelope),
+                    });
+                    if let Err(e) = socket
+                        .send(WsMessage::Text(frame.to_string().into()))
+                        .await
+                    {
+                        tracing::debug!(error = %e, "ws send failed; closing");
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!("ws broadcast closed");
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(missed = n, "ws subscriber lagged; reconnect");
+                    return;
+                }
+            },
+            // Drain any pings / disconnects from the client so the
+            // socket health check works.
+            inbound = socket.recv() => match inbound {
+                Some(Ok(WsMessage::Close(_))) | None => return,
+                Some(Err(e)) => {
+                    tracing::debug!(error = %e, "ws recv error");
+                    return;
+                }
+                _ => {}
+            },
+        }
+    }
 }
