@@ -1,0 +1,566 @@
+//! Chat-state plumbing for chunk C — real DM flow.
+//!
+//! Holds the mutable MLS state per active conversation and exposes
+//! async methods for bootstrap / add-conversation / send / poll.
+//! Lives outside Leptos's signal graph because `GroupHandle` isn't
+//! `Clone`; the public conversation summary is exposed through
+//! signal-tracked structures owned by `chat.rs`.
+//!
+//! ## Group ID derivation
+//!
+//! For 1:1 DMs we derive a deterministic group_id from the sorted
+//! pair of user_ids: `blake3("lattice/dm/v1/" || min || max)[..16]`.
+//! Both sides agree without coordination — whichever side issues
+//! the "add conversation" first creates the group and sends the
+//! Welcome; the other side discovers a Welcome already waiting
+//! when they go to add the same conversation.
+//!
+//! ## Identity bootstrap
+//!
+//! On first run: generate fresh `LatticeIdentity`, register with
+//! the home server, publish a KeyPackage, persist plaintext to
+//! `localStorage["lattice/identity/v1"]`. On subsequent runs: load
+//! plaintext blob via `persist::load(None)`.
+//!
+//! Encrypted (v2 / v3 PRF) blobs are unlocked through the existing
+//! `app.rs` flow; this module assumes the identity is already
+//! unlocked when its methods are called.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use lattice_crypto::credential::{
+    ED25519_PK_LEN, LatticeCredential, ML_DSA_65_PK_LEN, USER_ID_LEN,
+};
+use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider};
+use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
+use lattice_crypto::mls::psk::LatticePskStorage;
+use lattice_crypto::mls::{
+    GroupHandle, LatticeIdentity, add_member, apply_commit, create_group, decrypt,
+    encrypt_application, generate_key_package, process_welcome,
+};
+use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
+use rand::RngCore;
+use rand::rngs::OsRng;
+
+use crate::api;
+use crate::persist;
+
+/// 16-byte deterministic group id derived from sorted user_ids.
+pub type GroupId = [u8; 16];
+
+/// Per-conversation MLS state.
+pub struct ConvoState {
+    /// 32-byte peer user_id.
+    pub peer_user_id: [u8; USER_ID_LEN],
+    /// User-supplied label (e.g. "Bob (iMac)").
+    pub label: String,
+    /// Live MLS group state. Mutated on every encrypt/decrypt; not
+    /// `Clone` so we hold it inside the `Rc<RefCell<_>>`.
+    pub group: GroupHandle,
+    /// PSK storage shared with `group`; needed for sealed-sender +
+    /// future commit-rotation paths.
+    pub psk: LatticePskStorage,
+    /// Highest server sequence number consumed by `poll_messages`.
+    pub last_seq: u64,
+}
+
+/// Shared mutable chat state.
+///
+/// `Arc<Mutex<_>>` (not `Rc<RefCell<_>>`) because Leptos 0.8
+/// component closures require `Send + Sync` even in CSR mode.
+/// In single-threaded WASM the mutexes never contend; the
+/// `Send + Sync` is purely a type-system gate.
+#[derive(Clone)]
+pub struct ChatState {
+    /// Identity bundle — `None` until bootstrap completes.
+    identity: Arc<Mutex<Option<LatticeIdentity>>>,
+    /// Set `true` while bootstrap is in flight to debounce
+    /// concurrent callers (Leptos can re-execute component bodies,
+    /// firing multiple `bootstrap_identity` spawn_local tasks). The
+    /// loser-of-the-race tasks poll `has_identity()` for completion
+    /// instead of duplicating the register / publish_kp / persist
+    /// roundtrips.
+    bootstrap_in_flight: Arc<AtomicBool>,
+    /// Active conversations keyed by group_id.
+    active: Arc<Mutex<HashMap<GroupId, ConvoState>>>,
+    /// Home server URL.
+    server_url: String,
+}
+
+impl ChatState {
+    /// Create an empty ChatState pointed at `server_url`.
+    #[must_use]
+    pub fn new(server_url: impl Into<String>) -> Self {
+        Self {
+            identity: Arc::new(Mutex::new(None)),
+            bootstrap_in_flight: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(Mutex::new(HashMap::new())),
+            server_url: server_url.into(),
+        }
+    }
+
+    /// `true` once the identity is loaded / generated.
+    #[must_use]
+    pub fn has_identity(&self) -> bool {
+        self.identity
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Read-only access to the bootstrap user_id (for display).
+    #[must_use]
+    pub fn my_user_id(&self) -> Option<[u8; USER_ID_LEN]> {
+        self.identity
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|i| i.credential.user_id))
+    }
+
+    /// Load existing plaintext identity, or generate + register +
+    /// publish a fresh one. Stores it on `self.identity` for later
+    /// methods.
+    ///
+    /// # Errors
+    ///
+    /// Returns any persist / server error stringified.
+    pub async fn bootstrap_identity(
+        &self,
+        log: impl Fn(String) + Copy,
+    ) -> Result<(), String> {
+        if self.has_identity() {
+            return Ok(());
+        }
+        // Race guard: if another caller is already bootstrapping,
+        // wait for them to finish rather than duplicate the work.
+        if self
+            .bootstrap_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            for _ in 0..60 {
+                wait_ms(500).await;
+                if self.has_identity() {
+                    return Ok(());
+                }
+            }
+            return Err("bootstrap: another in-flight call did not complete".to_string());
+        }
+        // We're the winner — make sure to clear the flag on every
+        // exit path. A guard struct would be cleaner, but RAII
+        // across async is awkward; flat early-returns + manual
+        // clear is fine for this scope.
+        let result = self.bootstrap_inner(log).await;
+        self.bootstrap_in_flight.store(false, Ordering::SeqCst);
+        result
+    }
+
+    async fn bootstrap_inner(
+        &self,
+        log: impl Fn(String) + Copy,
+    ) -> Result<(), String> {
+        // Only the plaintext path is handled here. Encrypted blobs
+        // (v2 / v3) need an unlock UI; the existing app.rs already
+        // surfaces that. Callers that have an encrypted blob can
+        // call `set_identity` after unlocking.
+        match persist::probe()? {
+            persist::BlobShape::Plaintext => {
+                if let Some(loaded) = persist::load(None)? {
+                    log(format!(
+                        "chat: loaded saved identity user_id={}",
+                        hex::encode(&loaded.credential.user_id[..6]),
+                    ));
+                    *self.identity.lock().map_err(poisoned)? = Some(loaded);
+                    return Ok(());
+                }
+            }
+            persist::BlobShape::Encrypted | persist::BlobShape::PrfEncrypted => {
+                return Err(
+                    "encrypted identity present; unlock via the debug panel first"
+                        .to_string(),
+                );
+            }
+            persist::BlobShape::None => {}
+        }
+
+        // No saved identity → generate + register + publish.
+        let identity = generate_random_identity()?;
+        log(format!(
+            "chat: generated fresh identity user_id={}",
+            hex::encode(&identity.credential.user_id[..6]),
+        ));
+        api::register(&self.server_url, &identity).await?;
+        let published_at =
+            api::publish_key_package(&self.server_url, &identity, &LatticePskStorage::new())
+                .await?;
+        log(format!(
+            "chat: registered + published KP (server ts={published_at})"
+        ));
+        persist::save(&identity, None)?;
+        log("chat: persisted plaintext identity to localStorage".to_string());
+        *self.identity.lock().map_err(poisoned)? = Some(identity);
+        Ok(())
+    }
+
+    /// Add a conversation with `peer_user_id`. If a Welcome is
+    /// waiting for us under the derived group_id we accept it
+    /// (we're joining a group the peer already invited us to);
+    /// otherwise we create the group and send the Welcome to peer.
+    ///
+    /// Returns the resulting group_id so the caller can route to
+    /// the new thread.
+    ///
+    /// # Errors
+    ///
+    /// Server / crypto errors stringified.
+    pub async fn add_conversation(
+        &self,
+        peer_user_id: [u8; USER_ID_LEN],
+        label: String,
+        log: impl Fn(String) + Copy,
+    ) -> Result<GroupId, String> {
+        let my_user_id = self.require_my_user_id()?;
+        if peer_user_id == my_user_id {
+            return Err("can't start a conversation with yourself".to_string());
+        }
+        let group_id = derive_group_id(&my_user_id, &peer_user_id);
+        if self
+            .active
+            .lock()
+            .map_err(poisoned)?
+            .contains_key(&group_id)
+        {
+            return Err(format!(
+                "conversation already active for group {}",
+                hex::encode(group_id),
+            ));
+        }
+        log(format!(
+            "chat: derived group_id={} for peer={}",
+            hex::encode(group_id),
+            hex::encode(&peer_user_id[..6]),
+        ));
+
+        // Try the "I'm joining" path first.
+        match api::fetch_welcome(&self.server_url, &group_id, &my_user_id).await {
+            Ok(welcome_bundle) => {
+                log("chat: welcome found — joining peer's group".to_string());
+                let psk = LatticePskStorage::new();
+                let group = {
+                    let guard = self.identity.lock().map_err(poisoned)?;
+                    let identity = guard
+                        .as_ref()
+                        .ok_or_else(|| "identity not bootstrapped".to_string())?;
+                    process_welcome(identity, psk.clone(), &welcome_bundle)
+                        .map_err(|e| format!("process_welcome: {e}"))?
+                };
+                self.active.lock().map_err(poisoned)?.insert(
+                    group_id,
+                    ConvoState {
+                        peer_user_id,
+                        label,
+                        group,
+                        psk,
+                        last_seq: 0,
+                    },
+                );
+                return Ok(group_id);
+            }
+            Err(e) if e.contains("404") || e.contains("not found") => {
+                // No welcome → fall through to invite path.
+            }
+            Err(e) => return Err(format!("fetch_welcome: {e}")),
+        }
+
+        // "I'm inviting" path.
+        log("chat: no welcome found — inviting peer".to_string());
+        let peer_kp = api::fetch_key_package(&self.server_url, &peer_user_id).await?;
+        log(format!("chat: fetched peer KP ({} bytes)", peer_kp.len()));
+
+        let psk = LatticePskStorage::new();
+        // Build group + commit under an immutable borrow of identity,
+        // then drop the borrow before the async submit_commit call.
+        let (mut group, commit_bytes, welcome) = {
+            let guard = self.identity.lock().map_err(poisoned)?;
+            let identity = guard
+                .as_ref()
+                .ok_or_else(|| "identity not bootstrapped".to_string())?;
+            let mut g = create_group(identity, psk.clone(), &group_id)
+                .map_err(|e| format!("create_group: {e}"))?;
+            let commit_output =
+                add_member(&mut g, &peer_kp).map_err(|e| format!("add_member: {e}"))?;
+            let welcome = commit_output
+                .welcomes
+                .into_iter()
+                .next()
+                .ok_or_else(|| "add_member produced no welcome".to_string())?;
+            (g, commit_output.commit, welcome)
+        };
+        let accepted = api::submit_commit(
+            &self.server_url,
+            &group_id,
+            welcome.pq_payload.epoch,
+            &commit_bytes,
+            &welcome,
+            &peer_user_id,
+        )
+        .await?;
+        log(format!("chat: server accepted {accepted} welcome(s)"));
+        apply_commit(&mut group).map_err(|e| format!("apply_commit: {e}"))?;
+
+        self.active.lock().map_err(poisoned)?.insert(
+            group_id,
+            ConvoState {
+                peer_user_id,
+                label,
+                group,
+                psk,
+                last_seq: 0,
+            },
+        );
+        Ok(group_id)
+    }
+
+    /// Encrypt + send a chat message on `group_id`. Returns the
+    /// server-assigned sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group isn't active, encryption
+    /// fails, or the POST fails.
+    pub async fn send_message(
+        &self,
+        group_id: GroupId,
+        body: String,
+    ) -> Result<u64, String> {
+        let ct = {
+            let mut active = self.active.lock().map_err(poisoned)?;
+            let convo = active
+                .get_mut(&group_id)
+                .ok_or_else(|| "no active conversation".to_string())?;
+            encrypt_application(&mut convo.group, body.as_bytes())
+                .map_err(|e| format!("encrypt_application: {e}"))?
+        };
+        let seq = api::publish_message(&self.server_url, &group_id, &ct).await?;
+        Ok(seq)
+    }
+
+    /// Poll every active conversation for new messages since the
+    /// last seen seq. Returns one `(group_id, sender_label, plaintext)`
+    /// tuple per decrypted message. Caller routes them into the
+    /// thread signals.
+    ///
+    /// # Errors
+    ///
+    /// First server / crypto error halts the poll for that
+    /// conversation but lets the rest continue.
+    pub async fn poll_all(&self) -> Result<Vec<PolledMessage>, String> {
+        // Snapshot conversation ids + last_seq so we don't hold
+        // the lock across awaits.
+        let snapshot: Vec<(GroupId, u64, String)> = {
+            let active = self.active.lock().map_err(poisoned)?;
+            active
+                .iter()
+                .map(|(gid, c)| (*gid, c.last_seq, c.label.clone()))
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (gid, since, label) in snapshot {
+            let (latest_seq, envelopes) =
+                match api::fetch_messages(&self.server_url, &gid, since).await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+            if envelopes.is_empty() {
+                continue;
+            }
+            let plaintexts: Vec<(u64, Vec<u8>)> = {
+                let mut active = self.active.lock().map_err(poisoned)?;
+                let Some(convo) = active.get_mut(&gid) else {
+                    continue;
+                };
+                let mut pts = Vec::with_capacity(envelopes.len());
+                for env in envelopes {
+                    match decrypt(&mut convo.group, &env.envelope) {
+                        Ok(pt) => pts.push((env.seq, pt)),
+                        Err(e) => {
+                            // Skip undecryptable messages (typically our
+                            // own outgoing echoed back; the MLS state
+                            // can't decrypt its own ciphertext). Log so
+                            // unexpected failures are visible.
+                            web_sys::console::warn_1(
+                                &format!(
+                                    "chat: skipped seq={} group={} ({} bytes): {}",
+                                    env.seq,
+                                    hex::encode(gid),
+                                    env.envelope.len(),
+                                    e,
+                                )
+                                .into(),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                convo.last_seq = latest_seq;
+                pts
+            };
+            for (seq, pt) in plaintexts {
+                out.push(PolledMessage {
+                    group_id: gid,
+                    seq,
+                    sender_label: label.clone(),
+                    body: String::from_utf8_lossy(&pt).into_owned(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Snapshot of active conversations for the sidebar.
+    #[must_use]
+    pub fn conversation_summaries(&self) -> Vec<ConversationSummary> {
+        self.active
+            .lock()
+            .map(|active| {
+                active
+                    .iter()
+                    .map(|(gid, c)| ConversationSummary {
+                        group_id: *gid,
+                        peer_user_id: c.peer_user_id,
+                        label: c.label.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn require_my_user_id(&self) -> Result<[u8; USER_ID_LEN], String> {
+        self.identity
+            .lock()
+            .map_err(poisoned)?
+            .as_ref()
+            .map(|i| i.credential.user_id)
+            .ok_or_else(|| "identity not bootstrapped".to_string())
+    }
+}
+
+fn poisoned<T>(_: std::sync::PoisonError<T>) -> String {
+    "chat-state mutex poisoned".to_string()
+}
+
+async fn wait_ms(ms: u32) {
+    // setTimeout-backed sleep for the in-flight bootstrap poller.
+    // Same shape as `chat::sleep`; duplicated here to avoid a
+    // public re-export across modules.
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen_futures::JsFuture;
+    let _ = JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        let cb = Closure::once_into_js(move || {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        });
+        if let Some(w) = web_sys::window() {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.unchecked_ref(),
+                ms as i32,
+            );
+        }
+    }))
+    .await;
+}
+
+// Silence unused-import warning when std::time::Duration isn't
+// directly referenced after the refactor.
+#[allow(dead_code)]
+fn _force_duration(_: Duration) {}
+
+/// Decoded incoming message handed back from `poll_all`.
+#[derive(Clone, Debug)]
+pub struct PolledMessage {
+    /// Conversation this message belongs to.
+    pub group_id: GroupId,
+    /// Server sequence number.
+    pub seq: u64,
+    /// Human label of the sender (peer's label, since the only
+    /// non-me sender in a 1:1 is the peer).
+    pub sender_label: String,
+    /// UTF-8 plaintext.
+    pub body: String,
+}
+
+/// Public summary of one conversation — what the sidebar shows.
+#[derive(Clone, Debug)]
+pub struct ConversationSummary {
+    /// Group id.
+    pub group_id: GroupId,
+    /// Peer's user_id (for display + lookup).
+    pub peer_user_id: [u8; USER_ID_LEN],
+    /// User-supplied label.
+    pub label: String,
+}
+
+/// Derive the canonical 1:1 group_id from sorted user_ids.
+#[must_use]
+pub fn derive_group_id(a: &[u8; USER_ID_LEN], b: &[u8; USER_ID_LEN]) -> GroupId {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let mut h = blake3::Hasher::new();
+    h.update(b"lattice/dm/v1/");
+    h.update(lo);
+    h.update(hi);
+    let mut out = [0u8; 16];
+    h.finalize_xof().fill(&mut out);
+    out
+}
+
+/// Generate a fresh hybrid identity with a random user_id. Same
+/// shape as `app.rs::make_identity` but with `OsRng`-filled
+/// `user_id` instead of a constant byte.
+fn generate_random_identity() -> Result<LatticeIdentity, String> {
+    let provider = LatticeCryptoProvider::new();
+    let suite = provider
+        .cipher_suite_provider(LATTICE_HYBRID_V1)
+        .ok_or_else(|| "ciphersuite missing".to_string())?;
+    let (sk, pk) = suite
+        .signature_key_generate()
+        .map_err(|e| format!("sig keygen: {e:?}"))?;
+    let pk_bytes = pk.as_bytes();
+    if pk_bytes.len() != ED25519_PK_LEN + ML_DSA_65_PK_LEN {
+        return Err(format!(
+            "unexpected hybrid pubkey length: {}",
+            pk_bytes.len()
+        ));
+    }
+    let mut ed25519_pub = [0u8; ED25519_PK_LEN];
+    ed25519_pub.copy_from_slice(&pk_bytes[..ED25519_PK_LEN]);
+    let ml_dsa_pub = pk_bytes[ED25519_PK_LEN..].to_vec();
+
+    let mut user_id = [0u8; USER_ID_LEN];
+    OsRng.fill_bytes(&mut user_id);
+
+    let credential = LatticeCredential {
+        user_id,
+        ed25519_pub,
+        ml_dsa_pub,
+    };
+    let kem_keypair = KemKeyPair::generate();
+
+    let identity = LatticeIdentity {
+        credential,
+        signature_secret: sk,
+        kem_keypair,
+        key_package_repo: mls_rs::storage_provider::in_memory::InMemoryKeyPackageStorage::default(),
+    };
+
+    // Generate at least one KeyPackage so the user can be invited
+    // by peers. Storage holds the private leaf key for later
+    // process_welcome.
+    let _kp = generate_key_package(&identity, LatticePskStorage::new())
+        .map_err(|e| format!("generate_key_package: {e}"))?;
+
+    Ok(identity)
+}

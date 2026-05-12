@@ -419,27 +419,11 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // Chunk A — chat shell signals. Seeded with one mock conversation
-    // so the panes feel populated; chunk C wires this to real MLS
-    // state and removes the seed. Display name defaults to a short
-    // user_id prefix once we restore an identity; falls back to "me".
-    let (chat_convos_seed, chat_messages_seed) = crate::chat::mock_seed();
-    let chat_convos = RwSignal::new(chat_convos_seed);
-    let chat_messages = RwSignal::new(chat_messages_seed);
-    let chat_view = RwSignal::new(crate::chat::ChatView::Empty);
-    let chat_display_name = Signal::derive(move || {
-        match persist::probe() {
-            Ok(persist::BlobShape::Plaintext) => persist::load(None)
-                .ok()
-                .flatten()
-                .map(|id| {
-                    let prefix = &B64.encode(id.credential.user_id)[..6];
-                    format!("me ({prefix})")
-                })
-                .unwrap_or_else(|| "me".to_string()),
-            _ => "me".to_string(),
-        }
-    });
+    // Chunk C — real MLS chat state. ChatState owns the identity
+    // bootstrap, per-conversation `GroupHandle`, and the polling
+    // loop. It clones cheaply (Rc inside), so we hand a clone to
+    // the chat shell.
+    let chat_state = crate::chat_state::ChatState::new(DEFAULT_SERVER_URL);
 
     // Toggle the legacy debug grid open/closed. Default closed so the
     // chat shell is the visible default; one click opens debug.
@@ -454,10 +438,8 @@ pub fn App() -> impl IntoView {
                     {move || status.get()}
                 </div>
                 <crate::chat::ChatShell
-                    conversations=chat_convos
-                    messages=chat_messages
-                    current_view=chat_view
-                    display_name=chat_display_name
+                    state=chat_state
+                    set_status=set_status
                 />
                 <details class="debug-details" open=move || debug_open.get()>
                     <summary

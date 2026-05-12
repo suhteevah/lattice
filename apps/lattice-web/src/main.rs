@@ -13,6 +13,7 @@ mod api;
 mod app;
 mod capabilities;
 mod chat;
+mod chat_state;
 mod distrust;
 mod passkey;
 mod persist;
