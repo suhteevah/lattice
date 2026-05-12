@@ -1,9 +1,11 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-11 (M4 closed — δ.3 + γ.4-spec; M5 closed —
-multi-member MLS shipped on wire v2, Cap'n Proto schema authored.
-Only γ.4 server-side QUIC + Cap'n Proto build wiring remain, both
-sized + ready to execute in focused sessions.)
+**Last updated:** 2026-05-11 (everything testable tonight: M4 done
+including γ.4 fallback (WebSocket message push); M5 done including
+multi-member MLS on wire v2 + Cap'n Proto build wiring live + tonight's
+friend-test playbook in DEPLOY.md. Only γ.4 tier 1 (server-side QUIC +
+H3 + WT) and the actual ~50-callsite Prost→Capnp swap remain — both
+documented + sized.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** Steps 1+2; M1/M2/M3 shipped; **M4 done**; **M5 mostly
 shipped**. Browser tab is a full Lattice client: in-WASM MLS,
@@ -522,6 +524,17 @@ Module additions:
       `LatticeWelcome` ready for `process_welcome`. Live values:
       commit 15601 bytes, MLS Welcome 19819, PQ ct 1088 (epoch 1),
       ciphertext 3662 bytes, "hello via server" round-trip OK.
+- [x] Phase γ.4 fallback / D-11 tier 2 — WebSocket message push
+      (shipped 2026-05-11 commit `0056559`). `ServerState` gains a
+      per-group `broadcast::Sender<(u64, Vec<u8>)>` lazy-created on
+      first subscribe; `append_message` fires after persisting;
+      new route `GET /group/:gid/messages/ws` upgrades and forwards
+      `{seq, envelope_b64}` JSON frames. Browser
+      `api::open_messages_ws` + `parse_ws_push` + a "Live WS push
+      (γ.4 fallback)" demo button. Two tabs on the same group_id
+      see messages flow in real-time without polling. **γ.4 tier
+      1 (server-side QUIC + H3 + WT)** still sized in the §M4
+      status migration spec.
 - [~] Phase γ.4-detect (shipped 2026-05-11): `apps/lattice-web/src/
       capabilities.rs` probes `window.WebTransport` and renders a
       `<CapabilitiesPanel>` chip. **Transport swap itself is deferred.**
@@ -716,15 +729,17 @@ Module additions:
       round-trip, cross-joiner KEM rejection, tampered joiner_idx
       AEAD rejection, tampered ml_kem_ct / wrap_ct rejection. 127
       workspace tests pass (was 125 before).
-- [~] **Cap'n Proto migration** — schema authored 2026-05-11 commit
-      `d11d5fc`; capnpc build wiring deferred. `crates/lattice-
-      protocol/schema/lattice.capnp` carries the schema-of-record
-      for every Prost type currently in `src/wire.rs`, using
-      Cap'n Proto's native union for optional sub-messages.
-      Remaining work (one focused session): `choco install capnp`
-      → workspace deps `capnp` + `capnpc` → `lattice-protocol/build.rs`
-      → swap ~50 `wire::` callsites → bump `WIRE_VERSION` 2 → 3.
-      Sized in `schema/README.md` inline.
+- [x] **Cap'n Proto build wiring** (shipped 2026-05-11 commit
+      `047194e`). `capnp` 1.3.0 installed via `choco install capnproto`;
+      workspace gains `capnp` + `capnpc` 0.20. `lattice-protocol`
+      gains `build.rs` that runs the compiler over
+      `schema/lattice.capnp` into `$OUT_DIR/lattice_capnp.rs`;
+      crate-level `src/lattice_capnp.rs` includes it under the
+      file-stem path the generated code expects. Both Prost
+      `wire::*` and capnp `lattice_capnp::*` coexist. Workspace
+      check + 127 tests green. **Open follow-up:** swap ~50
+      callsites from `wire::` to `lattice_capnp::` + drop Prost +
+      bump `WIRE_VERSION` 2 → 3.
 
 ### Not done — M4 and beyond
 - [ ] Cap'n Proto migration from interim Prost wire (M5)
