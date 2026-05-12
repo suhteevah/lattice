@@ -25,6 +25,53 @@ session keys. Test:
 `$env:LATTICE_NET_TESTS=1; cargo test -p lattice-media --test
 pq_dtls_srtp_loopback`.
 
+### Session log — 2026-05-12 (post-Phase-F: build env + chat-app sizing)
+
+Two follow-on items after the Phase F commit landed:
+
+**1. Build env cleanup (commit `9023ed4`).** MSVC IS installed on
+this box — vswhere lives at `C:\Program Files (x86)\Microsoft
+Visual Studio\Installer\vswhere.exe`, VS 2022 Community at
+`C:\Program Files\Microsoft Visual Studio\2022\Community`, VS 2022
+BuildTools at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`.
+But the previous `serve.ps1` / `build.ps1` / `check.ps1` shelled out
+to `vcvars64.bat` via `cmd.exe /c`, and the nested cmd.exe couldn't
+find `vswhere` on PATH so vcvars64.bat itself errored. Kalshi-trader-v7
+on this same box builds Tauri fine with the GNU host toolchain +
+MinGW windres, so the simpler path won: pin
+`RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`, prepend
+`C:\msys64\mingw64\bin` for windres, run trunk / cargo / tauri
+directly. New script `apps/lattice-desktop/src-tauri/scripts/dev.ps1`
+launches `cargo tauri dev` with that env prelude. **Verified:**
+`trunk build --release` produces a clean lattice-web bundle under
+`dist/` (3 MB wasm + 50 KB js + 4 KB css); `cargo build -p
+lattice-desktop --release` produces a 7.9 MB
+`target\release\lattice-desktop.exe` in ~4m34s on first build (the
+incremental rebuild is fast).
+
+**2. Chat-app gap sizing (no commit — analysis only).** Matt asked
+how far we are from an "actual chat Tauri app." Cryptographic +
+transport layers are done (M1–M6 + Phase F). What's missing is
+purely UX work on top of the existing protocol surface:
+
+| Chunk | Scope | Size |
+|---|---|---|
+| A — chat shell | Sidebar / message thread / composer. Replaces the demo button grid as the default view. | ~1 session |
+| B — onboarding + contacts | First-launch identity setup · add contact by user_id / share-link / QR · localStorage-persisted contact list. Today's demos hardcode peers. | ~1 session |
+| C — real DM flow | Pick contact → create-group commit → Welcome → conversation opens. Protocol pieces are already in `api.rs`; missing the wiring UI. | ~1 session |
+| D — background receive + notifications | One persistent WS subscription per joined group · route incoming to the right pane · Tauri notification API. | ~0.5 session |
+| E — server config + polish | Configurable home server (currently hardcoded `127.0.0.1:8080`) · connection status · "logged in as <prefix>" · settings page. | ~0.5 session |
+| F — visual polish | Avatars / color stripes from user_id hash · empty states · keyboard shortcuts. Dark mode is already default. | ~0.5 session |
+
+Total: ~3–4 focused sessions to go from button-grid demos to "give
+a friend the MSI; they message back." Voice/video is a separate
+track (Phase G hardware-backed keys + cross-machine signaling
+deferred from Phase F).
+
+Suggested chunk order: A → C → B → D → E → F. Keep the existing
+button-grid alive as a `#/debug` route — fastest way to verify the
+protocol works without going through chat UI.
+
 ### Session log — 2026-05-12 (Phase F)
 
 Compact session diff for the incoming Claude:
