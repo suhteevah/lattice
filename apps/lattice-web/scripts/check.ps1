@@ -1,20 +1,14 @@
-# Quick `cargo check` for the wasm32 target, inside the VS Build
-# Tools env so host-target proc-macros can build. Lighter than a
-# full `trunk build` — use it as an inner-loop verification before
-# kicking off the full bundle.
+# Quick `cargo check --target wasm32-unknown-unknown` for the Lattice
+# web client. Uses the GNU host toolchain — matches the kalshi
+# desktop path on this box.
 
 $ErrorActionPreference = 'Stop'
 
-$vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
-$installPath = & $vswhere -latest -prerelease -products * `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-    -property installationPath
-$vcvarsBat = Join-Path $installPath 'VC\Auxiliary\Build\vcvars64.bat'
-$envDump = cmd.exe /c "`"$vcvarsBat`" && set"
-foreach ($line in $envDump) {
-    if ($line -match '^([^=]+)=(.*)$') {
-        Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] -ErrorAction SilentlyContinue
-    }
+$env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-gnu'
+if (Test-Path 'C:\msys64\mingw64\bin\gcc.exe') {
+    $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+} else {
+    throw 'MinGW gcc not at C:\msys64\mingw64\bin — install MSYS2 mingw64 or switch host toolchain.'
 }
 
 $crateDir = Split-Path -Parent $PSScriptRoot
