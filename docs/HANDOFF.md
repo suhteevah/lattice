@@ -3,9 +3,10 @@
 **Last updated:** 2026-05-12 (M7 Phases G.1 + G.2 shipped:
 `lattice-media::keystore` trait + DPAPI Windows / Secret Service
 Linux / Keychain macOS impls + five Tauri IPC commands. **Chat-app
-chunks A + C** shipped: real DM flow over MLS — two browser tabs
-on the same lattice-server send & receive encrypted messages
-end-to-end. See §16 + §17 + §18 below.)
+chunks A + C + group-state persistence** shipped: real DM flow
+over MLS survives page reload — verified two-tab end-to-end
+including post-reload bidirectional messaging. See §16 + §17 +
+§18 + §19 below.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** 🟢 Working — **chat actually works**. Steps 1+2;
 **M1 / M2 / M3 / M4 / M5 / M6 all shipped**, **M7 Phases A–F +
@@ -178,7 +179,8 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | G.2 — Linux Secret Service + macOS Keychain | ✅ shipped 2026-05-12 | OS-keychain seal on all 3 desktops. See §17. |
 | G.3 — TPM 2.0 (Windows) + Secure Enclave (macOS) + tss-esapi opt-in (Linux) | ⬜ | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
 | Chat chunks A + C — sidebar/thread/composer + real DM flow | ✅ shipped 2026-05-12 | End-to-end MLS chat verified across two browser tabs. See §17 + §18. |
-| Chat chunks B / D / E / F | ⬜ next | Onboarding, WebSocket push + group-state persist, server config, polish. |
+| Chat group-state persistence — chat survives page reload | ✅ shipped 2026-05-12 | localStorage-backed MLS group + KP + convo index. See §19. |
+| Chat chunks B / D-rest / E / F | ⬜ next | Onboarding + contacts, WebSocket push + history replay, server config, polish. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -1801,3 +1803,102 @@ and the peer's label for received.
   refactoring to scope lock borrows tightly so they don't span the
   async server calls. Documented inline at each call site.
 
+
+---
+
+## 19. Chat group-state persistence (shipped 2026-05-12)
+
+Chat now survives page reload. Three layers of localStorage-
+backed state plumbed under the chunk C chat flow.
+
+### What shipped
+
+| Layer | Where | Key namespace |
+|---|---|---|
+| **MLS group state** (state.data + epoch records + group index) | δ.3 `LocalStorageGroupStateStorage` (`apps/lattice-web/src/storage.rs`) | `lattice/mls/group/{gid_b64url}/{state,epoch/n,max_epoch}` + `lattice/mls/groups` |
+| **KeyPackage repo** (per-device leaf init private keys) | `sync_kp_repo_to_storage` / `restore_kp_repo_from_storage` (`apps/lattice-web/src/storage.rs`) | `lattice/mls/kp/{kp_id_b64url}` + `lattice/mls/kp_ids` |
+| **Conversation index** (peer user_id + label + last_seq) | `chat_state.rs` `ConvoRecord` + helpers | `lattice/conversations/v1` |
+| `load_group_with_storage` helper | `lattice-crypto::mls` | n/a |
+| `write_to_storage` on create + join | `lattice-crypto::mls::{create_group_with_storage, process_welcome_with_storage}` | flushes state to whichever `GroupStateStorage` is configured |
+| Bootstrap restore path + view-signal refresh effect | `chat_state.rs::restore_conversations` + `chat.rs::Effect` watching `bootstrap_complete` | n/a |
+
+### Why the KP shadow-sync
+
+`lattice_crypto::mls::build_client` hardcodes the client's
+`key_package_repo` to `InMemoryKeyPackageStorage` (the type
+lives on `LatticeIdentity::key_package_repo`). Generalizing
+that to a generic param would ripple through every caller in
+lattice-crypto / lattice-server / lattice-cli. Cheaper: mirror
+the in-memory entries to localStorage from the browser side,
+then re-insert on boot into a fresh `InMemoryKeyPackageStorage`.
+Identical observable behaviour, zero lattice-crypto API
+changes.
+
+Each `KeyPackageData` (key_package_bytes + init_key +
+leaf_node_key + expiration) serializes through `mls_rs_codec`
+and stores as base64. The id index at `lattice/mls/kp_ids`
+makes restoration a single read instead of scanning every
+localStorage key.
+
+### Why the explicit `write_to_storage`
+
+mls-rs's `Client::create_group_with_id` and `join_group` build
+the in-memory `Group` but **don't auto-flush** to the
+configured `GroupStateStorage`. The first call that DOES flush
+is the next `apply_commit` / `encrypt_application` / `decrypt`.
+
+For Bob (inviter), that worked accidentally: he does
+`create_group → add_member → apply_commit`, and `apply_commit`
+flushes. For Alice (joiner), her `process_welcome` finished
+without any subsequent op, so her group state stayed in memory
+and was lost on reload. Fix: both helpers in lattice-crypto
+now call `write_to_storage` immediately after construction.
+
+### Reload smoke transcript (kokonoe, 2026-05-12)
+
+```
+fresh state — localStorage clear, server snapshot deleted
+both tabs navigate → bootstrap fresh identity:
+  Alice: 486fc5d875b69078c68a171b2f08b74c94a317489806adbc54eb5eef8a765cd8
+  Bob:   5c94bbc16225e52f477e02c62f5f47f0d249bbee13030bbf9c1c6405406e7e6c
+Bob invite Alice → conversation appears in his sidebar
+Alice add Bob   → welcome found → joins → conversation appears
+Bob send "before reload from bob" → Alice's poll decrypts ✓
+
+localStorage at this point on Alice:
+  lattice/mls/groups = ["tQpZm-_hmUMuM7vrUHIKxg"]  ← group_id b64url
+  lattice/conversations/v1 = [{group_id_hex: b50a59...,
+                               peer_user_id_hex: 5c94bb..., label: Bob,
+                               last_seq: 1}]
+  lattice/mls/kp_ids = [...]
+
+both tabs navigate (hard reload)
+both tabs re-bootstrap → restore_kp_repo + restore_conversations
+both sidebars show "Bob" / "Alice" again ✓
+Bob send "AFTER RELOAD from bob" → Alice's poll decrypts ✓
+Alice reply "alice reply post-reload" → Bob's poll decrypts ✓
+last_seq = 3 (history of pre-reload + post-reload messages)
+```
+
+### Known gaps (still chunk D / B / E / F)
+
+- **History replay.** `last_seq` is persisted, so on reload we
+  skip past messages received before the reload. The thread
+  starts visually empty until a new message arrives. Chunk D
+  needs to fetch since=0 once on bootstrap and re-decrypt
+  + re-render the historical thread (or persist plaintexts).
+- **WebSocket push.** Still polling every 5 sec. Chunk D
+  replaces with `api::open_messages_ws` per active conversation.
+- **Contacts / onboarding.** Still "paste user_id hex" — chunk B.
+- **Server config + polish + visual.** Chunks E + F.
+- **G.3 hardware-backed keystore upgrade.** Tracked at
+  `scratch/next-session-plan.md` Track 2.
+
+### Verification
+
+- `cargo check --workspace` ✅
+- `cargo test --workspace` ✅ 200 tests pass (no regressions
+  from the new `write_to_storage` calls)
+- `cargo check --target wasm32-unknown-unknown --bin lattice-web` ✅
+- `trunk build` produces a clean dist/ bundle
+- Reload smoke verified end-to-end on two browser tabs
