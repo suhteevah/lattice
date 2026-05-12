@@ -17,7 +17,6 @@ use lattice_crypto::mls::welcome_pq::PqWelcomePayload;
 use lattice_crypto::mls::LatticeWelcome;
 use lattice_protocol::wire::{IdentityClaim, MembershipCert, SealedEnvelope, encode};
 use mls_rs_codec::{MlsDecode, MlsEncode};
-use prost::Message;
 use serde::Deserialize;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -531,24 +530,25 @@ pub async fn issue_cert(
     let cert_bytes = B64
         .decode(&parsed.cert_b64)
         .map_err(|e| format!("decode cert_b64: {e}"))?;
-    MembershipCert::decode(cert_bytes.as_slice())
-        .map_err(|e| format!("prost decode MembershipCert: {e}"))
+    lattice_protocol::wire::decode::<MembershipCert>(cert_bytes.as_slice())
+        .map_err(|e| format!("decode MembershipCert: {e}"))
 }
 
-/// Helper: Prost-encode a [`SealedEnvelope`] for transport.
+/// Helper: Cap'n Proto-encode a [`SealedEnvelope`] for transport.
 #[must_use]
 pub fn encode_sealed(envelope: &SealedEnvelope) -> Vec<u8> {
     encode(envelope)
 }
 
-/// Helper: Prost-decode a [`SealedEnvelope`] from bytes pulled out of
-/// `/group/:gid/messages`.
+/// Helper: Cap'n Proto-decode a [`SealedEnvelope`] from bytes pulled
+/// out of `/group/:gid/messages`.
 ///
 /// # Errors
 ///
-/// Returns the Prost decode error as a string.
+/// Returns the Cap'n Proto decode error as a string.
 pub fn decode_sealed(bytes: &[u8]) -> Result<SealedEnvelope, String> {
-    SealedEnvelope::decode(bytes).map_err(|e| format!("prost decode SealedEnvelope: {e}"))
+    lattice_protocol::wire::decode::<SealedEnvelope>(bytes)
+        .map_err(|e| format!("decode SealedEnvelope: {e}"))
 }
 
 /// `GET /group/:gid/messages/ws` — open a live message-subscription

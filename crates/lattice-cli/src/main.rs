@@ -222,8 +222,7 @@ async fn register(
 
 async fn register_raw(client: &reqwest::Client, server: &str, user_id: [u8; 32]) -> Result<()> {
     let claim = lattice_protocol::wire::IdentityClaim::default();
-    let mut claim_bytes = Vec::new();
-    prost::Message::encode(&claim, &mut claim_bytes)?;
+    let claim_bytes = lattice_protocol::wire::encode(&claim);
     let resp: serde_json::Value = client
         .post(format!("{server}/register"))
         .json(&serde_json::json!({

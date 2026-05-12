@@ -20,7 +20,6 @@ use crate::state::{
 };
 use lattice_protocol::sealed_sender::{ED25519_PUB_LEN, issue_cert};
 use lattice_protocol::wire::MembershipCert;
-use prost::Message;
 
 fn decode_b64<const N: usize>(s: &str) -> Result<[u8; N], (StatusCode, String)> {
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -338,13 +337,7 @@ async fn issue_cert_handler(
         ephemeral_pk.to_vec(),
         body.valid_until,
     );
-    let mut bytes = Vec::new();
-    cert.encode(&mut bytes).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("encode cert: {e}"),
-        )
-    })?;
+    let bytes = lattice_protocol::wire::encode(&cert);
     let b64 = base64::engine::general_purpose::STANDARD;
     Ok(Json(IssueCertResponse {
         cert_b64: b64.encode(&bytes),

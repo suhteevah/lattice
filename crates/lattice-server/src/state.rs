@@ -31,7 +31,6 @@ use rand::rngs::OsRng;
 use rand_core::RngCore;
 use tokio::sync::{RwLock, broadcast};
 
-use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use lattice_protocol::wire::{IdentityClaim, SealedEnvelope};
@@ -404,7 +403,7 @@ impl ServerState {
                 .values()
                 .map(|u| UserSnap {
                     user_id_b64: b64.encode(u.user_id),
-                    claim_b64: b64.encode(u.claim.encode_to_vec()),
+                    claim_b64: b64.encode(lattice_protocol::wire::encode(&u.claim)),
                     registered_at: u.registered_at,
                 })
                 .collect(),
@@ -521,8 +520,10 @@ impl ServerState {
             for u in &snap.users {
                 let user_id = decode_32(&u.user_id_b64)?;
                 let claim_bytes = b64.decode(&u.claim_b64).map_err(SnapshotError::codec)?;
-                let claim =
-                    IdentityClaim::decode(claim_bytes.as_slice()).map_err(SnapshotError::codec)?;
+                let claim = lattice_protocol::wire::decode::<IdentityClaim>(
+                    claim_bytes.as_slice(),
+                )
+                .map_err(SnapshotError::codec)?;
                 users.insert(
                     user_id,
                     RegisteredUser {

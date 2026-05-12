@@ -15,7 +15,6 @@ use crate::state::{
     register_user,
 };
 use lattice_protocol::wire::IdentityClaim;
-use prost::Message;
 
 /// Wire shape for `POST /register`.
 #[derive(Debug, Deserialize)]
@@ -53,7 +52,7 @@ async fn register_handler(
     let claim_bytes = b64
         .decode(&body.claim_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("claim_b64 decode: {e}")))?;
-    let claim = IdentityClaim::decode(claim_bytes.as_slice())
+    let claim = lattice_protocol::wire::decode::<IdentityClaim>(claim_bytes.as_slice())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("claim decode: {e}")))?;
 
     let now = chrono::Utc::now().timestamp();

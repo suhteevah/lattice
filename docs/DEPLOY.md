@@ -130,7 +130,7 @@ Verify:
 
 ```bash
 curl -s http://127.0.0.1:4443/.well-known/lattice/server | jq .
-# {"wire_version":2,
+# {"wire_version":3,
 #  "federation_pubkey_b64":"<32-byte-base64>",
 #  "server_version":"0.1.0"}
 ```

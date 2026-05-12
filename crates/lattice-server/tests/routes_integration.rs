@@ -24,7 +24,6 @@ use lattice_crypto::mls::{
 };
 use lattice_server::state::ServerState;
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
-use prost::Message;
 use rand::rngs::OsRng;
 use rand_core::RngCore;
 use tokio::net::TcpListener;
@@ -79,7 +78,7 @@ async fn well_known_returns_federation_pubkey() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["wire_version"], 2);
+    assert_eq!(r["wire_version"], 3);
     assert_eq!(r["federation_pubkey_b64"], state.federation_pubkey_b64);
 }
 
@@ -94,8 +93,7 @@ async fn register_then_publish_then_fetch_key_package() {
 
     // Register.
     let claim = lattice_protocol::wire::IdentityClaim::default();
-    let mut claim_bytes = Vec::new();
-    claim.encode(&mut claim_bytes).unwrap();
+    let claim_bytes = lattice_protocol::wire::encode(&claim);
     let r: serde_json::Value = client
         .post(format!("{base}/register"))
         .json(&serde_json::json!({
@@ -169,13 +167,18 @@ async fn commit_welcome_message_round_trip_single_server() {
     let bob_psk = LatticePskStorage::new();
     let client = reqwest::Client::new();
 
-    // Register both users (claim payload is empty placeholder here).
+    // Register both users (claim payload is a default-encoded
+    // IdentityClaim — empty bytes aren't a valid Cap'n Proto frame
+    // since v3).
+    let empty_claim = lattice_protocol::wire::encode(
+        &lattice_protocol::wire::IdentityClaim::default(),
+    );
     for user_id in [alice.credential.user_id, bob.credential.user_id] {
         let r: serde_json::Value = client
             .post(format!("{base}/register"))
             .json(&serde_json::json!({
                 "user_id_b64": B64.encode(user_id),
-                "claim_b64": B64.encode(Vec::<u8>::new()),
+                "claim_b64": B64.encode(&empty_claim),
             }))
             .send()
             .await
@@ -331,7 +334,10 @@ async fn issue_cert_returns_valid_membership_cert() {
         .await
         .unwrap();
     let cert_bytes = B64.decode(r["cert_b64"].as_str().unwrap()).unwrap();
-    let cert = lattice_protocol::wire::MembershipCert::decode(cert_bytes.as_slice()).unwrap();
+    let cert = lattice_protocol::wire::decode::<lattice_protocol::wire::MembershipCert>(
+        cert_bytes.as_slice(),
+    )
+    .unwrap();
 
     // The cert should round-trip a sealed-sender envelope verify.
     let env = lattice_protocol::sealed_sender::seal(cert, &eph_sk, b"some inner".to_vec()).unwrap();

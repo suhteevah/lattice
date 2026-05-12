@@ -26,12 +26,20 @@ use uuid::Uuid;
 /// Current wire protocol version. Bump on any breaking schema change.
 ///
 /// * v1 (M2): initial scaffolding — single-joiner PqWelcomePayload
-///   {epoch, ml_kem_ct}, no AEAD wrap.
+///   {epoch, ml_kem_ct}, no AEAD wrap. Prost wire types.
 /// * v2 (M5): multi-joiner support — PqWelcomePayload gains
 ///   `joiner_idx`, `wrap_nonce`, `wrap_ct` so one shared PSK secret
-///   can be sealed to N joiners in a single commit. See
-///   `lattice_crypto::mls::welcome_pq` module docs for the construction.
-pub const WIRE_VERSION: u32 = 2;
+///   can be sealed to N joiners in a single commit. Prost wire types.
+/// * v3 (M5): Prost → Cap'n Proto wire types. Schema at
+///   `crates/lattice-protocol/schema/lattice.capnp`; binary encoding
+///   is Cap'n Proto packed format. Identity claims, membership
+///   certs, sealed envelopes, KeyPackage / Welcome / Commit /
+///   ApplicationMessage all changed framing but kept logical
+///   structure. Internal TBS encodings in `sealed_sender` +
+///   `routes::federation` still use Prost — those are signing-
+///   transcript helpers, not wire-format types, and live in a
+///   future polish pass.
+pub const WIRE_VERSION: u32 = 3;
 
 /// Identifier for a Lattice user. UUIDv7 — embeds timestamp for
 /// natural ordering and debuggability.
