@@ -177,7 +177,7 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | F — Tauri desktop shell | ✅ shipped 2026-05-12 | This session. See above + §15. |
 | G.1 — Keystore trait + DPAPI Windows impl | ✅ shipped 2026-05-12 | `lattice-media::keystore` + 5 IPC commands. See §16, DECISIONS §D-26. |
 | G.2 — Linux Secret Service + macOS Keychain | ✅ shipped 2026-05-12 | OS-keychain seal on all 3 desktops. See §17. |
-| G.3 (Windows) — TPM 2.0 wrap via NCrypt `MS_PLATFORM_CRYPTO_PROVIDER` | ✅ shipped 2026-05-12 | `TpmWindowsKeystore`. Persistent RSA-2048 wrap key + per-blob ChaCha20-Poly1305. New `KeystoreError::TpmUnavailable` for fallback. Hardware-test deferred — kokonoe's TPM not provisioned. See §24. |
+| G.3 (Windows) — TPM 2.0 wrap via NCrypt `MS_PLATFORM_CRYPTO_PROVIDER` | ✅ shipped 2026-05-12 | `TpmWindowsKeystore`. Persistent RSA-2048 wrap key + per-blob ChaCha20-Poly1305. New `KeystoreError::TpmUnavailable` for fallback. Hardware-smoke target: satibook (kokonoe TPM is intentionally disabled). See §24. |
 | G.3 (macOS / Linux) — Secure Enclave + tss-esapi opt-in | ⬜ | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
 | Chat chunks A + C — sidebar/thread/composer + real DM flow | ✅ shipped 2026-05-12 | End-to-end MLS chat verified across two browser tabs. See §17 + §18. |
 | Chat group-state persistence — chat survives page reload | ✅ shipped 2026-05-12 | localStorage-backed MLS group + KP + convo index. See §19. |
@@ -2352,22 +2352,29 @@ crates/lattice-media/Cargo.toml                    chacha20poly1305 → [deps]
 `cargo test -p lattice-media --lib`: **40 passed, 1 ignored**.
 
 The 6 TPM unit tests pass via the `tpm_available()` guard —
-kokonoe's TPM returns `NCryptOpenStorageProvider: 0x80090030`
-("device is not ready"). Each test logs
-`skipping <name>: no TPM 2.0` to stderr. **The seal / unseal /
-sign-against-real-TPM paths have not been exercised on real
-hardware on this box.** Need a Windows host where `Get-Tpm`
-reports a provisioned chip to validate end-to-end.
+kokonoe's TPM is **intentionally disabled in firmware**, so
+`NCryptOpenStorageProvider` returns `0x80090030`. Each test logs
+`skipping <name>: no TPM 2.0` to stderr. The seal / unseal /
+sign-against-real-TPM FFI paths have not been exercised on real
+hardware on kokonoe — that's expected.
+
+**Hardware-smoke host:** **satibook** has a provisioned TPM 2.0.
+Run `cargo test -p lattice-media --lib windows_tpm -- --nocapture`
+there to exercise the full FFI path. That's the gating step
+before flipping `lattice-desktop::build_keystore()` to TPM as the
+Windows default.
 
 `tpm_unavailable_path_returns_typed_error` is `#[ignore]`-gated —
-run it on a TPM-less host to confirm the fallback signal.
+run it on a TPM-less host (kokonoe with TPM-disabled qualifies)
+to confirm the fallback signal.
 
 ### Caveats / follow-ups
 
 - Hardware verification on a real TPM 2.0 chip is the gating
   step before flipping the desktop default to `TpmWindowsKeystore`.
+  Smoke target: satibook (kokonoe TPM is intentionally disabled).
   `lattice-desktop::build_keystore()` still constructs the DPAPI
-  `WindowsKeystore`; switch is a one-line change once a hardware
+  `WindowsKeystore`; switch is a one-line change once the satibook
   smoke passes.
 - Not PCR-bound. Sealing to PCRs (so a firmware tamper kills the
   wrap key) is out of scope for G.3 per

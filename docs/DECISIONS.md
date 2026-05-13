@@ -1046,9 +1046,10 @@ signals to callers that they should fall back to
 fallback for boxes where the TPM is absent or unprovisioned.
 The desktop default (`build_keystore()` selection) still
 constructs DPAPI; flipping to TPM is gated on a hardware
-smoke against a real TPM 2.0 chip — kokonoe's TPM is not
-provisioned for the Platform Crypto Provider so the 6 TPM
-unit tests skip cleanly. See HANDOFF §24.
+smoke against a real TPM 2.0 chip on satibook — kokonoe's
+TPM is intentionally disabled in firmware, so the 6 TPM
+unit tests skip cleanly there (expected outcome, not a
+failure). See HANDOFF §24.
 
 The RAM-window property from the original trade-off is
 unchanged: TPM never sees the identity secret bytes, only
