@@ -42,6 +42,7 @@ use lattice_crypto::mls::{
     create_group_with_storage, decrypt, encrypt_application, generate_key_package,
     load_group_with_storage, process_welcome_with_storage,
 };
+use lattice_protocol::server_state::ServerStateOp;
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -55,6 +56,29 @@ use crate::storage::{
 
 /// 16-byte deterministic group id derived from sorted user_ids.
 pub type GroupId = [u8; 16];
+
+/// What kind of conversation this is. Distinguishes between
+/// plain 1:1 DMs, N-party groups, and Discord-style
+/// server-membership groups for sidebar grouping + thread
+/// filtering (ServerStateOps don't render in the thread).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConvoKind {
+    /// 1:1 DM with deterministic-hash group_id (chunk C).
+    OneOnOne,
+    /// N-party group with random group_id (chunk 1).
+    NamedGroup,
+    /// Discord-style server-membership group (chunk 2 first cut).
+    /// `server_name` lives here so the sidebar can render
+    /// "★ server_name" without re-decrypting Init.
+    ServerMembership { server_name: String },
+}
+
+impl Default for ConvoKind {
+    fn default() -> Self {
+        Self::OneOnOne
+    }
+}
 
 /// Per-conversation MLS state.
 pub struct ConvoState {
@@ -71,6 +95,9 @@ pub struct ConvoState {
     pub psk: LatticePskStorage,
     /// Highest server sequence number consumed by `poll_messages`.
     pub last_seq: u64,
+    /// What this conversation is — 1:1 / N-party / server. Drives
+    /// sidebar treatment + ServerStateOp filtering in the thread.
+    pub kind: ConvoKind,
 }
 
 /// Persisted shape for the per-conversation chat metadata
@@ -87,6 +114,11 @@ struct ConvoRecord {
     label: String,
     /// Highest server sequence number consumed so far.
     last_seq: u64,
+    /// Kind of conversation. Defaults to `OneOnOne` for blobs
+    /// persisted before chunk 2 — they remain functional 1:1 DMs
+    /// after the upgrade.
+    #[serde(default)]
+    kind: ConvoKind,
 }
 
 const CONVOS_KEY: &str = "lattice/conversations/v1";
@@ -352,6 +384,12 @@ impl ChatState {
                     group,
                     psk,
                     last_seq: 0,
+                    // We don't know yet whether this is an
+                    // N-party group or a server-membership group;
+                    // the first ServerStateOp::Init decrypt in
+                    // poll_all will upgrade the kind to
+                    // `ServerMembership` if applicable.
+                    kind: ConvoKind::NamedGroup,
                 },
             );
             persist_convo_record(&ConvoRecord {
@@ -359,6 +397,7 @@ impl ChatState {
                 peer_user_id_hex: hex::encode(peer_user_id),
                 label,
                 last_seq: 0,
+                kind: ConvoKind::NamedGroup,
             })?;
             log(format!(
                 "chat: auto-joined group {}",
@@ -405,6 +444,7 @@ impl ChatState {
                 LocalStorageGroupStateStorage,
             ) {
                 Ok(group) => {
+                    let kind = record.kind.clone();
                     active.insert(
                         group_id,
                         ConvoState {
@@ -413,6 +453,7 @@ impl ChatState {
                             group,
                             psk,
                             last_seq: record.last_seq,
+                            kind,
                         },
                     );
                     surviving.push(record);
@@ -508,6 +549,7 @@ impl ChatState {
                         group,
                         psk,
                         last_seq: 0,
+                        kind: ConvoKind::OneOnOne,
                     },
                 );
                 persist_convo_record(&ConvoRecord {
@@ -515,6 +557,7 @@ impl ChatState {
                     peer_user_id_hex: hex::encode(peer_user_id),
                     label: label.clone(),
                     last_seq: 0,
+                    kind: ConvoKind::OneOnOne,
                 })?;
                 return Ok(group_id);
             }
@@ -573,6 +616,7 @@ impl ChatState {
                 group,
                 psk,
                 last_seq: 0,
+                kind: ConvoKind::OneOnOne,
             },
         );
         persist_convo_record(&ConvoRecord {
@@ -580,6 +624,7 @@ impl ChatState {
             peer_user_id_hex: hex::encode(peer_user_id),
             label: label.clone(),
             last_seq: 0,
+            kind: ConvoKind::OneOnOne,
         })?;
         Ok(group_id)
     }
@@ -710,6 +755,7 @@ impl ChatState {
                 group,
                 psk,
                 last_seq: 0,
+                kind: ConvoKind::NamedGroup,
             },
         );
         persist_convo_record(&ConvoRecord {
@@ -717,6 +763,144 @@ impl ChatState {
             peer_user_id_hex: hex::encode(peer_user_id_for_record),
             label,
             last_seq: 0,
+            kind: ConvoKind::NamedGroup,
+        })?;
+        Ok(group_id)
+    }
+
+    /// Create a Discord-style server. Reuses the N-party group
+    /// machinery underneath — a server-membership group is just
+    /// an MLS group whose first application message is a
+    /// `ServerStateOp::Init`. Subsequent app messages on this
+    /// group are admin events (`AddChannel`, `RenameServer`, …)
+    /// rather than chat plaintext; the UI hides them from the
+    /// thread.
+    ///
+    /// For chunk 2 first cut the server-membership group also
+    /// acts as the implicit "#general" channel — any non-Op
+    /// plaintext sent here renders in the thread. Real
+    /// channel-per-group separation lands in chunk 2.5.
+    ///
+    /// # Errors
+    ///
+    /// Same surface as `create_group_conversation` plus failures
+    /// to encode / publish the `Init` op.
+    pub async fn create_server(
+        &self,
+        server_name: String,
+        peers: Vec<[u8; USER_ID_LEN]>,
+        log: impl Fn(String) + Copy,
+    ) -> Result<GroupId, String> {
+        if peers.is_empty() {
+            return Err("create_server: at least one peer required".to_string());
+        }
+        let my_user_id = self.require_my_user_id()?;
+        for peer in &peers {
+            if peer == &my_user_id {
+                return Err("can't include yourself as a peer".to_string());
+            }
+        }
+        let mut deduped: Vec<[u8; USER_ID_LEN]> = Vec::with_capacity(peers.len());
+        for p in &peers {
+            if !deduped.contains(p) {
+                deduped.push(*p);
+            }
+        }
+        let peers = deduped;
+
+        let mut group_id = [0u8; 16];
+        OsRng.fill_bytes(&mut group_id);
+        log(format!(
+            "chat: create server {server_name:?} peers={} sid={}",
+            peers.len(),
+            hex::encode(group_id),
+        ));
+
+        let mut peer_kp_bytes: Vec<Vec<u8>> = Vec::with_capacity(peers.len());
+        for (idx, peer) in peers.iter().enumerate() {
+            let kp = api::fetch_key_package(&self.server_url, peer)
+                .await
+                .map_err(|e| format!("fetch KP for peer #{idx}: {e}"))?;
+            peer_kp_bytes.push(kp);
+        }
+
+        let (mut group, commit_bytes, welcomes) = {
+            let guard = self.identity.lock().map_err(poisoned)?;
+            let identity = guard
+                .as_ref()
+                .ok_or_else(|| "identity not bootstrapped".to_string())?;
+            let psk = LatticePskStorage::new();
+            let mut g = create_group_with_storage(
+                identity,
+                psk.clone(),
+                &group_id,
+                LocalStorageGroupStateStorage,
+            )
+            .map_err(|e| format!("create_group: {e}"))?;
+            let kp_refs: Vec<&[u8]> = peer_kp_bytes.iter().map(Vec::as_slice).collect();
+            let commit_output =
+                add_members(&mut g, &kp_refs).map_err(|e| format!("add_members: {e}"))?;
+            (g, commit_output.commit, commit_output.welcomes)
+        };
+
+        let peer_refs: Vec<&[u8; USER_ID_LEN]> = peers.iter().collect();
+        let zipped: Vec<(&lattice_crypto::mls::LatticeWelcome, &[u8; USER_ID_LEN])> = welcomes
+            .iter()
+            .zip(peer_refs.iter().copied())
+            .collect();
+        let epoch = welcomes[0].pq_payload.epoch;
+        let accepted = api::submit_commit_multi(
+            &self.server_url,
+            &group_id,
+            epoch,
+            &commit_bytes,
+            &zipped,
+        )
+        .await?;
+        log(format!("chat: server accepted {accepted} welcome(s) for server"));
+        apply_commit(&mut group).map_err(|e| format!("apply_commit: {e}"))?;
+
+        // Now publish the Init op as the first application message
+        // in the server-membership group. mls-rs needs the group at
+        // its post-commit epoch (which apply_commit just gave us).
+        let init = ServerStateOp::Init {
+            server_name: server_name.clone(),
+            admins: vec![hex::encode(my_user_id)],
+            channels: Vec::new(),
+        };
+        let init_bytes = init
+            .encode()
+            .map_err(|e| format!("encode Init op: {e}"))?;
+        let init_ct = encrypt_application(&mut group, &init_bytes)
+            .map_err(|e| format!("encrypt Init: {e}"))?;
+        let init_seq = api::publish_message(&self.server_url, &group_id, &init_ct).await?;
+        log(format!("chat: published Init op seq={init_seq}"));
+
+        // Persist the convo with kind=ServerMembership. The
+        // creator's own poll loop won't decrypt its outgoing
+        // Init (MLS generation tracking), but we already know
+        // the server_name locally.
+        let psk = LatticePskStorage::new();
+        let peer_user_id_for_record = peers[0];
+        self.active.lock().map_err(poisoned)?.insert(
+            group_id,
+            ConvoState {
+                peer_user_id: peer_user_id_for_record,
+                label: server_name.clone(),
+                group,
+                psk,
+                last_seq: 0,
+                kind: ConvoKind::ServerMembership {
+                    server_name: server_name.clone(),
+                },
+            },
+        );
+        persist_convo_record(&ConvoRecord {
+            group_id_hex: hex::encode(group_id),
+            peer_user_id_hex: hex::encode(peer_user_id_for_record),
+            label: server_name.clone(),
+            last_seq: 0,
+            kind: ConvoKind::ServerMembership { server_name },
         })?;
         Ok(group_id)
     }
@@ -774,6 +958,11 @@ impl ChatState {
             if envelopes.is_empty() {
                 continue;
             }
+            // Per-conversation classification flag — set to true
+            // when at least one decrypted message in this batch
+            // was a `ServerStateOp::Init`, so we know to upgrade
+            // the convo's kind to `ServerMembership`.
+            let mut detected_server_kind: Option<ConvoKind> = None;
             let plaintexts: Vec<(u64, Vec<u8>)> = {
                 let mut active = self.active.lock().map_err(poisoned)?;
                 let Some(convo) = active.get_mut(&gid) else {
@@ -782,12 +971,28 @@ impl ChatState {
                 let mut pts = Vec::with_capacity(envelopes.len());
                 for env in envelopes {
                     match decrypt(&mut convo.group, &env.envelope) {
-                        Ok(pt) => pts.push((env.seq, pt)),
+                        Ok(pt) => {
+                            // Try ServerStateOp first. If it
+                            // parses, it's an admin event — never
+                            // render as chat plaintext.
+                            if let Some(op) = ServerStateOp::try_decode(&pt) {
+                                if let ServerStateOp::Init { server_name, .. } = &op {
+                                    detected_server_kind = Some(ConvoKind::ServerMembership {
+                                        server_name: server_name.clone(),
+                                    });
+                                    convo.kind = ConvoKind::ServerMembership {
+                                        server_name: server_name.clone(),
+                                    };
+                                    convo.label = server_name.clone();
+                                }
+                                // TODO chunk 2.5: process
+                                // AddChannel / RemoveChannel /
+                                // PromoteAdmin / etc. ops here.
+                                continue;
+                            }
+                            pts.push((env.seq, pt));
+                        }
                         Err(e) => {
-                            // Skip undecryptable messages (typically our
-                            // own outgoing echoed back; the MLS state
-                            // can't decrypt its own ciphertext). Log so
-                            // unexpected failures are visible.
                             web_sys::console::warn_1(
                                 &format!(
                                     "chat: skipped seq={} group={} ({} bytes): {}",
@@ -805,9 +1010,15 @@ impl ChatState {
                 convo.last_seq = latest_seq;
                 pts
             };
-            // Persist the new last_seq so a reload picks up where
-            // we left off and doesn't replay the entire history.
             let _ = update_convo_last_seq(&gid, latest_seq);
+            // If we classified the convo as a server during this
+            // batch, persist the upgraded kind + new label so the
+            // sidebar renders correctly after reload.
+            if let Some(kind) = detected_server_kind {
+                if let ConvoKind::ServerMembership { server_name } = &kind {
+                    let _ = update_convo_kind(&gid, kind.clone(), Some(server_name.clone()));
+                }
+            }
             for (seq, pt) in plaintexts {
                 out.push(PolledMessage {
                     group_id: gid,
@@ -832,6 +1043,7 @@ impl ChatState {
                         group_id: *gid,
                         peer_user_id: c.peer_user_id,
                         label: c.label.clone(),
+                        kind: c.kind.clone(),
                     })
                     .collect()
             })
@@ -931,6 +1143,37 @@ fn update_convo_last_seq(gid: &GroupId, last_seq: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Bump a persisted convo record's `kind` (and optionally its
+/// `label`). Called when classify-on-decrypt upgrades a freshly-
+/// joined group from `NamedGroup` to `ServerMembership`.
+fn update_convo_kind(
+    gid: &GroupId,
+    kind: ConvoKind,
+    new_label: Option<String>,
+) -> Result<(), String> {
+    let target = hex::encode(gid);
+    let mut records = load_convo_index().unwrap_or_default();
+    let mut changed = false;
+    for r in &mut records {
+        if r.group_id_hex == target {
+            if r.kind != kind {
+                r.kind = kind.clone();
+                changed = true;
+            }
+            if let Some(label) = &new_label {
+                if &r.label != label {
+                    r.label = label.clone();
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        save_convo_index(&records)?;
+    }
+    Ok(())
+}
+
 async fn wait_ms(ms: u32) {
     // setTimeout-backed sleep for the in-flight bootstrap poller.
     // Same shape as `chat::sleep`; duplicated here to avoid a
@@ -979,8 +1222,12 @@ pub struct ConversationSummary {
     pub group_id: GroupId,
     /// Peer's user_id (for display + lookup).
     pub peer_user_id: [u8; USER_ID_LEN],
-    /// User-supplied label.
+    /// User-supplied label (or server name for server-membership
+    /// kind).
     pub label: String,
+    /// Kind of conversation — drives sidebar treatment (server
+    /// entries render with a ★ prefix).
+    pub kind: ConvoKind,
 }
 
 /// Derive the canonical 1:1 group_id from sorted user_ids.

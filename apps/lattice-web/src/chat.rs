@@ -43,7 +43,7 @@ use lattice_crypto::credential::USER_ID_LEN;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
-use crate::chat_state::{ChatState, ConversationSummary, GroupId, PolledMessage};
+use crate::chat_state::{ChatState, ConversationSummary, ConvoKind, GroupId, PolledMessage};
 
 /// One conversation in the sidebar.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +54,9 @@ pub struct Conversation {
     pub name: String,
     /// Last message preview text.
     pub last_preview: String,
+    /// Kind of conversation — drives whether the sidebar entry
+    /// renders with a ★ server prefix.
+    pub kind: ConvoKind,
 }
 
 impl Conversation {
@@ -62,6 +65,7 @@ impl Conversation {
             id: hex::encode(s.group_id),
             name: s.label.clone(),
             last_preview: String::new(),
+            kind: s.kind.clone(),
         }
     }
 }
@@ -109,6 +113,7 @@ pub fn ChatShell(
     let my_user_id_hex: RwSignal<String> = RwSignal::new(String::new());
     let add_form_open = RwSignal::new(false);
     let new_group_form_open = RwSignal::new(false);
+    let new_server_form_open = RwSignal::new(false);
     let bootstrap_complete = RwSignal::new(false);
 
     // Bootstrap identity once at component mount. Direct spawn_local
@@ -141,7 +146,9 @@ pub fn ChatShell(
     // Background polling task — single spawn_local at mount that
     // loops with a setTimeout-based sleep. Each iteration polls
     // every active conversation; new messages land in the messages
-    // signal.
+    // signal AND the conversations sidebar is re-refreshed in case
+    // a ServerStateOp::Init classify upgraded a convo's kind from
+    // NamedGroup to ServerMembership.
     {
         let state = state.clone();
         spawn_local(async move {
@@ -155,6 +162,16 @@ pub fn ChatShell(
                         if !polled.is_empty() {
                             apply_polled_messages(polled, &messages);
                         }
+                        // Re-snapshot conversation kinds (e.g.
+                        // post-Init classification upgrade) into
+                        // the sidebar signal. Inline closure here
+                        // because `refresh_conversations` is
+                        // defined further down in the component
+                        // body, after this spawn_local.
+                        let summaries = state.conversation_summaries();
+                        conversations.set(
+                            summaries.iter().map(Conversation::from_summary).collect(),
+                        );
                     }
                     Err(e) => {
                         web_sys::console::warn_1(
@@ -254,6 +271,67 @@ pub fn ChatShell(
                     }
                     Err(e) => {
                         set_status.set(format!("chat: add_conversation failed: {e}"));
+                    }
+                }
+            });
+        }
+    };
+
+    // New-server submit handler. Same textarea-of-peers shape as
+    // the New Group form, but calls `ChatState::create_server`
+    // which publishes a `ServerStateOp::Init` as the first app
+    // message in the new group so joiners can classify it as a
+    // server-membership group on first decrypt.
+    let on_new_server_submit = {
+        let state = state.clone();
+        let refresh = refresh_conversations.clone();
+        move |label: String, peers_text: String| {
+            let state = state.clone();
+            let refresh = refresh.clone();
+            spawn_local(async move {
+                let server_name = label.trim().to_string();
+                if server_name.is_empty() {
+                    set_status.set("chat: server needs a name".to_string());
+                    return;
+                }
+                let mut peers: Vec<[u8; lattice_crypto::credential::USER_ID_LEN]> = Vec::new();
+                for (idx, raw_line) in peers_text.lines().enumerate() {
+                    let line = raw_line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    match parse_user_id(line) {
+                        Ok(v) => peers.push(v),
+                        Err(e) => {
+                            set_status.set(format!(
+                                "chat: bad peer on line {} ({e})",
+                                idx + 1
+                            ));
+                            return;
+                        }
+                    }
+                }
+                if peers.is_empty() {
+                    set_status.set("chat: paste at least one peer user_id".to_string());
+                    return;
+                }
+                set_status.set(format!(
+                    "chat: creating server {server_name:?} with {} peer(s)…",
+                    peers.len()
+                ));
+                let log = |msg: String| {
+                    web_sys::console::log_1(&msg.into());
+                };
+                match state.create_server(server_name.clone(), peers, log).await {
+                    Ok(gid) => {
+                        refresh();
+                        let gid_hex = hex::encode(gid);
+                        current_view.set(ChatView::Conversation(gid_hex.clone()));
+                        new_server_form_open.set(false);
+                        set_status.set(format!("chat: server ready ({server_name})"));
+                    }
+                    Err(e) => {
+                        set_status.set(format!("chat: create_server failed: {e}"));
                     }
                 }
             });
@@ -375,8 +453,10 @@ pub fn ChatShell(
                 current_view=current_view
                 add_form_open=add_form_open
                 new_group_form_open=new_group_form_open
+                new_server_form_open=new_server_form_open
                 on_add=on_add_submit
                 on_new_group=on_new_group_submit
+                on_new_server=on_new_server_submit
                 my_user_id_hex=my_user_id_hex.read_only()
                 bootstrap_complete=bootstrap_complete.read_only()
             />
@@ -405,19 +485,22 @@ pub fn ChatShell(
 }
 
 #[component]
-fn ConversationSidebar<F, G>(
+fn ConversationSidebar<F, G, S>(
     conversations: RwSignal<Vec<Conversation>>,
     current_view: RwSignal<ChatView>,
     add_form_open: RwSignal<bool>,
     new_group_form_open: RwSignal<bool>,
+    new_server_form_open: RwSignal<bool>,
     on_add: F,
     on_new_group: G,
+    on_new_server: S,
     my_user_id_hex: ReadSignal<String>,
     bootstrap_complete: ReadSignal<bool>,
 ) -> impl IntoView
 where
     F: Fn(String, String) + Clone + Send + Sync + 'static,
     G: Fn(String, String) + Clone + Send + Sync + 'static,
+    S: Fn(String, String) + Clone + Send + Sync + 'static,
 {
     view! {
         <aside class="chat-sidebar" aria-label="conversations">
@@ -440,6 +523,7 @@ where
                         class="chat-sidebar-add chat-sidebar-newgroup"
                         on:click=move |_| {
                             add_form_open.set(false);
+                            new_server_form_open.set(false);
                             new_group_form_open.update(|b| *b = !*b);
                         }
                         aria-label="new group"
@@ -447,6 +531,19 @@ where
                         disabled=move || !bootstrap_complete.get()
                     >
                         "👥"
+                    </button>
+                    <button
+                        class="chat-sidebar-add chat-sidebar-newserver"
+                        on:click=move |_| {
+                            add_form_open.set(false);
+                            new_group_form_open.set(false);
+                            new_server_form_open.update(|b| *b = !*b);
+                        }
+                        aria-label="new server"
+                        title="New Discord-style server"
+                        disabled=move || !bootstrap_complete.get()
+                    >
+                        "★"
                     </button>
                 </div>
             </header>
@@ -471,6 +568,15 @@ where
                     on_cancel=move || new_group_form_open.set(false)
                 />
             </Show>
+            <Show
+                when=move || new_server_form_open.get()
+                fallback=|| view! {}
+            >
+                <NewServerForm
+                    on_submit=on_new_server.clone()
+                    on_cancel=move || new_server_form_open.set(false)
+                />
+            </Show>
             <ul class="chat-conversation-list">
                 {move || {
                     let convos = conversations.get();
@@ -487,6 +593,12 @@ where
                                 ChatView::Conversation(ref id) if *id == c.id,
                             );
                             let id_for_click = c.id.clone();
+                            let kind_prefix = match &c.kind {
+                                ConvoKind::ServerMembership { .. } => "★ ",
+                                ConvoKind::NamedGroup => "# ",
+                                ConvoKind::OneOnOne => "",
+                            };
+                            let display_name = format!("{kind_prefix}{}", c.name);
                             view! {
                                 <li
                                     class=move || if active { "chat-conversation-item active" } else { "chat-conversation-item" }
@@ -495,7 +607,7 @@ where
                                         class="chat-conversation-button"
                                         on:click=move |_| current_view.set(ChatView::Conversation(id_for_click.clone()))
                                     >
-                                        <span class="chat-conversation-name">{c.name.clone()}</span>
+                                        <span class="chat-conversation-name">{display_name}</span>
                                         <span class="chat-conversation-preview muted">
                                             {if c.last_preview.is_empty() { "no messages yet".to_string() } else { c.last_preview.clone() }}
                                         </span>
@@ -689,6 +801,67 @@ where
             <div class="chat-add-actions">
                 <button class="button chat-add-submit" type="submit">
                     "Create group"
+                </button>
+                <button
+                    class="button chat-add-cancel"
+                    type="button"
+                    on:click=move |_| on_cancel()
+                >
+                    "Cancel"
+                </button>
+            </div>
+        </form>
+    }
+}
+
+#[component]
+fn NewServerForm<F, C>(on_submit: F, on_cancel: C) -> impl IntoView
+where
+    F: Fn(String, String) + Clone + Send + Sync + 'static,
+    C: Fn() + Send + Sync + 'static + Copy,
+{
+    let label_input: NodeRef<leptos::html::Input> = NodeRef::new();
+    let peers_input: NodeRef<leptos::html::Textarea> = NodeRef::new();
+    let on_submit_for_submit = on_submit.clone();
+    let submit = move |ev: SubmitEvent| {
+        ev.prevent_default();
+        let label = label_input
+            .get()
+            .map(|n| n.unchecked_into::<HtmlInputElement>().value())
+            .unwrap_or_default();
+        let peers = peers_input
+            .get()
+            .map(|n| n.unchecked_into::<web_sys::HtmlTextAreaElement>().value())
+            .unwrap_or_default();
+        on_submit_for_submit(label, peers);
+    };
+    view! {
+        <form class="chat-add-form chat-add-form-group" on:submit=submit>
+            <label for="chat-newserver-label" class="chat-add-label">
+                "Server name (★ Discord-style)"
+            </label>
+            <input
+                node_ref=label_input
+                id="chat-newserver-label"
+                class="chat-add-input"
+                type="text"
+                placeholder="Friends"
+                autocomplete="off"
+            />
+            <label for="chat-newserver-peers" class="chat-add-label">
+                "Initial members (one hex per line)"
+            </label>
+            <textarea
+                node_ref=peers_input
+                id="chat-newserver-peers"
+                class="chat-add-input chat-add-input-peers"
+                placeholder="0123abcd…\n4567efgh…"
+                rows="4"
+                autocomplete="off"
+            ></textarea>
+            <div class="chat-add-actions">
+                <button class="button chat-add-submit" type="submit">
+                    "Create server"
                 </button>
                 <button
                     class="button chat-add-cancel"

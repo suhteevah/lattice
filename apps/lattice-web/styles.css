@@ -528,6 +528,16 @@ body {
     font-size: 0.9rem;
 }
 
+.chat-sidebar-newserver {
+    font-size: 0.95rem;
+    color: var(--lattice-amber);
+}
+
+.chat-sidebar-newserver:hover {
+    color: var(--lattice-lilac-400);
+    border-color: var(--lattice-amber);
+}
+
 .chat-add-form-group {
     /* Group form is a little taller because of the textarea. */
     padding-bottom: 1rem;

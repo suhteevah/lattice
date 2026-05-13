@@ -17,6 +17,7 @@
 
 pub mod lattice_capnp;
 pub mod sealed_sender;
+pub mod server_state;
 pub mod sig;
 pub mod wire;
 
