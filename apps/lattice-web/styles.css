@@ -506,6 +506,11 @@ body {
     justify-content: space-between;
 }
 
+.chat-sidebar-header-actions {
+    display: flex;
+    gap: 0.25rem;
+}
+
 .chat-sidebar-add {
     background: transparent;
     color: var(--lattice-lilac-400);
@@ -517,6 +522,22 @@ body {
     font-size: 1rem;
     cursor: pointer;
     padding: 0;
+}
+
+.chat-sidebar-newgroup {
+    font-size: 0.9rem;
+}
+
+.chat-add-form-group {
+    /* Group form is a little taller because of the textarea. */
+    padding-bottom: 1rem;
+}
+
+.chat-add-input-peers {
+    resize: vertical;
+    min-height: 4rem;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    line-height: 1.4;
 }
 
 .chat-sidebar-add:hover:not([disabled]) {

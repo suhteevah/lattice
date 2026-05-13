@@ -253,6 +253,153 @@ pub async fn submit_commit(
     Ok(parsed.welcomes_accepted)
 }
 
+/// Variant of [`submit_commit`] that ships N welcomes in one POST.
+///
+/// Used by the chat shell's group-creation flow where
+/// `lattice_crypto::mls::add_members` returns one
+/// [`LatticeWelcome`] per joiner — sending each in its own HTTP
+/// round trip would be N×latency on a slow link.
+///
+/// `welcomes` is `(welcome, joiner_user_id)` paired in the same
+/// order `add_members` returned the welcome bundle.
+///
+/// # Errors
+///
+/// HTTP non-200, body-encode failure, or response-decode failure.
+pub async fn submit_commit_multi(
+    server: &str,
+    group_id: &[u8; 16],
+    epoch: u64,
+    commit_bytes: &[u8],
+    welcomes: &[(&LatticeWelcome, &[u8; 32])],
+) -> Result<usize, String> {
+    if welcomes.is_empty() {
+        return Err("submit_commit_multi: empty welcomes".to_string());
+    }
+    let mut welcomes_json = Vec::with_capacity(welcomes.len());
+    for (welcome, user_id) in welcomes {
+        let pq_bytes = welcome
+            .pq_payload
+            .mls_encode_to_vec()
+            .map_err(|e| format!("mls-encode pq_payload: {e}"))?;
+        welcomes_json.push(serde_json::json!({
+            "joiner_user_id_b64": B64.encode(user_id.as_slice()),
+            "mls_welcome_b64": B64.encode(&welcome.mls_welcome),
+            "pq_payload_b64": B64.encode(&pq_bytes),
+        }));
+    }
+    let body = serde_json::json!({
+        "epoch": epoch,
+        "commit_b64": B64.encode(commit_bytes),
+        "welcomes": welcomes_json,
+    });
+    let response = Request::post(&format!(
+        "{server}/group/{}/commit",
+        B64URL.encode(group_id)
+    ))
+    .json(&body)
+    .map_err(|e| format!("build commit-multi request: {e}"))?
+    .send()
+    .await
+    .map_err(|e| format!("send commit-multi: {e}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "commit-multi HTTP {} ({})",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+
+    let parsed: CommitResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("decode commit-multi response: {e}"))?;
+    Ok(parsed.welcomes_accepted)
+}
+
+/// Server's pending-welcomes index entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PendingWelcomeEntry {
+    /// Group id (URL-safe base64, no padding).
+    pub group_id_b64url: String,
+    /// MLS epoch this welcome lands the joiner at.
+    #[allow(dead_code)]
+    pub epoch: u64,
+    /// Base64 (standard) MLS Welcome bytes.
+    pub mls_welcome_b64: String,
+    /// Base64 (standard) PqWelcomePayload bytes.
+    pub pq_payload_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingWelcomesResponse {
+    welcomes: Vec<PendingWelcomeEntry>,
+}
+
+/// `GET /welcomes/pending/:user_id_b64url` — enumerate every group
+/// on the server that has a pending welcome addressed to me. Used
+/// by the chat shell at bootstrap to auto-discover N-party group
+/// invites whose random group_id the joiner can't derive locally.
+///
+/// # Errors
+///
+/// HTTP non-200, response-decode failure, or base64 conversion
+/// errors at decode time.
+pub async fn fetch_pending_welcomes(
+    server: &str,
+    user_id: &[u8; 32],
+) -> Result<Vec<PendingWelcomeEntry>, String> {
+    let response = Request::get(&format!(
+        "{server}/welcomes/pending/{}",
+        B64URL.encode(user_id)
+    ))
+    .send()
+    .await
+    .map_err(|e| format!("send pending_welcomes: {e}"))?;
+    if !response.ok() {
+        return Err(format!("pending_welcomes HTTP {}", response.status()));
+    }
+    let parsed: PendingWelcomesResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("decode pending_welcomes: {e}"))?;
+    Ok(parsed.welcomes)
+}
+
+/// Decode a `PendingWelcomeEntry` into a `LatticeWelcome` ready
+/// for `process_welcome_with_storage`. Pulled out so callers can
+/// also inspect the group_id_b64url separately.
+///
+/// # Errors
+///
+/// Base64 decode or MLS-codec decode failure.
+pub fn pending_welcome_into_lattice(
+    entry: &PendingWelcomeEntry,
+) -> Result<(Vec<u8>, LatticeWelcome), String> {
+    let group_id_raw = B64URL
+        .decode(entry.group_id_b64url.as_bytes())
+        .map_err(|e| format!("group_id_b64url decode: {e}"))?;
+    let mls_welcome = B64
+        .decode(entry.mls_welcome_b64.as_bytes())
+        .map_err(|e| format!("mls_welcome_b64 decode: {e}"))?;
+    let pq_bytes = B64
+        .decode(entry.pq_payload_b64.as_bytes())
+        .map_err(|e| format!("pq_payload_b64 decode: {e}"))?;
+    let pq_payload = PqWelcomePayload::mls_decode(&mut pq_bytes.as_slice())
+        .map_err(|e| format!("pq_payload mls-decode: {e}"))?;
+    Ok((
+        group_id_raw,
+        LatticeWelcome {
+            mls_welcome,
+            pq_payload,
+        },
+    ))
+}
+
 /// Mirror of `lattice_server::routes::groups::WelcomeResponse`.
 #[derive(Debug, Deserialize)]
 struct WelcomeResponse {

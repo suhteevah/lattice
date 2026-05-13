@@ -108,6 +108,7 @@ pub fn ChatShell(
     let current_view = RwSignal::new(ChatView::Empty);
     let my_user_id_hex: RwSignal<String> = RwSignal::new(String::new());
     let add_form_open = RwSignal::new(false);
+    let new_group_form_open = RwSignal::new(false);
     let bootstrap_complete = RwSignal::new(false);
 
     // Bootstrap identity once at component mount. Direct spawn_local
@@ -259,6 +260,66 @@ pub fn ChatShell(
         }
     };
 
+    // New-group submit handler. Parses a multi-line textarea of
+    // peer user_id hex strings (one per line, blank lines + lines
+    // starting with `#` ignored) and creates an N-party group via
+    // `ChatState::create_group_conversation`.
+    let on_new_group_submit = {
+        let state = state.clone();
+        let refresh = refresh_conversations.clone();
+        move |label: String, peers_text: String| {
+            let state = state.clone();
+            let refresh = refresh.clone();
+            spawn_local(async move {
+                let label = label.trim().to_string();
+                if label.is_empty() {
+                    set_status.set("chat: group needs a name".to_string());
+                    return;
+                }
+                let mut peers: Vec<[u8; lattice_crypto::credential::USER_ID_LEN]> = Vec::new();
+                for (idx, raw_line) in peers_text.lines().enumerate() {
+                    let line = raw_line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    match parse_user_id(line) {
+                        Ok(v) => peers.push(v),
+                        Err(e) => {
+                            set_status.set(format!(
+                                "chat: bad peer on line {} ({e})",
+                                idx + 1
+                            ));
+                            return;
+                        }
+                    }
+                }
+                if peers.is_empty() {
+                    set_status.set("chat: paste at least one peer user_id".to_string());
+                    return;
+                }
+                set_status.set(format!("chat: creating group with {} peer(s)…", peers.len()));
+                let log = |msg: String| {
+                    web_sys::console::log_1(&msg.into());
+                };
+                match state
+                    .create_group_conversation(label.clone(), peers, log)
+                    .await
+                {
+                    Ok(gid) => {
+                        refresh();
+                        let gid_hex = hex::encode(gid);
+                        current_view.set(ChatView::Conversation(gid_hex.clone()));
+                        new_group_form_open.set(false);
+                        set_status.set(format!("chat: group ready ({label})"));
+                    }
+                    Err(e) => {
+                        set_status.set(format!("chat: create_group failed: {e}"));
+                    }
+                }
+            });
+        }
+    };
+
     // Composer send handler — used by ThreadPane.
     let on_send = {
         let state = state.clone();
@@ -313,7 +374,9 @@ pub fn ChatShell(
                 conversations=conversations
                 current_view=current_view
                 add_form_open=add_form_open
+                new_group_form_open=new_group_form_open
                 on_add=on_add_submit
+                on_new_group=on_new_group_submit
                 my_user_id_hex=my_user_id_hex.read_only()
                 bootstrap_complete=bootstrap_complete.read_only()
             />
@@ -342,29 +405,50 @@ pub fn ChatShell(
 }
 
 #[component]
-fn ConversationSidebar<F>(
+fn ConversationSidebar<F, G>(
     conversations: RwSignal<Vec<Conversation>>,
     current_view: RwSignal<ChatView>,
     add_form_open: RwSignal<bool>,
+    new_group_form_open: RwSignal<bool>,
     on_add: F,
+    on_new_group: G,
     my_user_id_hex: ReadSignal<String>,
     bootstrap_complete: ReadSignal<bool>,
 ) -> impl IntoView
 where
     F: Fn(String, String) + Clone + Send + Sync + 'static,
+    G: Fn(String, String) + Clone + Send + Sync + 'static,
 {
     view! {
         <aside class="chat-sidebar" aria-label="conversations">
             <header class="chat-sidebar-header">
                 <h2>"Conversations"</h2>
-                <button
-                    class="chat-sidebar-add"
-                    on:click=move |_| add_form_open.update(|b| *b = !*b)
-                    aria-label="add conversation"
-                    disabled=move || !bootstrap_complete.get()
-                >
-                    "+"
-                </button>
+                <div class="chat-sidebar-header-actions">
+                    <button
+                        class="chat-sidebar-add"
+                        on:click=move |_| {
+                            new_group_form_open.set(false);
+                            add_form_open.update(|b| *b = !*b);
+                        }
+                        aria-label="add 1:1 conversation"
+                        title="Add 1:1 contact"
+                        disabled=move || !bootstrap_complete.get()
+                    >
+                        "+"
+                    </button>
+                    <button
+                        class="chat-sidebar-add chat-sidebar-newgroup"
+                        on:click=move |_| {
+                            add_form_open.set(false);
+                            new_group_form_open.update(|b| *b = !*b);
+                        }
+                        aria-label="new group"
+                        title="New group chat"
+                        disabled=move || !bootstrap_complete.get()
+                    >
+                        "👥"
+                    </button>
+                </div>
             </header>
             <Show
                 when=move || !my_user_id_hex.get().is_empty()
@@ -377,6 +461,15 @@ where
                 fallback=|| view! {}
             >
                 <AddConversationForm on_add=on_add.clone() on_cancel=move || add_form_open.set(false)/>
+            </Show>
+            <Show
+                when=move || new_group_form_open.get()
+                fallback=|| view! {}
+            >
+                <NewGroupForm
+                    on_submit=on_new_group.clone()
+                    on_cancel=move || new_group_form_open.set(false)
+                />
             </Show>
             <ul class="chat-conversation-list">
                 {move || {
@@ -535,6 +628,67 @@ where
             <div class="chat-add-actions">
                 <button class="button chat-add-submit" type="submit">
                     "Add"
+                </button>
+                <button
+                    class="button chat-add-cancel"
+                    type="button"
+                    on:click=move |_| on_cancel()
+                >
+                    "Cancel"
+                </button>
+            </div>
+        </form>
+    }
+}
+
+#[component]
+fn NewGroupForm<F, C>(on_submit: F, on_cancel: C) -> impl IntoView
+where
+    F: Fn(String, String) + Clone + Send + Sync + 'static,
+    C: Fn() + Send + Sync + 'static + Copy,
+{
+    let label_input: NodeRef<leptos::html::Input> = NodeRef::new();
+    let peers_input: NodeRef<leptos::html::Textarea> = NodeRef::new();
+    let on_submit_for_submit = on_submit.clone();
+    let submit = move |ev: SubmitEvent| {
+        ev.prevent_default();
+        let label = label_input
+            .get()
+            .map(|n| n.unchecked_into::<HtmlInputElement>().value())
+            .unwrap_or_default();
+        let peers = peers_input
+            .get()
+            .map(|n| n.unchecked_into::<web_sys::HtmlTextAreaElement>().value())
+            .unwrap_or_default();
+        on_submit_for_submit(label, peers);
+    };
+    view! {
+        <form class="chat-add-form chat-add-form-group" on:submit=submit>
+            <label for="chat-newgroup-label" class="chat-add-label">
+                "Group name"
+            </label>
+            <input
+                node_ref=label_input
+                id="chat-newgroup-label"
+                class="chat-add-input"
+                type="text"
+                placeholder="design team"
+                autocomplete="off"
+            />
+            <label for="chat-newgroup-peers" class="chat-add-label">
+                "Peer user_ids (one hex per line)"
+            </label>
+            <textarea
+                node_ref=peers_input
+                id="chat-newgroup-peers"
+                class="chat-add-input chat-add-input-peers"
+                placeholder="0123abcd…\n4567efgh…"
+                rows="4"
+                autocomplete="off"
+            ></textarea>
+            <div class="chat-add-actions">
+                <button class="button chat-add-submit" type="submit">
+                    "Create group"
                 </button>
                 <button
                     class="button chat-add-cancel"

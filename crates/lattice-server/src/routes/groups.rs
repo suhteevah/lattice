@@ -368,6 +368,10 @@ pub fn router() -> Router<ServerState> {
             get(welcome_handler),
         )
         .route(
+            "/welcomes/pending/{user_id_b64}",
+            get(pending_welcomes_handler),
+        )
+        .route(
             "/group/{gid_b64}/messages",
             post(publish_message_handler).get(fetch_messages_handler),
         )
@@ -377,6 +381,72 @@ pub fn router() -> Router<ServerState> {
             "/group/{gid_b64}/replication_peers",
             post(set_replication_peers_handler).get(get_replication_peers_handler),
         )
+}
+
+/// One entry in [`PendingWelcomesResponse::welcomes`].
+#[derive(Debug, Serialize)]
+pub struct PendingWelcomeEntry {
+    /// Group id (URL-safe base64, no padding).
+    pub group_id_b64url: String,
+    /// MLS epoch this welcome lands the joiner at.
+    pub epoch: u64,
+    /// Base64 (standard) MLS Welcome bytes.
+    pub mls_welcome_b64: String,
+    /// Base64 (standard) PqWelcomePayload bytes.
+    pub pq_payload_b64: String,
+}
+
+/// Response body for `GET /welcomes/pending/:user_id_b64`.
+#[derive(Debug, Serialize)]
+pub struct PendingWelcomesResponse {
+    /// All welcomes addressed to the queried user_id across every
+    /// group the server stores. Latest welcome per group_id is the
+    /// one returned (matches the per-group welcome handler's
+    /// semantics).
+    pub welcomes: Vec<PendingWelcomeEntry>,
+}
+
+/// `GET /welcomes/pending/:user_id_b64` — enumerate every group on
+/// this server that has a pending welcome addressed to the queried
+/// user_id. Used by the chat shell at bootstrap to auto-discover
+/// N-party group invites where the inviter generated a random
+/// group_id the joiner has no way to derive locally.
+///
+/// Returns one entry per (group_id, latest-epoch-welcome) pair.
+/// Welcomes that have been delivered already are still returned —
+/// idempotent re-fetch is OK because mls-rs's join only consumes
+/// the leaf init key once; the second `process_welcome` will fail
+/// cleanly with `WelcomeKeyPackageNotFound` and the client
+/// silently skips it.
+async fn pending_welcomes_handler(
+    State(state): State<ServerState>,
+    Path(user_id_b64): Path<String>,
+) -> Result<Json<PendingWelcomesResponse>, (StatusCode, String)> {
+    let user_id: [u8; 32] = decode_b64(&user_id_b64)?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let groups = state.groups.read().await;
+    let mut out: Vec<PendingWelcomeEntry> = Vec::new();
+    for (gid, log) in groups.iter() {
+        // Latest welcome wins (matches welcome_handler's iter rev).
+        let found = log.iter().rev().find_map(|entry| {
+            entry
+                .welcomes
+                .iter()
+                .find(|w| w.joiner_user_id == user_id)
+                .map(|w| (entry.epoch, w.clone()))
+        });
+        if let Some((epoch, w)) = found {
+            out.push(PendingWelcomeEntry {
+                group_id_b64url: b64url.encode(gid),
+                epoch,
+                mls_welcome_b64: b64.encode(&w.mls_welcome),
+                pq_payload_b64: b64.encode(&w.pq_payload),
+            });
+        }
+    }
+    Ok(Json(PendingWelcomesResponse { welcomes: out }))
 }
 
 /// `PUT/POST /group/:gid/replication_peers` body — list of peer

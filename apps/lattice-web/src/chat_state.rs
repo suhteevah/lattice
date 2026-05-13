@@ -38,9 +38,9 @@ use lattice_crypto::mls::cipher_suite::{LATTICE_HYBRID_V1, LatticeCryptoProvider
 use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
-    GroupHandle, LatticeIdentity, add_member, apply_commit, create_group_with_storage,
-    decrypt, encrypt_application, generate_key_package, load_group_with_storage,
-    process_welcome_with_storage,
+    GroupHandle, LatticeIdentity, add_member, add_members, apply_commit,
+    create_group_with_storage, decrypt, encrypt_application, generate_key_package,
+    load_group_with_storage, process_welcome_with_storage,
 };
 use mls_rs_core::crypto::{CipherSuiteProvider, CryptoProvider};
 use rand::RngCore;
@@ -209,6 +209,11 @@ impl ChatState {
                     // persisted index + the MLS group state in
                     // localStorage.
                     self.restore_conversations(log)?;
+                    // Also discover any pending welcomes that
+                    // arrived while we were offline (N-party
+                    // group invites with random group_ids that
+                    // we can't derive locally).
+                    self.discover_pending_welcomes(log).await?;
                     return Ok(());
                 }
             }
@@ -245,6 +250,121 @@ impl ChatState {
         persist::save(&identity, None)?;
         log("chat: persisted plaintext identity to localStorage".to_string());
         *self.identity.lock().map_err(poisoned)? = Some(identity);
+        // Newly-bootstrapped identity has no saved groups, but we
+        // still try to discover pending invites — useful when an
+        // inviter created an N-party group with random group_id
+        // while we were offline.
+        self.discover_pending_welcomes(log).await?;
+        Ok(())
+    }
+
+    /// Query the server for welcomes addressed to us across every
+    /// group, process each one we don't already have an active
+    /// conversation for, and persist + register the resulting
+    /// ConvoState. Idempotent — re-processing a welcome whose KP
+    /// has already been consumed fails cleanly inside mls-rs and
+    /// is silently skipped.
+    async fn discover_pending_welcomes(
+        &self,
+        log: impl Fn(String) + Copy,
+    ) -> Result<(), String> {
+        let my_user_id = match self.identity.lock().map_err(poisoned)?.as_ref() {
+            Some(id) => id.credential.user_id,
+            None => return Ok(()),
+        };
+        let pending = match api::fetch_pending_welcomes(&self.server_url, &my_user_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                log(format!("chat: fetch_pending_welcomes skipped ({e})"));
+                return Ok(());
+            }
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        log(format!(
+            "chat: discovered {} pending welcome(s) for us",
+            pending.len()
+        ));
+        for entry in &pending {
+            let (gid_raw, lattice_welcome) =
+                match api::pending_welcome_into_lattice(entry) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log(format!("chat: skipping malformed welcome: {e}"));
+                        continue;
+                    }
+                };
+            if gid_raw.len() != 16 {
+                log(format!(
+                    "chat: skipping welcome with wrong-length gid ({})",
+                    gid_raw.len()
+                ));
+                continue;
+            }
+            let mut group_id = [0u8; 16];
+            group_id.copy_from_slice(&gid_raw);
+            if self
+                .active
+                .lock()
+                .map_err(poisoned)?
+                .contains_key(&group_id)
+            {
+                continue;
+            }
+            let psk = LatticePskStorage::new();
+            let group = {
+                let guard = self.identity.lock().map_err(poisoned)?;
+                let identity = guard
+                    .as_ref()
+                    .ok_or_else(|| "identity not bootstrapped".to_string())?;
+                match process_welcome_with_storage(
+                    identity,
+                    psk.clone(),
+                    &lattice_welcome,
+                    LocalStorageGroupStateStorage,
+                ) {
+                    Ok(g) => {
+                        let _ = sync_kp_repo_to_storage(&identity.key_package_repo);
+                        g
+                    }
+                    Err(e) => {
+                        log(format!(
+                            "chat: skip welcome for gid={} ({e})",
+                            hex::encode(group_id)
+                        ));
+                        continue;
+                    }
+                }
+            };
+            // Without further metadata, we don't know who invited
+            // us — record a placeholder peer + a "group …" label.
+            // Chunk 2's server-membership-group message will carry
+            // the inviter's user_id + a server name. For chunk 1,
+            // the user can rename via a future settings flow.
+            let label = format!("group {}", &hex::encode(group_id)[..8]);
+            let peer_user_id = [0u8; USER_ID_LEN];
+            self.active.lock().map_err(poisoned)?.insert(
+                group_id,
+                ConvoState {
+                    peer_user_id,
+                    label: label.clone(),
+                    group,
+                    psk,
+                    last_seq: 0,
+                },
+            );
+            persist_convo_record(&ConvoRecord {
+                group_id_hex: hex::encode(group_id),
+                peer_user_id_hex: hex::encode(peer_user_id),
+                label,
+                last_seq: 0,
+            })?;
+            log(format!(
+                "chat: auto-joined group {}",
+                hex::encode(group_id)
+            ));
+        }
         Ok(())
     }
 
@@ -459,6 +579,143 @@ impl ChatState {
             group_id_hex: hex::encode(group_id),
             peer_user_id_hex: hex::encode(peer_user_id),
             label: label.clone(),
+            last_seq: 0,
+        })?;
+        Ok(group_id)
+    }
+
+    /// Create a new N-party group chat by inviting `peers`. The
+    /// group_id is fresh random (NOT the 1:1 sorted-hash that
+    /// [`derive_group_id`] produces) because N-party groups don't
+    /// have a canonical sort key.
+    ///
+    /// `label` is the user-supplied display name (e.g. "design
+    /// team"). `peers` is the full list of user_ids to invite —
+    /// at least one peer is required.
+    ///
+    /// Returns the resulting `group_id` so the caller can route
+    /// `current_view` to the new thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `peers` is empty, any peer hex is
+    /// invalid, any peer hasn't published a KeyPackage, or the
+    /// server rejects the commit.
+    pub async fn create_group_conversation(
+        &self,
+        label: String,
+        peers: Vec<[u8; USER_ID_LEN]>,
+        log: impl Fn(String) + Copy,
+    ) -> Result<GroupId, String> {
+        if peers.is_empty() {
+            return Err("create_group_conversation: at least one peer required".to_string());
+        }
+        let my_user_id = self.require_my_user_id()?;
+        for peer in &peers {
+            if peer == &my_user_id {
+                return Err("can't include yourself as a peer".to_string());
+            }
+        }
+        // Deduplicate peer list — paste accidents shouldn't blow
+        // up `add_members` with duplicate KPs.
+        let mut deduped: Vec<[u8; USER_ID_LEN]> = Vec::with_capacity(peers.len());
+        for p in &peers {
+            if !deduped.contains(p) {
+                deduped.push(*p);
+            }
+        }
+        let peers = deduped;
+
+        let mut group_id = [0u8; 16];
+        OsRng.fill_bytes(&mut group_id);
+        log(format!(
+            "chat: create group label={label:?} peers={} group_id={}",
+            peers.len(),
+            hex::encode(group_id),
+        ));
+
+        // Fetch every peer's KeyPackage before touching the MLS
+        // state so a single bad hex fails fast without leaving
+        // a half-built group on the server.
+        let mut peer_kp_bytes: Vec<Vec<u8>> = Vec::with_capacity(peers.len());
+        for (idx, peer) in peers.iter().enumerate() {
+            let kp = api::fetch_key_package(&self.server_url, peer)
+                .await
+                .map_err(|e| format!("fetch KP for peer #{idx} ({}): {e}", hex::encode(&peer[..6])))?;
+            peer_kp_bytes.push(kp);
+        }
+        log(format!("chat: fetched {} peer KPs", peer_kp_bytes.len()));
+
+        // Build group + commit under an immutable identity borrow;
+        // drop before the async server submit.
+        let (mut group, commit_bytes, welcomes) = {
+            let guard = self.identity.lock().map_err(poisoned)?;
+            let identity = guard
+                .as_ref()
+                .ok_or_else(|| "identity not bootstrapped".to_string())?;
+            let psk = LatticePskStorage::new();
+            let mut g = create_group_with_storage(
+                identity,
+                psk.clone(),
+                &group_id,
+                LocalStorageGroupStateStorage,
+            )
+            .map_err(|e| format!("create_group: {e}"))?;
+            let kp_refs: Vec<&[u8]> = peer_kp_bytes.iter().map(Vec::as_slice).collect();
+            let commit_output =
+                add_members(&mut g, &kp_refs).map_err(|e| format!("add_members: {e}"))?;
+            if commit_output.welcomes.len() != peers.len() {
+                return Err(format!(
+                    "add_members produced {} welcomes for {} peers",
+                    commit_output.welcomes.len(),
+                    peers.len(),
+                ));
+            }
+            (g, commit_output.commit, commit_output.welcomes)
+        };
+
+        // Single POST with all per-joiner welcomes paired with
+        // their user_ids in `add_members`-input order.
+        let peer_refs: Vec<&[u8; USER_ID_LEN]> = peers.iter().collect();
+        let zipped: Vec<(&lattice_crypto::mls::LatticeWelcome, &[u8; USER_ID_LEN])> = welcomes
+            .iter()
+            .zip(peer_refs.iter().copied())
+            .collect();
+        let epoch = welcomes[0].pq_payload.epoch;
+        let accepted = api::submit_commit_multi(
+            &self.server_url,
+            &group_id,
+            epoch,
+            &commit_bytes,
+            &zipped,
+        )
+        .await?;
+        log(format!("chat: server accepted {accepted} welcome(s)"));
+        apply_commit(&mut group).map_err(|e| format!("apply_commit: {e}"))?;
+
+        // The PSK that add_members shares with all joiners is now
+        // in the local group's psk store; we don't need a fresh
+        // empty psk for ConvoState — but the per-conversation psk
+        // field exists for forward compatibility, so keep it.
+        let psk = LatticePskStorage::new();
+        // For N-party groups, peer_user_id is the FIRST peer's id
+        // (a placeholder — the real list lives in the group's
+        // MLS roster, accessible via group.members()).
+        let peer_user_id_for_record = peers[0];
+        self.active.lock().map_err(poisoned)?.insert(
+            group_id,
+            ConvoState {
+                peer_user_id: peer_user_id_for_record,
+                label: label.clone(),
+                group,
+                psk,
+                last_seq: 0,
+            },
+        );
+        persist_convo_record(&ConvoRecord {
+            group_id_hex: hex::encode(group_id),
+            peer_user_id_hex: hex::encode(peer_user_id_for_record),
+            label,
             last_seq: 0,
         })?;
         Ok(group_id)
