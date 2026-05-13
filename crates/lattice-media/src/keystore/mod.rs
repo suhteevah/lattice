@@ -42,6 +42,9 @@ pub mod memory;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(target_os = "windows")]
+pub mod windows_tpm;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
@@ -177,6 +180,22 @@ pub enum KeystoreError {
     /// JSON serialization for the public-key sidecar failed.
     #[error("public-key sidecar encode/decode failed: {0}")]
     Sidecar(#[from] serde_json::Error),
+
+    /// The `MS_PLATFORM_CRYPTO_PROVIDER` storage provider opened, but
+    /// subsequent key-storage operations failed in a way consistent
+    /// with no usable TPM 2.0 being present (provider returns success
+    /// but every key op fails with `NTE_NOT_SUPPORTED` /
+    /// `NTE_BAD_KEYSET` / similar). Callers should fall back to a
+    /// different keystore — typically [`windows::WindowsKeystore`]
+    /// (DPAPI) on this OS.
+    ///
+    /// Distinct from [`KeystoreError::Seal`] / [`KeystoreError::Unseal`]
+    /// so the fallback decision stays explicit at the call site.
+    #[error("TPM 2.0 unavailable: {message}")]
+    TpmUnavailable {
+        /// Human-readable message from the platform error.
+        message: String,
+    },
 }
 
 /// Trait implemented by every keystore impl. Sync because all current

@@ -81,6 +81,14 @@ serde_json = { workspace = true }
 # Hex encoding for KeyHandle / public-key sidecars.
 hex = { workspace = true }
 
+# ChaCha20-Poly1305 AEAD. Used by the Windows TPM keystore (M7 Phase G.3)
+# to wrap identity-secret bytes with a per-blob symmetric key, which the
+# TPM-resident RSA wrap key then OAEP-encrypts. Promoted from
+# `[dev-dependencies]` because the production seal path now needs it on
+# Windows. Pulled unconditionally so the non-Windows fallback impls in
+# G.2 can share the same AEAD primitive.
+chacha20poly1305 = { workspace = true }
+
 # Platform directory discovery for the WindowsKeystore default
 # location (`%LOCALAPPDATA%\Lattice\keystore`). Pulled unconditionally
 # so the `MemoryKeystore`-only build path on non-Windows targets can
@@ -125,11 +133,6 @@ rustls = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 rand_chacha = "0.3"
 tempfile = "3"
-
-# ChaCha20-Poly1305 wrap on macOS / Linux for the secret-blob seal that
-# wraps the OS-keychain-bound material. Workspace dep, just listed
-# explicitly here so the cfg-gated impls compile.
-chacha20poly1305 = { workspace = true }
 
 # Windows-only deps for the DPAPI-backed keystore. windows = 0.58
 # matches the version Tauri 2 already pulls in (verified via
