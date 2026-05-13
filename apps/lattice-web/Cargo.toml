@@ -53,6 +53,6 @@ wasm-bindgen-futures.workspace = true
 # accessing window, fetching).
 wasm-bindgen.workspace = true
 js-sys.workspace = true
-web-sys = { workspace = true, features = ["Window", "console", "Storage", "Navigator", "CredentialsContainer", "WebSocket", "MessageEvent", "BinaryType", "CloseEvent", "Event"] }
+web-sys = { workspace = true, features = ["Window", "console", "Storage", "Navigator", "Clipboard", "CredentialsContainer", "WebSocket", "MessageEvent", "BinaryType", "CloseEvent", "Event"] }
 getrandom = { workspace = true, features = ["js"] }
 getrandom_04 = { workspace = true }

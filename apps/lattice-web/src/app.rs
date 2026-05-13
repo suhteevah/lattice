@@ -432,11 +432,13 @@ pub fn App() -> impl IntoView {
     view! {
         <main class="page">
             <section class="card" aria-labelledby="lattice-heading">
-                <h1 id="lattice-heading">"Lattice"</h1>
-                <p class="tagline">"Post-quantum encrypted messaging."</p>
-                <div class="status" role="status" aria-live="polite">
-                    {move || status.get()}
-                </div>
+                <header class="chat-header-bar">
+                    <h1 id="lattice-heading">"Lattice"</h1>
+                    <span class="tagline">"Post-quantum encrypted messaging."</span>
+                    <span class="status-pill" role="status" aria-live="polite">
+                        {move || status.get()}
+                    </span>
+                </header>
                 <crate::chat::ChatShell
                     state=chat_state
                     set_status=set_status

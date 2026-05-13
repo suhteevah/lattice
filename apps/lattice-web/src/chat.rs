@@ -370,10 +370,7 @@ where
                 when=move || !my_user_id_hex.get().is_empty()
                 fallback=|| view! {}
             >
-                <div class="chat-sidebar-userid muted" aria-label="my user id">
-                    "you: "
-                    <code>{move || short_user_id(&my_user_id_hex.get())}</code>
-                </div>
+                <MyUserIdBlock my_user_id_hex=my_user_id_hex/>
             </Show>
             <Show
                 when=move || add_form_open.get()
@@ -417,6 +414,68 @@ where
                 }}
             </ul>
         </aside>
+    }
+}
+
+/// Sidebar block that displays the local user_id. Defaults to a
+/// truncated 12-char prefix; clicking "show" expands the full
+/// 64-char hex. A dedicated "copy" button writes the full hex to
+/// the system clipboard so the user can paste it to a contact.
+#[component]
+fn MyUserIdBlock(my_user_id_hex: ReadSignal<String>) -> impl IntoView {
+    let expanded = RwSignal::new(false);
+    let copied = RwSignal::new(false);
+    let copy_handler = move |_| {
+        let hex = my_user_id_hex.get();
+        let nav = web_sys::window().and_then(|w| Some(w.navigator()));
+        if let Some(navigator) = nav {
+            let clipboard = navigator.clipboard();
+            let _ = clipboard.write_text(&hex);
+            copied.set(true);
+            // Clear the "copied!" flash after ~2 seconds.
+            let copied_for_reset = copied;
+            spawn_local(async move {
+                sleep(Duration::from_millis(2000)).await;
+                copied_for_reset.set(false);
+            });
+        }
+    };
+    view! {
+        <div class="chat-sidebar-userid" aria-label="my user id">
+            <div class="chat-sidebar-userid-row">
+                <span class="muted chat-sidebar-userid-label">"your id:"</span>
+                <button
+                    type="button"
+                    class="chat-sidebar-userid-toggle"
+                    aria-label="expand user id"
+                    on:click=move |_| expanded.update(|b| *b = !*b)
+                >
+                    {move || if expanded.get() { "▾" } else { "▸" }}
+                </button>
+                <button
+                    type="button"
+                    class="chat-sidebar-userid-copy"
+                    aria-label="copy user id"
+                    on:click=copy_handler
+                    title="copy full user_id"
+                >
+                    {move || if copied.get() { "copied!" } else { "copy" }}
+                </button>
+            </div>
+            {move || if expanded.get() {
+                view! {
+                    <code class="chat-sidebar-userid-full">
+                        {my_user_id_hex.get()}
+                    </code>
+                }.into_any()
+            } else {
+                view! {
+                    <code class="chat-sidebar-userid-short muted">
+                        {short_user_id(&my_user_id_hex.get())}
+                    </code>
+                }.into_any()
+            }}
+        </div>
     }
 }
 

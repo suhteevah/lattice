@@ -54,39 +54,70 @@ body {
 .page {
     min-height: 100vh;
     display: flex;
-    align-items: center;
+    align-items: stretch;
     justify-content: center;
-    padding: 2rem;
+    padding: 1rem;
 }
 
 .card {
-    max-width: 36rem;
+    max-width: 64rem;
     width: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     background: var(--lattice-ink-900);
     border: 1px solid var(--lattice-ink-700);
     border-radius: 0.75rem;
-    padding: 2rem;
+    padding: 1rem 1.25rem;
     box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
 }
 
-h1 {
-    font-size: 1.875rem;
+/* Compact header bar — title + tagline + status pill share one
+   row so the chat shell starts above the fold even on short
+   viewports. Flex inside a non-flex parent so children don't
+   get blockified. */
+.chat-header-bar {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid var(--lattice-ink-700);
+    padding-bottom: 0.5rem;
+}
+
+.chat-header-bar h1 {
+    font-size: 1.125rem;
     font-weight: 500;
     color: var(--lattice-lilac-400);
-    margin-bottom: 0.5rem;
+    margin: 0;
 }
 
-.tagline {
-    color: var(--lattice-ink-300);
-    font-size: 0.875rem;
-    line-height: 1.6;
-    margin-bottom: 1rem;
-}
-
-.status {
-    font-size: 0.75rem;
+.chat-header-bar .tagline {
     color: var(--lattice-ink-500);
-    margin-bottom: 1rem;
+    font-size: 0.75rem;
+    margin: 0;
+}
+
+.chat-header-bar .status-pill {
+    margin-left: auto;
+    font-size: 0.7rem;
+    color: var(--lattice-ink-300);
+    padding: 0.15rem 0.5rem;
+    background: var(--lattice-ink-800);
+    border-radius: 0.25rem;
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Legacy .status div from the debug grid (still used inside the
+   <details> if any code path renders it). Kept compact. */
+.status {
+    margin-bottom: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--lattice-ink-300);
 }
 
 .button {
@@ -187,11 +218,11 @@ h1 {
 }
 
 .footer {
-    margin-top: 1.5rem;
+    margin-top: 0.25rem;
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
 }
 
 .dot-sage {
@@ -210,11 +241,11 @@ h1 {
 
 .chat-shell {
     display: grid;
-    grid-template-columns: minmax(180px, 240px) 1fr;
+    grid-template-columns: minmax(220px, 280px) 1fr;
     gap: 1px;
-    margin: 1rem 0 1.5rem 0;
-    min-height: 360px;
-    max-height: 60vh;
+    margin: 0.5rem 0;
+    flex: 1;
+    min-height: 0;
     background: var(--lattice-ink-700);
     border: 1px solid var(--lattice-ink-700);
     border-radius: 0.5rem;
@@ -414,16 +445,29 @@ h1 {
 /* Legacy debug grid collapsed behind a <details> by default. */
 
 .debug-details {
-    margin-top: 1.5rem;
-    padding: 0.5rem 0;
+    margin-top: 0.5rem;
+    padding: 0;
     border-top: 1px dashed var(--lattice-ink-700);
+}
+
+.debug-details:not([open]) {
+    /* Closed state: just the summary row, no padding overhead. */
+    padding: 0;
+}
+
+.debug-details[open] > *:not(summary) {
+    /* When open, the legacy demo grid + log area get scroll if
+       they overflow rather than blowing out the viewport. */
+    max-height: 40vh;
+    overflow-y: auto;
 }
 
 .debug-summary {
     cursor: pointer;
-    padding: 0.5rem 0;
-    font-size: 0.85rem;
-    color: var(--lattice-ink-300);
+    padding: 0.4rem 0;
+    font-size: 0.75rem;
+    color: var(--lattice-ink-500);
+    user-select: none;
 }
 
 .debug-summary:hover {
@@ -474,15 +518,71 @@ h1 {
 }
 
 .chat-sidebar-userid {
-    padding: 0.25rem 1rem 0.5rem;
+    padding: 0.4rem 1rem 0.6rem;
     font-size: 0.7rem;
-    word-break: break-all;
+    border-bottom: 1px solid var(--lattice-ink-700);
+    background: var(--lattice-ink-900);
 }
 
-.chat-sidebar-userid code {
+.chat-sidebar-userid-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.25rem;
+}
+
+.chat-sidebar-userid-label {
+    flex: 1;
+    font-size: 0.7rem;
+}
+
+.chat-sidebar-userid-toggle,
+.chat-sidebar-userid-copy {
+    appearance: none;
+    background: transparent;
+    color: var(--lattice-ink-300);
+    border: 1px solid var(--lattice-ink-700);
+    border-radius: 0.25rem;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.65rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease;
+}
+
+.chat-sidebar-userid-toggle {
+    padding: 0.1rem 0.3rem;
+    font-family: ui-monospace, monospace;
+}
+
+.chat-sidebar-userid-toggle:hover,
+.chat-sidebar-userid-copy:hover {
+    color: var(--lattice-lilac-400);
+    border-color: var(--lattice-lilac-400);
+}
+
+.chat-sidebar-userid-copy:focus-visible,
+.chat-sidebar-userid-toggle:focus-visible {
+    outline: 2px solid var(--lattice-lilac-400);
+    outline-offset: 1px;
+}
+
+.chat-sidebar-userid-full,
+.chat-sidebar-userid-short {
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
     font-size: 0.7rem;
     color: var(--lattice-ink-300);
+    word-break: break-all;
+    display: block;
+    line-height: 1.4;
+}
+
+.chat-sidebar-userid-full {
+    background: var(--lattice-ink-800);
+    color: var(--lattice-ink-50);
+    padding: 0.35rem 0.45rem;
+    border-radius: 0.3rem;
+    user-select: all;
 }
 
 .chat-add-form {
