@@ -18,6 +18,10 @@
     <link data-trunk rel="css" href="styles.css" />
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Leptos `mount_to_body` appends the app as a child of <body>.
+         The previous empty `<div id="root">` here was a stale stub
+         from the pre-Leptos Solid scaffold; with the global
+         `#root { height: 100% }` rule it was taking up a full
+         viewport-height of dead space ABOVE the actual app. -->
   </body>
 </html>

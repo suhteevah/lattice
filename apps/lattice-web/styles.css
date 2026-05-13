@@ -35,8 +35,7 @@
 }
 
 html,
-body,
-#root {
+body {
     height: 100%;
 }
 
@@ -51,43 +50,43 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
+/* Page fills the entire browser canvas — no centering, no margin,
+   no padding. The chat shell is the app. */
 .page {
-    min-height: 100vh;
+    height: 100vh;
+    width: 100vw;
     display: flex;
-    align-items: stretch;
-    justify-content: center;
-    padding: 1rem;
+    flex-direction: column;
+    overflow: hidden;
 }
 
+/* Section "card" is now just a layout wrapper, no card chrome. */
 .card {
-    max-width: 64rem;
+    flex: 1;
     width: 100%;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    background: var(--lattice-ink-900);
-    border: 1px solid var(--lattice-ink-700);
-    border-radius: 0.75rem;
-    padding: 1rem 1.25rem;
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+    background: var(--lattice-ink-950);
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
 }
 
-/* Compact header bar — title + tagline + status pill share one
-   row so the chat shell starts above the fold even on short
-   viewports. Flex inside a non-flex parent so children don't
-   get blockified. */
+/* Thin slat across the top: title + tagline + live status. */
 .chat-header-bar {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
     gap: 0.5rem 0.75rem;
-    margin-bottom: 0.5rem;
+    padding: 0.4rem 0.75rem;
     border-bottom: 1px solid var(--lattice-ink-700);
-    padding-bottom: 0.5rem;
+    background: var(--lattice-ink-900);
 }
 
 .chat-header-bar h1 {
-    font-size: 1.125rem;
+    font-size: 1rem;
     font-weight: 500;
     color: var(--lattice-lilac-400);
     margin: 0;
@@ -95,7 +94,7 @@ body {
 
 .chat-header-bar .tagline {
     color: var(--lattice-ink-500);
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     margin: 0;
 }
 
@@ -103,7 +102,7 @@ body {
     margin-left: auto;
     font-size: 0.7rem;
     color: var(--lattice-ink-300);
-    padding: 0.15rem 0.5rem;
+    padding: 0.1rem 0.45rem;
     background: var(--lattice-ink-800);
     border-radius: 0.25rem;
     max-width: 60ch;
@@ -218,11 +217,14 @@ body {
 }
 
 .footer {
-    margin-top: 0.25rem;
+    margin: 0;
+    padding: 0.25rem 0.75rem;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    font-size: 0.7rem;
+    gap: 0.4rem;
+    font-size: 0.65rem;
+    background: var(--lattice-ink-900);
+    border-top: 1px solid var(--lattice-ink-700);
 }
 
 .dot-sage {
@@ -243,12 +245,11 @@ body {
     display: grid;
     grid-template-columns: minmax(220px, 280px) 1fr;
     gap: 1px;
-    margin: 0.5rem 0;
     flex: 1;
     min-height: 0;
     background: var(--lattice-ink-700);
-    border: 1px solid var(--lattice-ink-700);
-    border-radius: 0.5rem;
+    border: none;
+    border-radius: 0;
     overflow: hidden;
 }
 
@@ -445,29 +446,40 @@ body {
 /* Legacy debug grid collapsed behind a <details> by default. */
 
 .debug-details {
-    margin-top: 0.5rem;
-    padding: 0;
-    border-top: 1px dashed var(--lattice-ink-700);
+    background: var(--lattice-ink-900);
+    border-top: 1px solid var(--lattice-ink-700);
 }
 
 .debug-details:not([open]) {
-    /* Closed state: just the summary row, no padding overhead. */
     padding: 0;
 }
 
-.debug-details[open] > *:not(summary) {
-    /* When open, the legacy demo grid + log area get scroll if
-       they overflow rather than blowing out the viewport. */
-    max-height: 40vh;
+.debug-details[open] {
+    /* Open: absolutely positioned overlay so the chat shell
+       doesn't shrink when toggled. Scrolls internally. */
+    position: fixed;
+    bottom: 1.5rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    max-height: 60vh;
     overflow-y: auto;
+    border: 1px solid var(--lattice-ink-700);
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    padding: 0.5rem 0.75rem;
+    z-index: 10;
 }
 
 .debug-summary {
     cursor: pointer;
-    padding: 0.4rem 0;
-    font-size: 0.75rem;
+    padding: 0.3rem 0.75rem;
+    font-size: 0.7rem;
     color: var(--lattice-ink-500);
     user-select: none;
+}
+
+.debug-summary:hover {
+    color: var(--lattice-lilac-400);
 }
 
 .debug-summary:hover {
