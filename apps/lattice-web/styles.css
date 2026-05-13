@@ -355,11 +355,58 @@ body {
 .chat-thread-header {
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--lattice-ink-700);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .chat-thread-header h2 {
     font-size: 0.95rem;
     font-weight: 500;
+    flex: 1;
+}
+
+.chat-thread-add-channel {
+    appearance: none;
+    background: transparent;
+    color: var(--lattice-amber);
+    border: 1px solid var(--lattice-ink-700);
+    border-radius: 0.25rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.7rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.chat-thread-add-channel:hover {
+    color: var(--lattice-lilac-400);
+    border-color: var(--lattice-amber);
+}
+
+.chat-thread-channels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding: 0.4rem 1rem;
+    border-bottom: 1px solid var(--lattice-ink-700);
+    background: var(--lattice-ink-900);
+}
+
+.chat-thread-channel-pill {
+    appearance: none;
+    background: var(--lattice-ink-800);
+    color: var(--lattice-ink-50);
+    border: 1px solid var(--lattice-ink-700);
+    border-radius: 0.3rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    cursor: pointer;
+}
+
+.chat-thread-channel-pill:hover {
+    border-color: var(--lattice-lilac-400);
+    color: var(--lattice-lilac-400);
 }
 
 .chat-message-list {

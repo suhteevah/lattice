@@ -39,7 +39,7 @@ use lattice_crypto::mls::leaf_node_kem::KemKeyPair;
 use lattice_crypto::mls::psk::LatticePskStorage;
 use lattice_crypto::mls::{
     GroupHandle, LatticeIdentity, add_member, add_members, apply_commit,
-    create_group_with_storage, decrypt, encrypt_application, generate_key_package,
+    create_group_with_storage, decrypt_with_sender, encrypt_application, generate_key_package,
     load_group_with_storage, process_welcome_with_storage,
 };
 use lattice_protocol::server_state::ServerStateOp;
@@ -68,10 +68,39 @@ pub enum ConvoKind {
     OneOnOne,
     /// N-party group with random group_id (chunk 1).
     NamedGroup,
-    /// Discord-style server-membership group (chunk 2 first cut).
-    /// `server_name` lives here so the sidebar can render
-    /// "★ server_name" without re-decrypting Init.
-    ServerMembership { server_name: String },
+    /// Discord-style server-membership group (chunk 2).
+    /// `server_name` + admin roster live here for authorization
+    /// at classify time (only admins can issue AddChannel etc.).
+    /// `channels` is the canonical view of which channels this
+    /// server has — replayed from accepted ServerStateOps.
+    ServerMembership {
+        server_name: String,
+        #[serde(default)]
+        admins: Vec<String>,
+        #[serde(default)]
+        channels: Vec<PersistedChannelInfo>,
+    },
+    /// A channel inside a Discord-style server (chunk 2.5d).
+    /// `server_id` links back to the server-membership group;
+    /// the channel itself has its own MLS group identified by
+    /// the convo's outer `group_id` key.
+    ServerChannel {
+        /// Hex of the parent server-membership group_id.
+        server_id_hex: String,
+        /// Channel name (e.g. "general", "design").
+        channel_name: String,
+    },
+}
+
+/// Channel entry persisted on a server-membership convo. Mirrors
+/// `lattice_protocol::server_state::ChannelInfo` but lives here
+/// to keep the serde-Deserialize path independent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedChannelInfo {
+    /// Channel's MLS group_id, hex-encoded.
+    pub channel_group_id_hex: String,
+    /// Display name.
+    pub name: String,
 }
 
 impl Default for ConvoKind {
@@ -475,6 +504,63 @@ impl ChatState {
             "chat: restored {} active conversation(s) from localStorage",
             surviving.len()
         ));
+        // Walk server-membership convos and reclassify any of
+        // their channels that came back as NamedGroup (the
+        // discover_pending_welcomes path can't tell a channel
+        // welcome apart from a regular N-party welcome).
+        self.reclassify_channels_after_restore()?;
+        Ok(())
+    }
+
+    /// After `restore_conversations`, walk every ServerMembership
+    /// convo and reclassify each channel in its `channels` list
+    /// as `ServerChannel` if it currently stored as `NamedGroup`.
+    /// Runs once per bootstrap.
+    fn reclassify_channels_after_restore(&self) -> Result<(), String> {
+        let promotions: Vec<(GroupId, String, String)> = {
+            let active = self.active.lock().map_err(poisoned)?;
+            let mut out: Vec<(GroupId, String, String)> = Vec::new();
+            for (gid, convo) in active.iter() {
+                if let ConvoKind::ServerMembership { channels, .. } = &convo.kind {
+                    let server_id_hex = hex::encode(gid);
+                    for ch in channels {
+                        let Ok(cgid) = decode_gid_hex(&ch.channel_group_id_hex) else {
+                            continue;
+                        };
+                        out.push((cgid, server_id_hex.clone(), ch.name.clone()));
+                    }
+                }
+            }
+            out
+        };
+        for (channel_gid, server_id_hex, channel_name) in promotions {
+            let needs_persist = {
+                let mut active = self.active.lock().map_err(poisoned)?;
+                let Some(channel_convo) = active.get_mut(&channel_gid) else {
+                    continue;
+                };
+                if matches!(&channel_convo.kind, ConvoKind::ServerChannel { .. }) {
+                    false
+                } else {
+                    channel_convo.kind = ConvoKind::ServerChannel {
+                        server_id_hex: server_id_hex.clone(),
+                        channel_name: channel_name.clone(),
+                    };
+                    channel_convo.label = channel_name.clone();
+                    true
+                }
+            };
+            if needs_persist {
+                let _ = update_convo_kind(
+                    &channel_gid,
+                    ConvoKind::ServerChannel {
+                        server_id_hex,
+                        channel_name: channel_name.clone(),
+                    },
+                    Some(channel_name),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -892,6 +978,8 @@ impl ChatState {
                 last_seq: 0,
                 kind: ConvoKind::ServerMembership {
                     server_name: server_name.clone(),
+                    admins: vec![hex::encode(my_user_id)],
+                    channels: Vec::new(),
                 },
             },
         );
@@ -900,9 +988,240 @@ impl ChatState {
             peer_user_id_hex: hex::encode(peer_user_id_for_record),
             label: server_name.clone(),
             last_seq: 0,
-            kind: ConvoKind::ServerMembership { server_name },
+            kind: ConvoKind::ServerMembership {
+                server_name,
+                admins: vec![hex::encode(my_user_id)],
+                channels: Vec::new(),
+            },
         })?;
         Ok(group_id)
+    }
+
+    /// Add a new channel to an existing server. Creates a fresh
+    /// MLS group with all current server members as joiners,
+    /// posts the `AddChannel` op on the server-membership group,
+    /// and seeds a `ConvoKind::ServerChannel` entry locally.
+    ///
+    /// **Authorization (chunk 2.5b):** the caller must be in the
+    /// server's admin roster. The classifier on every recipient
+    /// also rejects non-admin `AddChannel` ops, but enforcing it
+    /// here too gives the caller a fast local error.
+    ///
+    /// # Errors
+    ///
+    /// - `not an admin` if the caller isn't in `admins`.
+    /// - `server not found` if `server_id` doesn't resolve.
+    /// - Same server / crypto errors as
+    ///   [`create_group_conversation`].
+    pub async fn add_channel_to_server(
+        &self,
+        server_id: GroupId,
+        channel_name: String,
+        log: impl Fn(String) + Copy,
+    ) -> Result<GroupId, String> {
+        let my_user_id = self.require_my_user_id()?;
+        let my_uid_hex = hex::encode(my_user_id);
+
+        // Snapshot: server admins, current members, and verify
+        // the kind under a brief lock.
+        let (member_user_ids, server_name) = {
+            let active = self.active.lock().map_err(poisoned)?;
+            let convo = active
+                .get(&server_id)
+                .ok_or_else(|| "server not found".to_string())?;
+            let (admins, server_name) = match &convo.kind {
+                ConvoKind::ServerMembership {
+                    admins,
+                    server_name,
+                    ..
+                } => (admins.clone(), server_name.clone()),
+                _ => return Err("target is not a server-membership group".to_string()),
+            };
+            if !admins.contains(&my_uid_hex) {
+                return Err("not an admin of this server".to_string());
+            }
+            // Read the server's MLS roster — these are the
+            // peers we need to invite to the new channel.
+            let roster = convo
+                .group
+                .members()
+                .map_err(|e| format!("read server roster: {e}"))?;
+            let members: Vec<[u8; USER_ID_LEN]> = roster
+                .into_iter()
+                .map(|(_idx, uid)| uid)
+                .filter(|uid| *uid != my_user_id)
+                .collect();
+            (members, server_name)
+        };
+        log(format!(
+            "chat: add_channel '{channel_name}' to server '{server_name}' with {} peer(s)",
+            member_user_ids.len()
+        ));
+
+        let mut channel_gid = [0u8; 16];
+        OsRng.fill_bytes(&mut channel_gid);
+
+        // Empty channel = no peers (just the creator). MLS allows
+        // a one-member group; the user can invite peers later
+        // (chunk 2.6+ — invite-existing-member-to-channel flow).
+        if member_user_ids.is_empty() {
+            let group = {
+                let guard = self.identity.lock().map_err(poisoned)?;
+                let identity = guard
+                    .as_ref()
+                    .ok_or_else(|| "identity not bootstrapped".to_string())?;
+                create_group_with_storage(
+                    identity,
+                    LatticePskStorage::new(),
+                    &channel_gid,
+                    LocalStorageGroupStateStorage,
+                )
+                .map_err(|e| format!("create_group: {e}"))?
+            };
+            self.register_channel(server_id, channel_gid, channel_name.clone(), group)
+                .await?;
+            self.announce_channel(server_id, channel_gid, channel_name)
+                .await?;
+            return Ok(channel_gid);
+        }
+
+        // Fetch each peer's KP up-front.
+        let mut peer_kp_bytes: Vec<Vec<u8>> = Vec::with_capacity(member_user_ids.len());
+        for uid in &member_user_ids {
+            let kp = api::fetch_key_package(&self.server_url, uid)
+                .await
+                .map_err(|e| {
+                    format!("fetch KP for {}: {e}", hex::encode(&uid[..6]))
+                })?;
+            peer_kp_bytes.push(kp);
+        }
+
+        let (mut group, commit_bytes, welcomes) = {
+            let guard = self.identity.lock().map_err(poisoned)?;
+            let identity = guard
+                .as_ref()
+                .ok_or_else(|| "identity not bootstrapped".to_string())?;
+            let psk = LatticePskStorage::new();
+            let mut g = create_group_with_storage(
+                identity,
+                psk.clone(),
+                &channel_gid,
+                LocalStorageGroupStateStorage,
+            )
+            .map_err(|e| format!("create_group: {e}"))?;
+            let kp_refs: Vec<&[u8]> = peer_kp_bytes.iter().map(Vec::as_slice).collect();
+            let commit_output =
+                add_members(&mut g, &kp_refs).map_err(|e| format!("add_members: {e}"))?;
+            (g, commit_output.commit, commit_output.welcomes)
+        };
+
+        let peer_refs: Vec<&[u8; USER_ID_LEN]> = member_user_ids.iter().collect();
+        let zipped: Vec<(&lattice_crypto::mls::LatticeWelcome, &[u8; USER_ID_LEN])> =
+            welcomes.iter().zip(peer_refs.iter().copied()).collect();
+        let epoch = welcomes[0].pq_payload.epoch;
+        let _accepted = api::submit_commit_multi(
+            &self.server_url,
+            &channel_gid,
+            epoch,
+            &commit_bytes,
+            &zipped,
+        )
+        .await?;
+        apply_commit(&mut group).map_err(|e| format!("apply_commit: {e}"))?;
+
+        self.register_channel(server_id, channel_gid, channel_name.clone(), group)
+            .await?;
+        self.announce_channel(server_id, channel_gid, channel_name)
+            .await?;
+        Ok(channel_gid)
+    }
+
+    /// Insert a fresh-built channel group into `active` + persist
+    /// the convo record. Shared by `add_channel_to_server`'s two
+    /// branches (empty channel vs invited channel).
+    async fn register_channel(
+        &self,
+        server_id: GroupId,
+        channel_gid: GroupId,
+        channel_name: String,
+        group: GroupHandle<LocalStorageGroupStateStorage>,
+    ) -> Result<(), String> {
+        // Sidebar already prepends "# " based on
+        // ConvoKind::ServerChannel; store just the bare name in
+        // the label to avoid "# # general" double-prefix.
+        let label = channel_name.clone();
+        let server_id_hex = hex::encode(server_id);
+        let psk = LatticePskStorage::new();
+        self.active.lock().map_err(poisoned)?.insert(
+            channel_gid,
+            ConvoState {
+                peer_user_id: [0u8; USER_ID_LEN],
+                label: label.clone(),
+                group,
+                psk,
+                last_seq: 0,
+                kind: ConvoKind::ServerChannel {
+                    server_id_hex: server_id_hex.clone(),
+                    channel_name: channel_name.clone(),
+                },
+            },
+        );
+        persist_convo_record(&ConvoRecord {
+            group_id_hex: hex::encode(channel_gid),
+            peer_user_id_hex: hex::encode([0u8; USER_ID_LEN]),
+            label,
+            last_seq: 0,
+            kind: ConvoKind::ServerChannel {
+                server_id_hex,
+                channel_name,
+            },
+        })?;
+        Ok(())
+    }
+
+    /// Send the `AddChannel` op on the server-membership group so
+    /// every other server member learns about the new channel +
+    /// processes their pending welcome for it.
+    async fn announce_channel(
+        &self,
+        server_id: GroupId,
+        channel_gid: GroupId,
+        channel_name: String,
+    ) -> Result<(), String> {
+        let op = ServerStateOp::AddChannel {
+            channel_group_id: hex::encode(channel_gid),
+            name: channel_name.clone(),
+        };
+        let op_bytes = op
+            .encode()
+            .map_err(|e| format!("encode AddChannel op: {e}"))?;
+        let ct = {
+            let mut active = self.active.lock().map_err(poisoned)?;
+            let convo = active
+                .get_mut(&server_id)
+                .ok_or_else(|| "server vanished mid-add".to_string())?;
+            encrypt_application(&mut convo.group, &op_bytes)
+                .map_err(|e| format!("encrypt AddChannel: {e}"))?
+        };
+        let _seq = api::publish_message(&self.server_url, &server_id, &ct).await?;
+        // Update creator's own server-membership convo state to
+        // include the new channel (other clients learn via the
+        // poll classifier).
+        if let Some(server) = self.active.lock().map_err(poisoned)?.get_mut(&server_id) {
+            if let ConvoKind::ServerMembership { channels, .. } = &mut server.kind {
+                if !channels
+                    .iter()
+                    .any(|c| c.channel_group_id_hex == hex::encode(channel_gid))
+                {
+                    channels.push(PersistedChannelInfo {
+                        channel_group_id_hex: hex::encode(channel_gid),
+                        name: channel_name,
+                    });
+                }
+            }
+            let _ = update_convo_kind(&server_id, server.kind.clone(), None);
+        }
+        Ok(())
     }
 
     /// Encrypt + send a chat message on `group_id`. Returns the
@@ -958,39 +1277,29 @@ impl ChatState {
             if envelopes.is_empty() {
                 continue;
             }
-            // Per-conversation classification flag — set to true
-            // when at least one decrypted message in this batch
-            // was a `ServerStateOp::Init`, so we know to upgrade
-            // the convo's kind to `ServerMembership`.
-            let mut detected_server_kind: Option<ConvoKind> = None;
-            let plaintexts: Vec<(u64, Vec<u8>)> = {
+            // Tracks whether classification or admin-roster ops
+            // mutated the convo's persisted state during this
+            // batch — drives the post-loop persist call.
+            let mut kind_or_roster_changed = false;
+            let plaintexts: Vec<(u64, Vec<u8>, Option<[u8; USER_ID_LEN]>)> = {
                 let mut active = self.active.lock().map_err(poisoned)?;
                 let Some(convo) = active.get_mut(&gid) else {
                     continue;
                 };
                 let mut pts = Vec::with_capacity(envelopes.len());
                 for env in envelopes {
-                    match decrypt(&mut convo.group, &env.envelope) {
-                        Ok(pt) => {
+                    match decrypt_with_sender(&mut convo.group, &env.envelope) {
+                        Ok((pt, sender_uid)) => {
                             // Try ServerStateOp first. If it
                             // parses, it's an admin event — never
                             // render as chat plaintext.
                             if let Some(op) = ServerStateOp::try_decode(&pt) {
-                                if let ServerStateOp::Init { server_name, .. } = &op {
-                                    detected_server_kind = Some(ConvoKind::ServerMembership {
-                                        server_name: server_name.clone(),
-                                    });
-                                    convo.kind = ConvoKind::ServerMembership {
-                                        server_name: server_name.clone(),
-                                    };
-                                    convo.label = server_name.clone();
+                                if process_server_state_op(convo, &op, sender_uid.as_ref()) {
+                                    kind_or_roster_changed = true;
                                 }
-                                // TODO chunk 2.5: process
-                                // AddChannel / RemoveChannel /
-                                // PromoteAdmin / etc. ops here.
                                 continue;
                             }
-                            pts.push((env.seq, pt));
+                            pts.push((env.seq, pt, sender_uid));
                         }
                         Err(e) => {
                             web_sys::console::warn_1(
@@ -1011,19 +1320,86 @@ impl ChatState {
                 pts
             };
             let _ = update_convo_last_seq(&gid, latest_seq);
-            // If we classified the convo as a server during this
-            // batch, persist the upgraded kind + new label so the
-            // sidebar renders correctly after reload.
-            if let Some(kind) = detected_server_kind {
-                if let ConvoKind::ServerMembership { server_name } = &kind {
-                    let _ = update_convo_kind(&gid, kind.clone(), Some(server_name.clone()));
+            // Persist the upgraded kind / admin roster / channel
+            // list so the sidebar reflects classifications across
+            // reloads.
+            if kind_or_roster_changed {
+                // Snapshot the server's channel list so we can
+                // promote any sibling channel convos that were
+                // auto-joined as NamedGroup placeholders.
+                let channels_to_promote: Vec<(GroupId, String, String)> = {
+                    let active = self.active.lock().map_err(poisoned)?;
+                    match active.get(&gid) {
+                        Some(convo) => {
+                            let _ = update_convo_kind(
+                                &gid,
+                                convo.kind.clone(),
+                                Some(convo.label.clone()),
+                            );
+                            if let ConvoKind::ServerMembership { channels, .. } = &convo.kind {
+                                let server_id_hex = hex::encode(gid);
+                                channels
+                                    .iter()
+                                    .filter_map(|c| {
+                                        let cgid = decode_gid_hex(&c.channel_group_id_hex).ok()?;
+                                        Some((cgid, server_id_hex.clone(), c.name.clone()))
+                                    })
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                        None => Vec::new(),
+                    }
+                };
+                for (channel_gid, server_id_hex, channel_name) in channels_to_promote {
+                    let needs_persist = {
+                        let mut active = self.active.lock().map_err(poisoned)?;
+                        if let Some(channel_convo) = active.get_mut(&channel_gid) {
+                            let already = matches!(
+                                &channel_convo.kind,
+                                ConvoKind::ServerChannel { .. },
+                            );
+                            if already {
+                                false
+                            } else {
+                                channel_convo.kind = ConvoKind::ServerChannel {
+                                    server_id_hex: server_id_hex.clone(),
+                                    channel_name: channel_name.clone(),
+                                };
+                                channel_convo.label = channel_name.clone();
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if needs_persist {
+                        let _ = update_convo_kind(
+                            &channel_gid,
+                            ConvoKind::ServerChannel {
+                                server_id_hex,
+                                channel_name: channel_name.clone(),
+                            },
+                            Some(channel_name),
+                        );
+                    }
                 }
             }
-            for (seq, pt) in plaintexts {
+            for (seq, pt, sender) in plaintexts {
+                // Real sender attribution (chunk 2.5a): use the
+                // user_id's first 6 hex chars when we know it, so
+                // the thread shows "from b3a1f0…" instead of
+                // "from $conversation_label". The convo label is
+                // the fallback when mls-rs couldn't resolve the
+                // leaf (handshake messages, etc.).
+                let display = sender
+                    .map(|uid| format!("{}…", &hex::encode(uid)[..6]))
+                    .unwrap_or_else(|| label.clone());
                 out.push(PolledMessage {
                     group_id: gid,
                     seq,
-                    sender_label: label.clone(),
+                    sender_label: display,
                     body: String::from_utf8_lossy(&pt).into_owned(),
                 });
             }
@@ -1062,6 +1438,147 @@ impl ChatState {
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> String {
     "chat-state mutex poisoned".to_string()
+}
+
+/// Apply one decoded `ServerStateOp` to a convo's local state.
+/// Returns `true` if the convo's persisted view (kind, label,
+/// admin roster, channel list) changed and the caller should
+/// re-persist via `update_convo_kind`.
+///
+/// **Authorization (chunk 2.5b).** Every non-Init op is rejected
+/// unless `sender_uid` is in the current admin roster. Init has
+/// no prior admin set; the creator's claim is trusted as the
+/// initial admin. Non-admin ops are silently dropped (logged
+/// via `console::warn` for visibility).
+fn process_server_state_op(
+    convo: &mut ConvoState,
+    op: &ServerStateOp,
+    sender_uid: Option<&[u8; USER_ID_LEN]>,
+) -> bool {
+    match op {
+        ServerStateOp::Init {
+            server_name,
+            admins,
+            channels,
+        } => {
+            // Init carries the creator's full initial state.
+            // Trust this verbatim — the chunk-2-first-cut classifier
+            // had nothing else to go on, and the sender is necessarily
+            // the creator (only they had the group at epoch 0).
+            convo.kind = ConvoKind::ServerMembership {
+                server_name: server_name.clone(),
+                admins: admins.clone(),
+                channels: channels
+                    .iter()
+                    .map(|c| PersistedChannelInfo {
+                        channel_group_id_hex: c.channel_group_id.clone(),
+                        name: c.name.clone(),
+                    })
+                    .collect(),
+            };
+            convo.label = server_name.clone();
+            true
+        }
+        ServerStateOp::AddChannel {
+            channel_group_id,
+            name,
+        } => {
+            if !is_sender_admin(convo, sender_uid) {
+                drop_unauthorized_op("AddChannel", sender_uid);
+                return false;
+            }
+            if let ConvoKind::ServerMembership { channels, .. } = &mut convo.kind {
+                if channels
+                    .iter()
+                    .any(|c| c.channel_group_id_hex == *channel_group_id)
+                {
+                    return false;
+                }
+                channels.push(PersistedChannelInfo {
+                    channel_group_id_hex: channel_group_id.clone(),
+                    name: name.clone(),
+                });
+                return true;
+            }
+            false
+        }
+        ServerStateOp::RemoveChannel { channel_group_id } => {
+            if !is_sender_admin(convo, sender_uid) {
+                drop_unauthorized_op("RemoveChannel", sender_uid);
+                return false;
+            }
+            if let ConvoKind::ServerMembership { channels, .. } = &mut convo.kind {
+                let before = channels.len();
+                channels.retain(|c| c.channel_group_id_hex != *channel_group_id);
+                return channels.len() != before;
+            }
+            false
+        }
+        ServerStateOp::RenameServer { name } => {
+            if !is_sender_admin(convo, sender_uid) {
+                drop_unauthorized_op("RenameServer", sender_uid);
+                return false;
+            }
+            if let ConvoKind::ServerMembership { server_name, .. } = &mut convo.kind {
+                if *server_name == *name {
+                    return false;
+                }
+                *server_name = name.clone();
+                convo.label = name.clone();
+                return true;
+            }
+            false
+        }
+        ServerStateOp::PromoteAdmin { user_id } => {
+            if !is_sender_admin(convo, sender_uid) {
+                drop_unauthorized_op("PromoteAdmin", sender_uid);
+                return false;
+            }
+            if let ConvoKind::ServerMembership { admins, .. } = &mut convo.kind {
+                if admins.contains(user_id) {
+                    return false;
+                }
+                admins.push(user_id.clone());
+                return true;
+            }
+            false
+        }
+        ServerStateOp::DemoteAdmin { user_id } => {
+            if !is_sender_admin(convo, sender_uid) {
+                drop_unauthorized_op("DemoteAdmin", sender_uid);
+                return false;
+            }
+            if let ConvoKind::ServerMembership { admins, .. } = &mut convo.kind {
+                let before = admins.len();
+                admins.retain(|a| a != user_id);
+                return admins.len() != before;
+            }
+            false
+        }
+    }
+}
+
+fn is_sender_admin(convo: &ConvoState, sender_uid: Option<&[u8; USER_ID_LEN]>) -> bool {
+    let Some(uid) = sender_uid else {
+        return false;
+    };
+    let uid_hex = hex::encode(uid);
+    matches!(
+        &convo.kind,
+        ConvoKind::ServerMembership { admins, .. } if admins.contains(&uid_hex)
+    )
+}
+
+fn drop_unauthorized_op(op_name: &str, sender_uid: Option<&[u8; USER_ID_LEN]>) {
+    let sender_label = sender_uid
+        .map(|uid| hex::encode(&uid[..6]))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    web_sys::console::warn_1(
+        &format!(
+            "chat: dropping unauthorized {op_name} from non-admin {sender_label}"
+        )
+        .into(),
+    );
 }
 
 fn decode_gid_hex(hex_str: &str) -> Result<GroupId, String> {

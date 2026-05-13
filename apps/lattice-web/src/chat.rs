@@ -277,6 +277,55 @@ pub fn ChatShell(
         }
     };
 
+    // Add-channel handler — called from the ThreadPane's "+
+    // channel" button when the viewed convo is a
+    // ServerMembership. `channel_name` comes from a prompt() on
+    // the UI side. Routes through `ChatState::add_channel_to_server`
+    // which enforces admin-only authorization locally.
+    let on_add_channel = {
+        let state = state.clone();
+        move |server_id_hex: String, channel_name: String| {
+            let state = state.clone();
+            spawn_local(async move {
+                let server_id = match parse_gid(&server_id_hex) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        set_status.set(format!("chat: bad server_id ({e})"));
+                        return;
+                    }
+                };
+                let trimmed = channel_name.trim().to_string();
+                if trimmed.is_empty() {
+                    set_status.set("chat: channel name required".to_string());
+                    return;
+                }
+                set_status.set(format!("chat: adding channel '{trimmed}'…"));
+                let log = |msg: String| {
+                    web_sys::console::log_1(&msg.into());
+                };
+                match state
+                    .add_channel_to_server(server_id, trimmed.clone(), log)
+                    .await
+                {
+                    Ok(channel_gid) => {
+                        let channel_hex = hex::encode(channel_gid);
+                        // Pull the new channel into the
+                        // conversations signal + open the thread.
+                        let summaries = state.conversation_summaries();
+                        conversations.set(
+                            summaries.iter().map(Conversation::from_summary).collect(),
+                        );
+                        current_view.set(ChatView::Conversation(channel_hex));
+                        set_status.set(format!("chat: channel '{trimmed}' ready"));
+                    }
+                    Err(e) => {
+                        set_status.set(format!("chat: add_channel failed: {e}"));
+                    }
+                }
+            });
+        }
+    };
+
     // New-server submit handler. Same textarea-of-peers shape as
     // the New Group form, but calls `ChatState::create_server`
     // which publishes a `ServerStateOp::Init` as the first app
@@ -468,6 +517,8 @@ pub fn ChatShell(
                     ChatView::Conversation(id) => {
                         let id_for_pane = id.clone();
                         let on_send_clone = on_send.clone();
+                        let on_add_channel_clone = on_add_channel.clone();
+                        let current_view_clone = current_view;
                         view! {
                             <ThreadPane
                                 conversation_id=id_for_pane
@@ -475,6 +526,8 @@ pub fn ChatShell(
                                 messages=messages
                                 display_name=display_name
                                 on_send=on_send_clone
+                                on_add_channel=on_add_channel_clone
+                                current_view=current_view_clone
                             />
                         }.into_any()
                     }
@@ -595,6 +648,7 @@ where
                             let id_for_click = c.id.clone();
                             let kind_prefix = match &c.kind {
                                 ConvoKind::ServerMembership { .. } => "★ ",
+                                ConvoKind::ServerChannel { .. } => "# ",
                                 ConvoKind::NamedGroup => "# ",
                                 ConvoKind::OneOnOne => "",
                             };
@@ -887,15 +941,18 @@ fn EmptyThreadPlaceholder() -> impl IntoView {
 }
 
 #[component]
-fn ThreadPane<F>(
+fn ThreadPane<F, C>(
     conversation_id: String,
     conversations: RwSignal<Vec<Conversation>>,
     messages: RwSignal<HashMap<String, Vec<ChatMessage>>>,
     display_name: Signal<String>,
     on_send: F,
+    on_add_channel: C,
+    current_view: RwSignal<ChatView>,
 ) -> impl IntoView
 where
     F: Fn(String, String) + Clone + Send + Sync + 'static,
+    C: Fn(String, String) + Clone + Send + Sync + 'static,
 {
     let id_for_header = conversation_id.clone();
     let title = Signal::derive(move || {
@@ -904,6 +961,41 @@ where
             .iter()
             .find(|c| c.id == id_for_header)
             .map_or_else(|| "Conversation".to_string(), |c| c.name.clone())
+    });
+
+    // Resolve the current convo's kind so the header can render
+    // server-specific affordances (+ channel button, channel
+    // list) when we're viewing a server-membership group.
+    let id_for_kind = conversation_id.clone();
+    let convo_kind = Signal::derive(move || {
+        conversations
+            .get()
+            .iter()
+            .find(|c| c.id == id_for_kind)
+            .map(|c| c.kind.clone())
+    });
+
+    let server_id_for_add = conversation_id.clone();
+    let on_add_channel_for_btn = on_add_channel.clone();
+    let add_channel_click = move |_| {
+        let server_id = server_id_for_add.clone();
+        let prompt_result = web_sys::window()
+            .and_then(|w| w.prompt_with_message("Channel name (e.g. design)").ok())
+            .flatten();
+        if let Some(name) = prompt_result {
+            on_add_channel_for_btn(server_id, name);
+        }
+    };
+
+    let id_for_channels = conversation_id.clone();
+    let channels_view = Signal::derive(move || {
+        conversations.get().iter().find(|c| c.id == id_for_channels).and_then(|c| {
+            if let ConvoKind::ServerMembership { channels, .. } = &c.kind {
+                Some(channels.clone())
+            } else {
+                None
+            }
+        })
     });
 
     let id_for_messages = conversation_id.clone();
@@ -925,7 +1017,41 @@ where
         <section class="chat-thread" aria-label="thread">
             <header class="chat-thread-header">
                 <h2>{move || title.get()}</h2>
+                <Show
+                    when=move || matches!(convo_kind.get(), Some(ConvoKind::ServerMembership { .. }))
+                    fallback=|| view! {}
+                >
+                    <button
+                        class="chat-thread-add-channel"
+                        on:click=add_channel_click.clone()
+                        title="Add channel to this server"
+                    >
+                        "+ channel"
+                    </button>
+                </Show>
             </header>
+            <Show
+                when=move || channels_view.get().map_or(false, |c| !c.is_empty())
+                fallback=|| view! {}
+            >
+                <nav class="chat-thread-channels" aria-label="server channels">
+                    {move || {
+                        let channels = channels_view.get().unwrap_or_default();
+                        channels.into_iter().map(|ch| {
+                            let gid_hex = ch.channel_group_id_hex.clone();
+                            view! {
+                                <button
+                                    class="chat-thread-channel-pill"
+                                    on:click=move |_| current_view.set(ChatView::Conversation(gid_hex.clone()))
+                                    title=ch.channel_group_id_hex.clone()
+                                >
+                                    "# " {ch.name.clone()}
+                                </button>
+                            }.into_any()
+                        }).collect_view().into_any()
+                    }}
+                </nav>
+            </Show>
             <ol class="chat-message-list" role="log" aria-live="polite">
                 {move || {
                     let msgs = thread_messages.get();

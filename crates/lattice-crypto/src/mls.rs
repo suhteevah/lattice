@@ -900,6 +900,61 @@ where
     })
 }
 
+/// Like [`decrypt`] but also returns the sender's user_id resolved
+/// from the group's current roster.
+///
+/// Returns `(plaintext, sender_user_id)`. `sender_user_id` is
+/// `None` for handshake messages that didn't carry an application
+/// payload. For server-channel chat the sender resolution is
+/// load-bearing for both UI attribution ("Bob said:" instead of
+/// "Friends said:") and chunk 2.5b's admin-roster enforcement
+/// (only members in the admin set can issue server-state ops).
+///
+/// # Errors
+///
+/// Same as [`decrypt`], plus [`Error::Mls`] if the sender leaf
+/// index doesn't resolve to a member in the current roster.
+#[instrument(level = "trace", skip(group, ciphertext), fields(ct_len = ciphertext.len()))]
+pub fn decrypt_with_sender<G, R>(
+    group: &mut GroupHandle<G, R>,
+    ciphertext: &[u8],
+) -> Result<(Vec<u8>, Option<[u8; crate::credential::USER_ID_LEN]>)>
+where
+    G: mls_rs_core::group::GroupStateStorage + Clone + Send + Sync + 'static,
+    R: mls_rs::MlsRules + Clone + 'static,
+{
+    let msg = MlsMessage::mls_decode(&mut &*ciphertext)
+        .map_err(|e| Error::Mls(format!("decode incoming: {e:?}")))?;
+    let processed = group
+        .inner
+        .process_incoming_message(msg)
+        .map_err(|e| Error::Mls(format!("process_incoming_message: {e:?}")))?;
+    group
+        .inner
+        .write_to_storage()
+        .map_err(|e| Error::Mls(format!("write_to_storage after decrypt: {e:?}")))?;
+
+    use mls_rs::group::ReceivedMessage;
+    match processed {
+        ReceivedMessage::ApplicationMessage(app) => {
+            let sender_index = app.sender_index;
+            let data = app.data().to_vec();
+            // Resolve sender_index → user_id via the group's
+            // public roster. `GroupHandle::members()` re-reads
+            // the roster every call; cheap for small N-party
+            // groups, fine for chunk 2's typical Discord-style
+            // server sizes.
+            let members = group.members()?;
+            let sender_uid = members
+                .into_iter()
+                .find(|(idx, _)| *idx == sender_index)
+                .map(|(_, uid)| uid);
+            Ok((data, sender_uid))
+        }
+        _ => Ok((Vec::new(), None)),
+    }
+}
+
 /// Issue a Remove proposal against a specific leaf and commit it.
 ///
 /// Used by M5's device revocation flow: the group admin (or the
