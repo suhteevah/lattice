@@ -80,6 +80,10 @@ export default defineConfig({
           autogenerate: { directory: 'docs/usage' },
         },
         {
+          label: 'Wiki',
+          autogenerate: { directory: 'wiki' },
+        },
+        {
           label: 'Project',
           items: [{ label: 'Changelog', link: '/changelog/' }],
         },

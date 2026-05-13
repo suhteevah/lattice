@@ -16,14 +16,14 @@
     "node": ">=20.10.0"
   },
   "scripts": {
-    "prebuild": "powershell -ExecutionPolicy Bypass -File ./scripts/sync-usage.ps1",
-    "predev": "powershell -ExecutionPolicy Bypass -File ./scripts/sync-usage.ps1",
+    "prebuild": "node ./scripts/sync.mjs",
+    "predev": "node ./scripts/sync.mjs",
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "sync-usage": "powershell -ExecutionPolicy Bypass -File ./scripts/sync-usage.ps1",
+    "sync": "node ./scripts/sync.mjs",
     "verify": "astro check && astro build"
   },
   "dependencies": {

@@ -3,3 +3,4 @@ dist/
 .astro/
 .vercel/
 src/content/docs/docs/usage/
+src/content/docs/wiki/
