@@ -12,7 +12,7 @@ lands.
 | Field | Value |
 |---|---|
 | Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
-| Last shipped | Chat scrollback — pre-reload thread history renders on bootstrap (2026-05-12) |
+| Last shipped | Track 4 chunk 1 — N-party group chat (server-side invite enumeration + auto-discover bootstrap, 2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 

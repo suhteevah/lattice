@@ -181,7 +181,9 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | Chat chunks A + C — sidebar/thread/composer + real DM flow | ✅ shipped 2026-05-12 | End-to-end MLS chat verified across two browser tabs. See §17 + §18. |
 | Chat group-state persistence — chat survives page reload | ✅ shipped 2026-05-12 | localStorage-backed MLS group + KP + convo index. See §19. |
 | Chat scrollback — pre-reload thread history renders on reload | ✅ shipped 2026-05-12 | Plaintexts persisted under `lattice/messages/{gid}/v1`. See §20. |
-| Chat chunks B / D-rest / E / F | ⬜ next | Onboarding + contacts, WebSocket push, server config, polish. |
+| Track 4 chunk 1 — N-party group chat | ✅ shipped 2026-05-12 | New Group form + auto-discovery via `GET /welcomes/pending/:user_id`. See §21. |
+| Track 4 chunk 2 — Discord-style server/channels | ⬜ next | Server-membership group + admin policy + 3-pane UI. Plan in `scratch/next-session-plan.md` Track 4. |
+| Chat chunks B / D-rest / E / F | ⬜ | Onboarding + contacts, WebSocket push, server config, polish. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -1986,4 +1988,102 @@ Alice's final thread: 3 messages (2 from scrollback + 1 new) ✓
   `seq=1` while clients have `last_seq>0`. Clients then miss
   messages until they manually reset. Server-side persistence
   hardening lives in M3 polish.
+
+
+---
+
+## 21. Track 4 chunk 1 — N-party group chat (shipped 2026-05-12)
+
+First half of the server-with-channels arc. Plain MLS groups
+exposed in the chat UI as a "New group" sidebar button.
+Inviter generates a random group_id, server enumerates pending
+welcomes for the joiner at bootstrap.
+
+### What shipped
+
+| Surface | Where |
+|---|---|
+| `ChatState::create_group_conversation(label, peers, log)` — random gid, fetch KPs, `add_members`, single `submit_commit_multi` POST, persist | `apps/lattice-web/src/chat_state.rs` |
+| `ChatState::discover_pending_welcomes(log)` — called at end of both bootstrap branches; auto-joins each newly-discovered group | `apps/lattice-web/src/chat_state.rs` |
+| `api::submit_commit_multi` — N welcomes in one POST | `apps/lattice-web/src/api.rs` |
+| `api::fetch_pending_welcomes` + `pending_welcome_into_lattice` | `apps/lattice-web/src/api.rs` |
+| `<NewGroupForm>` Leptos component + 👥 sidebar button | `apps/lattice-web/src/chat.rs` |
+| `GET /welcomes/pending/:user_id_b64` server route | `crates/lattice-server/src/routes/groups.rs` |
+
+### Why the new server endpoint
+
+The 1:1 `add_conversation` flow worked without server-side
+invite enumeration because both parties derived the same
+deterministic `group_id = blake3("lattice/dm/v1/" || sorted(uid_a, uid_b))[..16]`.
+N-party groups have no canonical sort, so the inviter picks a
+**random** group_id. The joiner has no way to derive it locally
+— so the server has to enumerate "welcomes addressed to me
+across all groups."
+
+`GET /welcomes/pending/:user_id_b64` walks every group on the
+server, returns the latest welcome per group_id that's
+addressed to the queried user_id. Idempotent — re-fetching the
+same welcome is fine; the second `process_welcome` fails
+cleanly inside mls-rs (leaf init key already consumed) and the
+client loop silently skips it.
+
+### Smoke-test transcript (kokonoe, 2026-05-12)
+
+```
+fresh state — localStorage clear, server snapshot deleted, server rebuilt
+both tabs bootstrap fresh identities:
+  Alice: 265a4a707eb542d71bd6e0386659e6104574794a7a14f09dc2bebb40d1adfcbd
+  Bob:   a72b32c32239459c82228e09428691957262dbda92a32ef6984f90baab38e91e
+Bob clicks 👥, fills "design team" + Alice's hex, submits
+  → "chat: group ready (design team)" status
+  → sidebar shows "design team" entry
+Alice hard-reloads
+  → bootstrap_inner.load-existing branch fires
+  → discover_pending_welcomes finds the pending welcome
+  → process_welcome_with_storage succeeds (KP from local repo)
+  → ConvoRecord persisted with placeholder label
+  → sidebar shows "group 095bb3e3"
+Bob sends "hi from Bob to N-party group" → Alice's poll decrypts ✓
+Alice sends "reply from Alice in the group" → Bob's poll decrypts ✓
+Bob's thread: ["me (a72b32): hi…", "design team: reply…"]
+Alice's thread: ["group 095bb3e3: hi…", "me (265a4a): reply…"]
+```
+
+### Known limitations (tracked, all chunk 2)
+
+- **Group name / inviter metadata in welcome.** Joiner sees a
+  placeholder `group {prefix}` label because welcomes don't
+  carry the group name today. Chunk 2's server-membership group
+  application message carries both server name and inviter's
+  user_id.
+- **Author display for received messages.** The poll thread
+  shows messages as "from $label" where label is the
+  conversation label — not the actual sender's user_id. For 1:1
+  this is the peer's label; for N-party groups it's the
+  placeholder. mls-rs's decrypt does surface the sender's leaf
+  index → committable user_id, but we don't read it yet.
+  Chunk 2's roster panel + this lookup go together.
+- **Authorization layer.** Every member can commit (MLS flat).
+  No admin/mod roles. Track 4 chunk 2 sketches the options
+  (client-side flat-MLS + signed-policy recommended first;
+  external-sender extension as the harder tamper-resistance
+  upgrade).
+- **N≥3 wire-level verification.** Today's smoke is 2-party;
+  full multi-recipient `submit_commit_multi` proof needs a 3rd
+  origin (iMac when it's awake, cnc-server, or Chrome
+  incognito). The code path exercises the multi-welcome JSON
+  array even with a single welcome, but the N≥2 case isn't
+  observed.
+
+### Open questions for chunk 2
+
+- Channel-roster discovery at server join time. Server-membership
+  group only carries forward ops, so new joiners need either a
+  snapshot in a join-time app message OR an inviter-sent "current
+  state" message right after admit.
+- Per-channel private membership = a channel group not every
+  server member has joined. MLS-natural, but UI has to track "in
+  server but not in channel."
+- Group voice (≥ 3 participants) is long-horizon per ROADMAP M7
+  — not blocking chunks 1 or 2.
 
