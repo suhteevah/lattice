@@ -47,6 +47,7 @@ use crate::chat_state::{
     ChatState, Contact, ConversationSummary, ConvoKind, GroupId, PolledMessage,
     load_contacts, load_server_url, save_server_url,
 };
+use crate::{notify, ws_subscribe};
 
 /// One conversation in the sidebar.
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +105,77 @@ pub enum ChatView {
 
 /// Default polling interval for new-message fetch.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Minimum gap between OS notifications so a burst of messages
+/// can't spam the notification shade. Chunk D.
+const NOTIFY_MIN_GAP_MS: f64 = 30_000.0;
+
+thread_local! {
+    /// `js_sys::Date::now()` of the last OS notification we surfaced.
+    /// Compared against `NOTIFY_MIN_GAP_MS` to rate-limit (chunk D).
+    static LAST_NOTIFY_AT_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Returns `true` if enough time has elapsed since the last
+/// notification to justify a new one. Stamps "now" as the new
+/// last-notify time when it returns `true`.
+fn should_emit_notification() -> bool {
+    let now = js_sys::Date::now();
+    LAST_NOTIFY_AT_MS.with(|cell| {
+        let prev = cell.get();
+        if now - prev >= NOTIFY_MIN_GAP_MS {
+            cell.set(now);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Chunk D: build a wake callback for `ws_subscribe::subscribe_for`.
+/// Triggers an immediate poll, applies any new messages to the view
+/// signals, and (if the tab is hidden) surfaces the no-PII
+/// notification helper. Free function so the bootstrap effect AND
+/// every "new conversation" handler can build a fresh callback
+/// without dragging component-local closures across closures.
+fn build_wake_callback(
+    state: ChatState,
+    conversations: RwSignal<Vec<Conversation>>,
+    messages: RwSignal<HashMap<String, Vec<ChatMessage>>>,
+) -> Box<dyn Fn() + 'static> {
+    Box::new(move || {
+        let state = state.clone();
+        spawn_local(async move {
+            if !state.has_identity() {
+                return;
+            }
+            match state.poll_all().await {
+                Ok(polled) => {
+                    let had_new = !polled.is_empty();
+                    if had_new {
+                        apply_polled_messages(polled, &messages);
+                        let summaries = state.conversation_summaries();
+                        conversations.set(
+                            summaries
+                                .iter()
+                                .map(Conversation::from_summary)
+                                .collect(),
+                        );
+                    }
+                    if had_new
+                        && notify::document_hidden()
+                        && should_emit_notification()
+                    {
+                        notify::show_generic_message_notification();
+                    }
+                }
+                Err(e) => web_sys::console::warn_1(
+                    &format!("chat: wake poll error {e}").into(),
+                ),
+            }
+        });
+    })
+}
 
 /// Root chat-shell component. Takes a `ChatState` for real MLS
 /// state and owns the view-projection signals internally.
@@ -221,6 +293,7 @@ pub fn ChatShell(
         }
     };
 
+
     // Pull restored conversations into the sidebar after the bootstrap
     // task finishes — `bootstrap_identity` rebuilds the `active` map
     // from localStorage but the view signal needs an explicit poke.
@@ -259,6 +332,21 @@ pub fn ChatShell(
                 }
                 // Chunk B: seed contacts directory from localStorage.
                 contacts.set(load_contacts());
+
+                // Chunk D: ask for notification permission once, then
+                // open a WS push subscription per active group. The
+                // permission prompt may show a browser UI; we don't
+                // re-prompt if the user denies.
+                {
+                    spawn_local(async move {
+                        let _ = notify::request_permission().await;
+                    });
+                }
+                let server_url = state.server_url().to_string();
+                for gid in state.active_group_ids() {
+                    let wake = build_wake_callback(state.clone(), conversations, messages);
+                    ws_subscribe::subscribe_for(gid, &server_url, wake);
+                }
             }
         });
     }
@@ -288,6 +376,11 @@ pub fn ChatShell(
                         // Chunk B: pull the just-saved contact into
                         // the sidebar's contacts directory.
                         contacts.set(load_contacts());
+                        // Chunk D: subscribe the new group to WS push
+                        // so future messages wake the poller without
+                        // waiting 5 seconds.
+                        let wake = build_wake_callback(state.clone(), conversations, messages);
+                        ws_subscribe::subscribe_for(gid, state.server_url(), wake);
                         let gid_hex = hex::encode(gid);
                         current_view.set(ChatView::Conversation(gid_hex.clone()));
                         add_form_open.set(false);
@@ -340,6 +433,10 @@ pub fn ChatShell(
                         conversations.set(
                             summaries.iter().map(Conversation::from_summary).collect(),
                         );
+                        // Chunk D: WS-subscribe the new channel
+                        // (separate MLS group → separate broadcast).
+                        let wake = build_wake_callback(state.clone(), conversations, messages);
+                        ws_subscribe::subscribe_for(channel_gid, state.server_url(), wake);
                         current_view.set(ChatView::Conversation(channel_hex));
                         set_status.set(format!("chat: channel '{trimmed}' ready"));
                     }
@@ -399,6 +496,9 @@ pub fn ChatShell(
                 match state.create_server(server_name.clone(), peers, log).await {
                     Ok(gid) => {
                         refresh();
+                        // Chunk D: WS-subscribe the new server group.
+                        let wake = build_wake_callback(state.clone(), conversations, messages);
+                        ws_subscribe::subscribe_for(gid, state.server_url(), wake);
                         let gid_hex = hex::encode(gid);
                         current_view.set(ChatView::Conversation(gid_hex.clone()));
                         new_server_form_open.set(false);
@@ -459,6 +559,9 @@ pub fn ChatShell(
                 {
                     Ok(gid) => {
                         refresh();
+                        // Chunk D: WS-subscribe the new N-party group.
+                        let wake = build_wake_callback(state.clone(), conversations, messages);
+                        ws_subscribe::subscribe_for(gid, state.server_url(), wake);
                         let gid_hex = hex::encode(gid);
                         current_view.set(ChatView::Conversation(gid_hex.clone()));
                         new_group_form_open.set(false);

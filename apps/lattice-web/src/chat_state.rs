@@ -1504,6 +1504,23 @@ impl ChatState {
         Ok(out)
     }
 
+    /// Group ids of every currently active conversation (chunk D —
+    /// the WS push subscriber iterates this list at bootstrap).
+    #[must_use]
+    pub fn active_group_ids(&self) -> Vec<GroupId> {
+        self.active
+            .lock()
+            .map(|active| active.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Home server URL (chunk D — the WS subscriber needs it to
+    /// translate http→ws and reach `/group/:gid/messages/ws`).
+    #[must_use]
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+
     /// Snapshot of active conversations for the sidebar.
     #[must_use]
     pub fn conversation_summaries(&self) -> Vec<ConversationSummary> {

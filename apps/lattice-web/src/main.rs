@@ -15,10 +15,12 @@ mod capabilities;
 mod chat;
 mod chat_state;
 mod distrust;
+mod notify;
 mod passkey;
 mod persist;
 mod storage;
 mod tauri;
+mod ws_subscribe;
 
 use leptos::prelude::*;
 
