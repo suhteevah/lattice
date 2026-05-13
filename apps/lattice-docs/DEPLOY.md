@@ -2,12 +2,39 @@
 
 This is a fully static [Astro Starlight](https://starlight.astro.build) site.
 It deploys to Vercel via the `@astrojs/vercel` adapter in **static** mode —
-no serverless functions, no Edge Functions, no runtime cost. The Vercel
-output lives at `.vercel/output/`, which is what `vercel deploy` ships.
+no serverless functions, no Edge Functions, no runtime cost.
+
+**Live URL:** `https://lattice-quantum.vercel.app` (project name
+`lattice-quantum`, suhteevah scope).
 
 Per the project policy (`CLAUDE.md` in the repo root), there is **no
 GitHub Actions / CI integration** for deploys. The flow is manual from
 the workstation that owns the Vercel account.
+
+## The deploy pattern: `--prebuilt`
+
+The site has two content-sync feeders that reach UP one level into the
+repo's `docs/` directory:
+
+- `docs/usage/*.md` mirrors into `/docs/usage/` (the user-facing manual).
+- `docs/{HANDOFF,DECISIONS,ARCHITECTURE,THREAT_MODEL,ROADMAP}.md` plus
+  `README.md` mirror into `/wiki/` (the project wiki).
+
+When `vercel deploy` is run from inside `apps/lattice-docs/`, only that
+directory is uploaded — Vercel's build container then has no way to
+reach `../../docs/` and the wiki pages 404. So we deliberately
+**pre-build locally** and ship the static output:
+
+```powershell
+cd J:\lattice\apps\lattice-docs
+npm run build                  # runs sync.mjs + astro build, writes .vercel/output
+vercel deploy --prebuilt --prod
+```
+
+`--prebuilt` tells Vercel to skip its own build step and serve
+`.vercel/output/` as-is. The pre-build runs `scripts/sync.mjs` (Node,
+cross-platform) which copies docs/usage + the wiki sources into
+`src/content/docs/`, then Astro renders them into `.vercel/output/static`.
 
 ---
 
@@ -114,20 +141,37 @@ Rust workspace.
 
 ```powershell
 cd J:\lattice\apps\lattice-docs
-vercel
+npm run build
+vercel deploy --prebuilt
 ```
 
-Gives you a `lattice-docs-<hash>-<scope>.vercel.app` URL. Use this to
-share work-in-progress without touching prod.
+Gives you a `lattice-quantum-<hash>-suhteevahs-projects.vercel.app` URL.
+Use this to share work-in-progress without touching prod.
 
 ### Production deploy
 
 ```powershell
-vercel --prod
+cd J:\lattice\apps\lattice-docs
+npm run build
+vercel deploy --prebuilt --prod
 ```
 
-Promotes a build to the production alias. There is no auto-deploy from
-git — you control every push to prod.
+Promotes the prebuilt static bundle to the production alias
+`https://lattice-quantum.vercel.app`. There is no auto-deploy from git
+— you control every push to prod.
+
+### Why not let Vercel build?
+
+We *could* link the project to GitHub and let Vercel build on push. We
+don't, for two reasons:
+1. The repo's `vercel.json` build runs from `apps/lattice-docs/`, but
+   the sync script needs to reach `../../docs/`. Setting Root Directory
+   to `apps/lattice-docs` in the dashboard fixes the path issue but
+   triggers an auto-deploy-on-push that bypasses the manual gate
+   `CLAUDE.md` requires.
+2. Building locally means the only environment that matters for
+   correctness is kokonoe. Same versions, same Node, same output. No
+   "works on my machine" surprises from a different build container.
 
 ### Environment variables
 
@@ -233,7 +277,11 @@ If you want a one-keypress shortcut, add it to your PowerShell profile:
 ```powershell
 function Deploy-LatticeDocs {
     Push-Location J:\lattice\apps\lattice-docs
-    try { vercel --prod } finally { Pop-Location }
+    try {
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "npm build failed" }
+        vercel deploy --prebuilt --prod
+    } finally { Pop-Location }
 }
 ```
 
