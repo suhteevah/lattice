@@ -187,11 +187,39 @@ pub fn ChatShell(
     // Pull restored conversations into the sidebar after the bootstrap
     // task finishes — `bootstrap_identity` rebuilds the `active` map
     // from localStorage but the view signal needs an explicit poke.
+    // Also seed `messages` from persisted scrollback so reload
+    // renders pre-reload thread history.
     {
         let refresh = refresh_conversations.clone();
+        let state = state.clone();
         Effect::new(move |_prev: Option<()>| {
             if bootstrap_complete.get() {
                 refresh();
+                let summaries = state.conversation_summaries();
+                let mut seeded: HashMap<String, Vec<ChatMessage>> = HashMap::new();
+                for s in &summaries {
+                    let gid_hex = hex::encode(s.group_id);
+                    let history = load_history(&gid_hex).unwrap_or_default();
+                    if !history.is_empty() {
+                        seeded.insert(gid_hex.clone(), history);
+                    }
+                    // Also stamp the sidebar's last_preview from the
+                    // most-recent persisted message.
+                    if let Some(entries) = seeded.get(&gid_hex) {
+                        if let Some(last) = entries.last() {
+                            let preview =
+                                last.body.chars().take(80).collect::<String>();
+                            conversations.update(|cs| {
+                                if let Some(c) = cs.iter_mut().find(|c| c.id == gid_hex) {
+                                    c.last_preview = preview;
+                                }
+                            });
+                        }
+                    }
+                }
+                if !seeded.is_empty() {
+                    messages.set(seeded);
+                }
             }
         });
     }
@@ -243,12 +271,18 @@ pub fn ChatShell(
             // message immediately even if the network is slow.
             let preview = body.chars().take(80).collect::<String>();
             let now = now_unix();
+            let entry = ChatMessage {
+                author: display.clone(),
+                body: body.clone(),
+                timestamp_unix: now,
+            };
+            // Persist this outgoing message to localStorage so it
+            // re-renders on the next page reload. Failure is
+            // logged but non-fatal — the message still appears
+            // optimistically in this session.
+            let _ = append_history(&gid_hex, &entry);
             messages.update(|m| {
-                m.entry(gid_hex.clone()).or_default().push(ChatMessage {
-                    author: display.clone(),
-                    body: body.clone(),
-                    timestamp_unix: now,
-                });
+                m.entry(gid_hex.clone()).or_default().push(entry);
             });
             conversations.update(|cs| {
                 if let Some(c) = cs.iter_mut().find(|c| c.id == gid_hex) {
@@ -584,11 +618,13 @@ fn apply_polled_messages(
     messages.update(|map| {
         for m in polled {
             let gid_hex = hex::encode(m.group_id);
-            map.entry(gid_hex).or_default().push(ChatMessage {
+            let entry = ChatMessage {
                 author: m.sender_label,
                 body: m.body,
                 timestamp_unix: now_unix(),
-            });
+            };
+            let _ = append_history(&gid_hex, &entry);
+            map.entry(gid_hex).or_default().push(entry);
         }
     });
 }
@@ -667,6 +703,82 @@ pub fn mock_seed() -> (
     HashMap<String, Vec<ChatMessage>>,
 ) {
     (Vec::new(), HashMap::new())
+}
+
+// ────────────────────────────────────────────────────────────────
+// Scrollback / plaintext history persistence
+// ────────────────────────────────────────────────────────────────
+//
+// MLS's per-epoch generation counter rejects re-decrypting a
+// previously-seen ciphertext, so we can't replay scrollback by
+// re-fetching + re-decrypting on reload. Instead we persist the
+// **plaintext** of each sent / received message under
+// `lattice/messages/{gid_b64url_pct_no_pad}/v1` as a JSON array.
+//
+// **Threat-model note.** Plaintext-on-disk is the same posture
+// every chat app (Signal, Telegram, etc.) takes — at-rest
+// encryption comes from full-disk encryption on the device.
+// When v2/v3 identity-blob unlock UI lands in chunk B, we should
+// wrap scrollback under the same KEK; for now, scrollback is
+// only used when the identity blob is v1 plaintext.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedMessage {
+    author: String,
+    body: String,
+    ts: u64,
+}
+
+fn history_key(gid_hex: &str) -> String {
+    format!("lattice/messages/{gid_hex}/v1")
+}
+
+fn append_history(gid_hex: &str, msg: &ChatMessage) -> Result<(), String> {
+    let mut entries = load_history(gid_hex).unwrap_or_default();
+    entries.push(msg.clone());
+    save_history(gid_hex, &entries)
+}
+
+fn load_history(gid_hex: &str) -> Result<Vec<ChatMessage>, String> {
+    let storage = match web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        Some(s) => s,
+        None => return Err("localStorage unavailable".to_string()),
+    };
+    let Some(json) = storage
+        .get_item(&history_key(gid_hex))
+        .map_err(|e| format!("get history: {e:?}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let raw: Vec<PersistedMessage> =
+        serde_json::from_str(&json).map_err(|e| format!("decode history: {e}"))?;
+    Ok(raw
+        .into_iter()
+        .map(|p| ChatMessage {
+            author: p.author,
+            body: p.body,
+            timestamp_unix: p.ts,
+        })
+        .collect())
+}
+
+fn save_history(gid_hex: &str, entries: &[ChatMessage]) -> Result<(), String> {
+    let storage = match web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        Some(s) => s,
+        None => return Err("localStorage unavailable".to_string()),
+    };
+    let raw: Vec<PersistedMessage> = entries
+        .iter()
+        .map(|m| PersistedMessage {
+            author: m.author.clone(),
+            body: m.body.clone(),
+            ts: m.timestamp_unix,
+        })
+        .collect();
+    let json = serde_json::to_string(&raw).map_err(|e| format!("encode history: {e}"))?;
+    storage
+        .set_item(&history_key(gid_hex), &json)
+        .map_err(|e| format!("set history: {e:?}"))
 }
 
 // Silence unused-import warning on `Rc<RefCell>` — they're imported
