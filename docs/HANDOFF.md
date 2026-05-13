@@ -182,7 +182,8 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | Chat group-state persistence — chat survives page reload | ✅ shipped 2026-05-12 | localStorage-backed MLS group + KP + convo index. See §19. |
 | Chat scrollback — pre-reload thread history renders on reload | ✅ shipped 2026-05-12 | Plaintexts persisted under `lattice/messages/{gid}/v1`. See §20. |
 | Track 4 chunk 1 — N-party group chat | ✅ shipped 2026-05-12 | New Group form + auto-discovery via `GET /welcomes/pending/:user_id`. See §21. |
-| Track 4 chunk 2 — Discord-style server/channels | ⬜ next | Server-membership group + admin policy + 3-pane UI. Plan in `scratch/next-session-plan.md` Track 4. |
+| Track 4 chunk 2 first cut — server-membership groups | ✅ shipped 2026-05-12 | `ServerStateOp::Init` classifier + ★ sidebar prefix. Single channel = server itself. See §22. |
+| Track 4 chunk 2.5 — multi-channel + admin enforcement | ⬜ next | Each channel a separate MLS group, `AddChannel`/`RemoveChannel`/`PromoteAdmin` acted on. |
 | Chat chunks B / D-rest / E / F | ⬜ | Onboarding + contacts, WebSocket push, server config, polish. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
@@ -2086,4 +2087,109 @@ Alice's thread: ["group 095bb3e3: hi…", "me (265a4a): reply…"]
   server but not in channel."
 - Group voice (≥ 3 participants) is long-horizon per ROADMAP M7
   — not blocking chunks 1 or 2.
+
+
+---
+
+## 22. Track 4 chunk 2 first cut — server-membership groups (shipped 2026-05-12)
+
+First half of the Discord-parity arc. A "server" is an MLS group
+whose first application message is a `ServerStateOp::Init`; the
+chat shell classifies on first-Init-decrypt and renders the
+entry with a ★ prefix instead of `#`. Single channel per server
+(the server-membership group itself); multi-channel separation
+is chunk 2.5.
+
+### What shipped
+
+| Surface | Where |
+|---|---|
+| `ServerStateOp` wire enum + `try_decode` classifier | `crates/lattice-protocol/src/server_state.rs` |
+| `ConvoKind::{OneOnOne, NamedGroup, ServerMembership { server_name }}` on `ConvoState` + `ConvoRecord` | `apps/lattice-web/src/chat_state.rs` |
+| `ChatState::create_server(server_name, peers, log)` | `apps/lattice-web/src/chat_state.rs` |
+| Post-decrypt classification (poll path tries `ServerStateOp::try_decode` first; success → upgrade kind + persist) | `apps/lattice-web/src/chat_state.rs::poll_all` |
+| `update_convo_kind` persistence helper | `apps/lattice-web/src/chat_state.rs` |
+| `<NewServerForm>` Leptos component + ★ sidebar button + kind-prefix sidebar rendering | `apps/lattice-web/src/chat.rs` |
+
+### Wire encoding for `ServerStateOp`
+
+JSON via `serde_json` with `#[serde(tag = "op", content = "data")]`
+discriminator. Variants: `Init`, `AddChannel`, `RemoveChannel`,
+`RenameServer`, `PromoteAdmin`, `DemoteAdmin`. Future hardening
+can swap to capnp once the op set stabilizes; for the first cut
+JSON keeps the wire human-debuggable. Body bytes ride inside an
+MLS `ApplicationMessage` like any other plaintext — receivers
+distinguish by trying `try_decode` first, falling through to
+plaintext if it returns `None`.
+
+### Classification timing
+
+- **Creator side:** sets `ConvoKind::ServerMembership` directly
+  during `create_server` (we already know the name locally).
+- **Joiner side:** auto-discovers the welcome via
+  `discover_pending_welcomes`, initially classifies as
+  `NamedGroup` with a `group {prefix}` placeholder label. On the
+  next poll, the Init op decrypts → kind upgrades to
+  `ServerMembership { server_name }`, label becomes the server
+  name, persisted record updated.
+
+The poll loop now also re-snapshots `conversation_summaries` after
+each iteration so the sidebar signal picks up classification
+upgrades without waiting for a reload.
+
+### End-to-end smoke (kokonoe, 2026-05-12)
+
+```
+Alice + Bob bootstrap fresh identities (separate origins).
+Bob clicks ★ button, names "Friends", pastes Alice's hex.
+Bob's sidebar:  ["★ Friends"]
+Alice reloads → bootstrap discovers Bob's welcome → auto-joins.
+Alice's sidebar (immediately):  ["# group b71f3220"]   (initial, pre-Init-decrypt)
+Alice's sidebar (after 5s poll): ["★ Friends"]          (post-classify)
+Alice sends "hi from Alice in ★ Friends server" → publishes.
+Bob reloads + opens conversation → scrollback loads from localStorage:
+  thread shows: [{author: "Friends", body: "hi from Alice in ★ Friends server"}]
+```
+
+### What chunk 2 first cut deliberately does NOT do
+
+- **Multi-channel.** Each server has ONE implicit "#general"
+  channel — the server-membership group itself doubles as the
+  chat group. `AddChannel` ops decode but don't spin up
+  separate MLS groups. Chunk 2.5.
+- **Admin authorization.** Every member can commit (MLS flat).
+  `PromoteAdmin` / `DemoteAdmin` ops decode but aren't enforced.
+- **Sender attribution.** Received messages display "from
+  $conversation_label" (the server name) instead of the actual
+  sender's user_id. mls-rs's decrypt surfaces the leaf-index →
+  user_id but the chat shell doesn't read it. Tied to chunk
+  2.5's admin-roster panel.
+- **Server-state op replay on join.** A late joiner only sees
+  ops issued AFTER their join epoch — `AddChannel` /
+  `RenameServer` events that predate their welcome are lost.
+  Mitigation: inviter sends a "current state" message right
+  after admit (chunk 2.5).
+
+### Cross-references
+
+- DECISIONS §D-24 ("per-server admin tools, no global
+  moderation") aligns with the planned client-side
+  flat-MLS-plus-signed-policy admin enforcement in chunk 2.5.
+- `feedback_no_pii_in_notifications.md` memory: when chunk D
+  WS push fires for server-membership group messages, the
+  notification payload remains generic — no server name, no
+  sender, no group_id.
+
+### Open questions for chunk 2.5
+
+- **Channel-roster discovery at join.** Inviter snapshots
+  current channel list in the join-time app message, OR sends
+  a one-shot ServerStateOp::SyncState immediately after admit.
+- **Per-channel private membership.** Channel = an MLS group
+  not every server member has joined. UI must track "in
+  server but not in channel."
+- **`ExternalSendersExtension` vs client-side policy.** Two
+  authorization models sketched in
+  `scratch/next-session-plan.md` Track 4 chunk 2. Recommend
+  client-side first; upgrade if tamper concerns surface.
 
