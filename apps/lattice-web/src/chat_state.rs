@@ -54,6 +54,96 @@ use crate::storage::{
     LocalStorageGroupStateStorage, restore_kp_repo_from_storage, sync_kp_repo_to_storage,
 };
 
+/// localStorage key for the user-configured home server URL.
+/// Chunk E lets users point the chat at a non-default server.
+const SERVER_URL_KEY: &str = "lattice/server_url/v1";
+
+/// localStorage key for the contacts roster (chunk B).
+const CONTACTS_KEY: &str = "lattice/contacts/v1";
+
+/// One saved contact — a person you've messaged before.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Contact {
+    /// Hex of the 32-byte user_id.
+    pub user_id_hex: String,
+    /// User-supplied label (the same string typed into the
+    /// add-conversation form).
+    pub label: String,
+    /// Unix seconds when first saved.
+    pub added_at_unix: u64,
+}
+
+/// Read the saved contacts list, sorted by `added_at` desc.
+pub fn load_contacts() -> Vec<Contact> {
+    let storage = match web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let raw = storage.get_item(CONTACTS_KEY).ok().flatten();
+    let Some(json) = raw else {
+        return Vec::new();
+    };
+    let mut entries: Vec<Contact> = serde_json::from_str(&json).unwrap_or_default();
+    entries.sort_by(|a, b| b.added_at_unix.cmp(&a.added_at_unix));
+    entries
+}
+
+/// Persist (or update) a contact. Dedupes by `user_id_hex`.
+pub fn save_contact(contact: Contact) -> Result<(), String> {
+    let storage = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .ok_or_else(|| "localStorage unavailable".to_string())?;
+    let raw = storage.get_item(CONTACTS_KEY).ok().flatten();
+    let mut entries: Vec<Contact> = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|c| c.user_id_hex == contact.user_id_hex)
+    {
+        // Keep the earliest added_at_unix, refresh label if
+        // the caller passed something newer.
+        existing.label = contact.label;
+    } else {
+        entries.push(contact);
+    }
+    let json =
+        serde_json::to_string(&entries).map_err(|e| format!("encode contacts: {e}"))?;
+    storage
+        .set_item(CONTACTS_KEY, &json)
+        .map_err(|e| format!("set contacts: {e:?}"))
+}
+
+/// Read the persisted home server URL, falling back to `default`
+/// if none has been set yet.
+pub fn load_server_url(default: &str) -> String {
+    let storage = match web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        Some(s) => s,
+        None => return default.to_string(),
+    };
+    storage
+        .get_item(SERVER_URL_KEY)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Persist the home server URL. Reloading the app picks it up.
+///
+/// # Errors
+///
+/// Returns a string if `localStorage` is unavailable.
+pub fn save_server_url(url: &str) -> Result<(), String> {
+    let storage = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .ok_or_else(|| "localStorage unavailable".to_string())?;
+    storage
+        .set_item(SERVER_URL_KEY, url.trim())
+        .map_err(|e| format!("set server url: {e:?}"))
+}
+
 /// 16-byte deterministic group id derived from sorted user_ids.
 pub type GroupId = [u8; 16];
 
@@ -712,6 +802,13 @@ impl ChatState {
             last_seq: 0,
             kind: ConvoKind::OneOnOne,
         })?;
+        // Chunk B: auto-add to contacts so the user doesn't have
+        // to re-paste the hex next time.
+        let _ = save_contact(Contact {
+            user_id_hex: hex::encode(peer_user_id),
+            label,
+            added_at_unix: js_sys::Date::now().div_euclid(1000.0) as u64,
+        });
         Ok(group_id)
     }
 

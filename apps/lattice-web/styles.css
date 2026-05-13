@@ -292,11 +292,13 @@ body {
 
 .chat-conversation-button {
     width: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.15rem;
-    padding: 0.6rem 1rem;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 0.6rem;
+    row-gap: 0.1rem;
+    align-items: center;
+    padding: 0.5rem 0.85rem;
     background: transparent;
     color: var(--lattice-ink-50);
     border: 0;
@@ -304,6 +306,22 @@ body {
     text-align: left;
     cursor: pointer;
     font: inherit;
+}
+
+.chat-avatar {
+    grid-row: 1 / span 2;
+    grid-column: 1;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--lattice-ink-950);
+    user-select: none;
+    flex-shrink: 0;
 }
 
 .chat-conversation-button:hover {
@@ -316,16 +334,108 @@ body {
 }
 
 .chat-conversation-name {
+    grid-row: 1;
+    grid-column: 2;
     font-weight: 500;
     font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .chat-conversation-preview {
-    font-size: 0.75rem;
+    grid-row: 2;
+    grid-column: 2;
+    font-size: 0.72rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 100%;
+}
+
+/* Chunk B — contacts directory below the conversation list. */
+.chat-sidebar-contacts {
+    border-top: 1px solid var(--lattice-ink-700);
+    padding: 0.6rem 0 0.4rem;
+    flex-shrink: 0;
+    max-height: 18rem;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.chat-sidebar-contacts-header {
+    padding: 0 0.85rem 0.35rem;
+}
+
+.chat-sidebar-contacts-header h3 {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--lattice-ink-400);
+}
+
+.chat-sidebar-contacts-empty {
+    padding: 0.25rem 0.85rem 0.5rem;
+    font-size: 0.72rem;
+    margin: 0;
+}
+
+.chat-contacts-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.chat-contact-button {
+    width: 100%;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 0.6rem;
+    row-gap: 0.05rem;
+    align-items: center;
+    padding: 0.35rem 0.85rem;
+    background: transparent;
+    color: var(--lattice-ink-50);
+    border: 0;
+    border-left: 3px solid transparent;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+}
+
+.chat-contact-button:hover {
+    background: var(--lattice-ink-800);
+}
+
+.chat-contact-button:focus-visible {
+    outline: 2px solid var(--lattice-lilac-400);
+    outline-offset: -2px;
+}
+
+.chat-contact-name {
+    grid-row: 1;
+    grid-column: 2;
+    font-weight: 500;
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-contact-id {
+    grid-row: 2;
+    grid-column: 2;
+    font-size: 0.66rem;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .chat-main {
@@ -583,6 +693,28 @@ body {
 .chat-sidebar-newserver:hover {
     color: var(--lattice-lilac-400);
     border-color: var(--lattice-amber);
+}
+
+.chat-sidebar-settings {
+    font-size: 0.85rem;
+    color: var(--lattice-ink-300);
+}
+
+.chat-sidebar-settings:hover:not([disabled]) {
+    color: var(--lattice-lilac-400);
+    border-color: var(--lattice-lilac-400);
+}
+
+.chat-settings-hint {
+    font-size: 0.7rem;
+    margin: 0.25rem 0;
+    line-height: 1.4;
+}
+
+.chat-settings-saved {
+    font-size: 0.75rem;
+    margin: 0.25rem 0;
+    color: var(--lattice-sage);
 }
 
 .chat-add-form-group {

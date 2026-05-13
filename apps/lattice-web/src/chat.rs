@@ -43,7 +43,10 @@ use lattice_crypto::credential::USER_ID_LEN;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
-use crate::chat_state::{ChatState, ConversationSummary, ConvoKind, GroupId, PolledMessage};
+use crate::chat_state::{
+    ChatState, Contact, ConversationSummary, ConvoKind, GroupId, PolledMessage,
+    load_contacts, load_server_url, save_server_url,
+};
 
 /// One conversation in the sidebar.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,15 +60,23 @@ pub struct Conversation {
     /// Kind of conversation — drives whether the sidebar entry
     /// renders with a ★ server prefix.
     pub kind: ConvoKind,
+    /// Peer's user_id (hex) — used to match contacts to existing
+    /// 1:1 DMs. Empty for groups / servers / channels.
+    pub peer_user_id_hex: String,
 }
 
 impl Conversation {
     fn from_summary(s: &ConversationSummary) -> Self {
+        let peer_hex = match &s.kind {
+            ConvoKind::OneOnOne => hex::encode(s.peer_user_id),
+            _ => String::new(),
+        };
         Self {
             id: hex::encode(s.group_id),
             name: s.label.clone(),
             last_preview: String::new(),
             kind: s.kind.clone(),
+            peer_user_id_hex: peer_hex,
         }
     }
 }
@@ -114,7 +125,15 @@ pub fn ChatShell(
     let add_form_open = RwSignal::new(false);
     let new_group_form_open = RwSignal::new(false);
     let new_server_form_open = RwSignal::new(false);
+    let settings_open = RwSignal::new(false);
     let bootstrap_complete = RwSignal::new(false);
+    // Chunk B: contacts directory. Seeded from localStorage on
+    // bootstrap, refreshed after every successful add_conversation
+    // (the backend's `save_contact` is also called there).
+    let contacts: RwSignal<Vec<Contact>> = RwSignal::new(Vec::new());
+    // Prefill seed for the AddConversation form when the user
+    // clicks a contact whose DM doesn't exist yet.
+    let add_form_prefill: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
     // Bootstrap identity once at component mount. Direct spawn_local
     // (not Effect::new) because we only want this to fire once, even
@@ -238,6 +257,8 @@ pub fn ChatShell(
                 if !seeded.is_empty() {
                     messages.set(seeded);
                 }
+                // Chunk B: seed contacts directory from localStorage.
+                contacts.set(load_contacts());
             }
         });
     }
@@ -264,9 +285,13 @@ pub fn ChatShell(
                 match state.add_conversation(peer_user_id, label.clone(), log).await {
                     Ok(gid) => {
                         refresh();
+                        // Chunk B: pull the just-saved contact into
+                        // the sidebar's contacts directory.
+                        contacts.set(load_contacts());
                         let gid_hex = hex::encode(gid);
                         current_view.set(ChatView::Conversation(gid_hex.clone()));
                         add_form_open.set(false);
+                        add_form_prefill.set(None);
                         set_status.set(format!("chat: conversation ready ({label})"));
                     }
                     Err(e) => {
@@ -495,17 +520,43 @@ pub fn ChatShell(
         }
     };
 
+    // Chunk B: click handler invoked when the user clicks a contact
+    // in the sidebar. If an existing 1:1 conversation matches the
+    // contact's hex user_id, focus it. Otherwise open the
+    // AddConversation form pre-filled with the contact's hex + label.
+    let on_contact_click = {
+        move |c: Contact| {
+            let convos = conversations.get_untracked();
+            if let Some(existing) = convos
+                .iter()
+                .find(|cv| cv.peer_user_id_hex == c.user_id_hex)
+            {
+                current_view.set(ChatView::Conversation(existing.id.clone()));
+                return;
+            }
+            add_form_prefill.set(Some((c.user_id_hex.clone(), c.label.clone())));
+            new_group_form_open.set(false);
+            new_server_form_open.set(false);
+            settings_open.set(false);
+            add_form_open.set(true);
+        }
+    };
+
     view! {
         <div class="chat-shell">
             <ConversationSidebar
                 conversations=conversations
+                contacts=contacts
                 current_view=current_view
                 add_form_open=add_form_open
                 new_group_form_open=new_group_form_open
                 new_server_form_open=new_server_form_open
+                settings_open=settings_open
+                add_form_prefill=add_form_prefill.read_only()
                 on_add=on_add_submit
                 on_new_group=on_new_group_submit
                 on_new_server=on_new_server_submit
+                on_contact_click=on_contact_click
                 my_user_id_hex=my_user_id_hex.read_only()
                 bootstrap_complete=bootstrap_complete.read_only()
             />
@@ -538,15 +589,19 @@ pub fn ChatShell(
 }
 
 #[component]
-fn ConversationSidebar<F, G, S>(
+fn ConversationSidebar<F, G, S, K>(
     conversations: RwSignal<Vec<Conversation>>,
+    contacts: RwSignal<Vec<Contact>>,
     current_view: RwSignal<ChatView>,
     add_form_open: RwSignal<bool>,
     new_group_form_open: RwSignal<bool>,
     new_server_form_open: RwSignal<bool>,
+    settings_open: RwSignal<bool>,
+    add_form_prefill: ReadSignal<Option<(String, String)>>,
     on_add: F,
     on_new_group: G,
     on_new_server: S,
+    on_contact_click: K,
     my_user_id_hex: ReadSignal<String>,
     bootstrap_complete: ReadSignal<bool>,
 ) -> impl IntoView
@@ -554,6 +609,7 @@ where
     F: Fn(String, String) + Clone + Send + Sync + 'static,
     G: Fn(String, String) + Clone + Send + Sync + 'static,
     S: Fn(String, String) + Clone + Send + Sync + 'static,
+    K: Fn(Contact) + Clone + Send + Sync + 'static,
 {
     view! {
         <aside class="chat-sidebar" aria-label="conversations">
@@ -590,6 +646,7 @@ where
                         on:click=move |_| {
                             add_form_open.set(false);
                             new_group_form_open.set(false);
+                            settings_open.set(false);
                             new_server_form_open.update(|b| *b = !*b);
                         }
                         aria-label="new server"
@@ -597,6 +654,19 @@ where
                         disabled=move || !bootstrap_complete.get()
                     >
                         "★"
+                    </button>
+                    <button
+                        class="chat-sidebar-add chat-sidebar-settings"
+                        on:click=move |_| {
+                            add_form_open.set(false);
+                            new_group_form_open.set(false);
+                            new_server_form_open.set(false);
+                            settings_open.update(|b| *b = !*b);
+                        }
+                        aria-label="settings"
+                        title="Settings"
+                    >
+                        "⚙"
                     </button>
                 </div>
             </header>
@@ -610,7 +680,11 @@ where
                 when=move || add_form_open.get()
                 fallback=|| view! {}
             >
-                <AddConversationForm on_add=on_add.clone() on_cancel=move || add_form_open.set(false)/>
+                <AddConversationForm
+                    on_add=on_add.clone()
+                    on_cancel=move || add_form_open.set(false)
+                    prefill=add_form_prefill.get().unwrap_or_default()
+                />
             </Show>
             <Show
                 when=move || new_group_form_open.get()
@@ -629,6 +703,12 @@ where
                     on_submit=on_new_server.clone()
                     on_cancel=move || new_server_form_open.set(false)
                 />
+            </Show>
+            <Show
+                when=move || settings_open.get()
+                fallback=|| view! {}
+            >
+                <SettingsForm on_close=move || settings_open.set(false)/>
             </Show>
             <ul class="chat-conversation-list">
                 {move || {
@@ -653,6 +733,11 @@ where
                                 ConvoKind::OneOnOne => "",
                             };
                             let display_name = format!("{kind_prefix}{}", c.name);
+                            // Chunk F: avatar circle derived from
+                            // blake3 of the conversation id so it's
+                            // stable, with initials from the label.
+                            let color = avatar_color(&c.id);
+                            let initials = avatar_initials(&c.name);
                             view! {
                                 <li
                                     class=move || if active { "chat-conversation-item active" } else { "chat-conversation-item" }
@@ -661,6 +746,13 @@ where
                                         class="chat-conversation-button"
                                         on:click=move |_| current_view.set(ChatView::Conversation(id_for_click.clone()))
                                     >
+                                        <span
+                                            class="chat-avatar"
+                                            style=format!("background: {color};")
+                                            aria-hidden="true"
+                                        >
+                                            {initials}
+                                        </span>
                                         <span class="chat-conversation-name">{display_name}</span>
                                         <span class="chat-conversation-preview muted">
                                             {if c.last_preview.is_empty() { "no messages yet".to_string() } else { c.last_preview.clone() }}
@@ -672,7 +764,72 @@ where
                     }
                 }}
             </ul>
+            <ContactsList contacts=contacts on_click=on_contact_click/>
         </aside>
+    }
+}
+
+/// Chunk B: contacts directory rendered below the conversation list
+/// in the sidebar. Click a contact to either open the existing 1:1
+/// DM (if one exists) or open the AddConversation form prefilled
+/// with their user_id + label.
+#[component]
+fn ContactsList<K>(
+    contacts: RwSignal<Vec<Contact>>,
+    on_click: K,
+) -> impl IntoView
+where
+    K: Fn(Contact) + Clone + Send + Sync + 'static,
+{
+    view! {
+        <section class="chat-sidebar-contacts" aria-label="contacts">
+            <header class="chat-sidebar-contacts-header">
+                <h3>"Contacts"</h3>
+            </header>
+            {move || {
+                let list = contacts.get();
+                if list.is_empty() {
+                    view! {
+                        <p class="chat-sidebar-contacts-empty muted">
+                            "Contacts you DM appear here."
+                        </p>
+                    }.into_any()
+                } else {
+                    let on_click = on_click.clone();
+                    view! {
+                        <ul class="chat-contacts-list">
+                            {list.into_iter().map(|c| {
+                                let on_click = on_click.clone();
+                                let c_for_click = c.clone();
+                                let avatar_seed = c.user_id_hex.clone();
+                                let color = avatar_color(&avatar_seed);
+                                let initials = avatar_initials(&c.label);
+                                let short = short_user_id(&c.user_id_hex);
+                                view! {
+                                    <li class="chat-contact-item">
+                                        <button
+                                            class="chat-contact-button"
+                                            on:click=move |_| on_click(c_for_click.clone())
+                                            title=c.user_id_hex.clone()
+                                        >
+                                            <span
+                                                class="chat-avatar"
+                                                style=format!("background: {color};")
+                                                aria-hidden="true"
+                                            >
+                                                {initials}
+                                            </span>
+                                            <span class="chat-contact-name">{c.label.clone()}</span>
+                                            <span class="chat-contact-id muted">{short}</span>
+                                        </button>
+                                    </li>
+                                }
+                            }).collect_view()}
+                        </ul>
+                    }.into_any()
+                }
+            }}
+        </section>
     }
 }
 
@@ -739,13 +896,21 @@ fn MyUserIdBlock(my_user_id_hex: ReadSignal<String>) -> impl IntoView {
 }
 
 #[component]
-fn AddConversationForm<F, C>(on_add: F, on_cancel: C) -> impl IntoView
+fn AddConversationForm<F, C>(
+    on_add: F,
+    on_cancel: C,
+    /// `(peer_hex, label)` seed — populated when the user clicked a
+    /// contact whose DM doesn't exist yet (chunk B). Empty tuple
+    /// means start with blank fields.
+    prefill: (String, String),
+) -> impl IntoView
 where
     F: Fn(String, String) + Clone + Send + Sync + 'static,
     C: Fn() + Send + Sync + 'static + Copy,
 {
     let peer_input: NodeRef<leptos::html::Input> = NodeRef::new();
     let label_input: NodeRef<leptos::html::Input> = NodeRef::new();
+    let (initial_peer, initial_label) = prefill;
     let on_add_for_submit = on_add.clone();
     let submit = move |ev: SubmitEvent| {
         ev.prevent_default();
@@ -779,6 +944,7 @@ where
                 type="text"
                 placeholder="0123abcd…"
                 autocomplete="off"
+                value=initial_peer
             />
             <label for="chat-add-label" class="chat-add-label">
                 "Label (optional)"
@@ -790,6 +956,7 @@ where
                 type="text"
                 placeholder="Bob"
                 autocomplete="off"
+                value=initial_label
             />
             <div class="chat-add-actions">
                 <button class="button chat-add-submit" type="submit">
@@ -923,6 +1090,81 @@ where
                     on:click=move |_| on_cancel()
                 >
                     "Cancel"
+                </button>
+            </div>
+        </form>
+    }
+}
+
+/// Settings panel — chunk E. Currently exposes the home-server
+/// URL. Persisted to `lattice/server_url/v1`; a reload is
+/// required for the polling task to pick up the new URL
+/// (signaled by a notice under the input).
+#[component]
+fn SettingsForm<C>(on_close: C) -> impl IntoView
+where
+    C: Fn() + Send + Sync + 'static + Copy,
+{
+    let url_input: NodeRef<leptos::html::Input> = NodeRef::new();
+    let saved_msg = RwSignal::new(String::new());
+    let current = load_server_url(crate::app::DEFAULT_SERVER_URL);
+    let initial = current.clone();
+    let submit = move |ev: SubmitEvent| {
+        ev.prevent_default();
+        let val = url_input
+            .get()
+            .map(|n| n.unchecked_into::<HtmlInputElement>().value())
+            .unwrap_or_default();
+        let trimmed = val.trim().to_string();
+        if trimmed.is_empty() {
+            saved_msg.set("URL cannot be empty.".to_string());
+            return;
+        }
+        match save_server_url(&trimmed) {
+            Ok(()) => {
+                saved_msg.set("Saved — reload the page to apply.".to_string());
+            }
+            Err(e) => {
+                saved_msg.set(format!("Save failed: {e}"));
+            }
+        }
+    };
+    view! {
+        <form class="chat-add-form" on:submit=submit>
+            <label for="chat-settings-server" class="chat-add-label">
+                "Home server URL"
+            </label>
+            <input
+                node_ref=url_input
+                id="chat-settings-server"
+                class="chat-add-input"
+                type="text"
+                value=initial
+                placeholder="http://127.0.0.1:8080"
+                autocomplete="off"
+            />
+            <p class="chat-settings-hint muted">
+                "Where this client publishes + fetches MLS state. \
+                 Default is the local dev server. A reload is required \
+                 to pick up changes — the polling loop captures the URL \
+                 at construction time."
+            </p>
+            <Show
+                when=move || !saved_msg.get().is_empty()
+                fallback=|| view! {}
+            >
+                <p class="chat-settings-saved">{move || saved_msg.get()}</p>
+            </Show>
+            <div class="chat-add-actions">
+                <button class="button chat-add-submit" type="submit">
+                    "Save"
+                </button>
+                <button
+                    class="button chat-add-cancel"
+                    type="button"
+                    on:click=move |_| on_close()
+                >
+                    "Close"
                 </button>
             </div>
         </form>
@@ -1175,6 +1417,40 @@ fn short_user_id(hex_str: &str) -> String {
 fn now_unix() -> u64 {
     let ms = js_sys::Date::now();
     (ms / 1000.0) as u64
+}
+
+/// Derive an avatar color from a blake3 hash of the seed string
+/// (typically a user_id hex or a label). Returns an HSL color
+/// string. Stable across reloads — no UI flicker.
+///
+/// Chunk F.
+pub fn avatar_color(seed: &str) -> String {
+    let bytes = blake3::hash(seed.as_bytes());
+    let h = u16::from_le_bytes([bytes.as_bytes()[0], bytes.as_bytes()[1]]) % 360;
+    // Saturation + lightness fixed in the Lattice dark-mode
+    // palette band so every color is legible against the ink-900
+    // sidebar / thread surface.
+    format!("hsl({h}, 55%, 55%)")
+}
+
+/// Two-letter initials for an avatar. Strips ASCII prefixes
+/// (★ / # / "me (") and takes the first two graphemes that have
+/// a letter or digit.
+pub fn avatar_initials(label: &str) -> String {
+    let cleaned: String = label
+        .trim_start_matches('★')
+        .trim_start_matches('#')
+        .trim_start_matches("me (")
+        .trim_start_matches(|c: char| c.is_whitespace() || !c.is_alphanumeric())
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(2)
+        .collect();
+    if cleaned.is_empty() {
+        "??".to_string()
+    } else {
+        cleaned.to_uppercase()
+    }
 }
 
 fn format_short_time(unix: u64) -> String {

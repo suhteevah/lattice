@@ -46,7 +46,7 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// Default `lattice-server` endpoint for browser-side calls. Matches the
 /// `LATTICE_BIND_ADDR` Matt uses for local dev. Override at compile time
 /// later if we need to point at pixie / cnc.
-const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
+pub(crate) const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -422,8 +422,11 @@ pub fn App() -> impl IntoView {
     // Chunk C — real MLS chat state. ChatState owns the identity
     // bootstrap, per-conversation `GroupHandle`, and the polling
     // loop. It clones cheaply (Rc inside), so we hand a clone to
-    // the chat shell.
-    let chat_state = crate::chat_state::ChatState::new(DEFAULT_SERVER_URL);
+    // the chat shell. Chunk E: the home server URL is persisted
+    // in `lattice/server_url/v1`; first-launch uses
+    // DEFAULT_SERVER_URL until the user changes it in settings.
+    let configured_server_url = crate::chat_state::load_server_url(DEFAULT_SERVER_URL);
+    let chat_state = crate::chat_state::ChatState::new(configured_server_url);
 
     // Toggle the legacy debug grid open/closed. Default closed so the
     // chat shell is the visible default; one click opens debug.
