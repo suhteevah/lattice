@@ -12,7 +12,7 @@ lands.
 | Field | Value |
 |---|---|
 | Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
-| Last shipped | Track 4 chunk 2 first cut — server-membership groups + ★ classifier (2026-05-12) |
+| Last shipped | Chat-app MVP closeout — chunks 2.5 + E + F + B + D (2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 
@@ -95,6 +95,37 @@ in-memory mock data. Legacy button-grid lives behind a
 collapsed `<details>` element. Real MLS state plumbing is
 chunk C (the gating chunk for "chat actually works"); sized in
 `scratch/next-session-plan.md` Track 1. See HANDOFF §17.
+
+### Chat-app MVP closeout shipped 2026-05-12
+
+Five chunks landed together to close out the "what users see"
+backlog ahead of M7 Phase G.3 hardware-backed wrap.
+
+- **Chunk 2.5** — Discord-parity server completeness. Sender
+  attribution via `decrypt_with_sender`; admin authorization
+  (client-side flat-MLS + Init-seeded admin list);
+  `ServerStateOp::SyncState` for late-joiner roster delivery;
+  multi-channel (each channel its own MLS group, classified on
+  bootstrap via parent-server channel list). See HANDOFF §23.
+- **Chunk E** — settings panel + configurable home server URL
+  persisted to `lattice/server_url/v1`.
+- **Chunk F** — avatar circles (blake3-derived HSL hue per
+  conversation id) + 2×2 sidebar entry grid + flex-aligned
+  header.
+- **Chunk B** — contacts directory persisted to
+  `lattice/contacts/v1`. Auto-saves peers on
+  `add_conversation` success; click-from-sidebar focuses
+  existing DM or pre-fills the AddConversation form.
+- **Chunk D** — per-active-group `web_sys::WebSocket` wake
+  subscription (low-latency replacement for the 5-second poll
+  loop) + OS `Notification` with hard no-PII contract
+  (`show_generic_message_notification()` takes zero parameters,
+  fixed title "Lattice" / body "New message"). 30-second
+  rate-limit, `document.hidden` gate, service-worker upgrade
+  deferred.
+
+G.3 (Windows TPM 2.0 wrap via NCrypt `MS_PLATFORM_CRYPTO_PROVIDER`)
+is the next gate; subagent in flight.
 
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for

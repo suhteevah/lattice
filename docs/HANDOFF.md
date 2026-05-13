@@ -183,8 +183,9 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | Chat scrollback — pre-reload thread history renders on reload | ✅ shipped 2026-05-12 | Plaintexts persisted under `lattice/messages/{gid}/v1`. See §20. |
 | Track 4 chunk 1 — N-party group chat | ✅ shipped 2026-05-12 | New Group form + auto-discovery via `GET /welcomes/pending/:user_id`. See §21. |
 | Track 4 chunk 2 first cut — server-membership groups | ✅ shipped 2026-05-12 | `ServerStateOp::Init` classifier + ★ sidebar prefix. Single channel = server itself. See §22. |
-| Track 4 chunk 2.5 — multi-channel + admin enforcement | ⬜ next | Each channel a separate MLS group, `AddChannel`/`RemoveChannel`/`PromoteAdmin` acted on. |
-| Chat chunks B / D-rest / E / F | ⬜ | Onboarding + contacts, WebSocket push, server config, polish. |
+| Track 4 chunk 2.5 — multi-channel + admin enforcement | ✅ shipped 2026-05-12 | Each channel a separate MLS group; `AddChannel`/`RemoveChannel`/`PromoteAdmin` acted on. Sender attribution, late-joiner SyncState, classify-on-restore. See §23. |
+| Chat chunks E / F / B | ✅ shipped 2026-05-12 | Settings panel, avatar polish, contacts directory. See §23. |
+| Chat chunk D — WS push + no-PII notifications | ✅ shipped 2026-05-12 | Per-group WebSocket wake + `Notification` with fixed body. See §23. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -2192,4 +2193,112 @@ Bob reloads + opens conversation → scrollback loads from localStorage:
   authorization models sketched in
   `scratch/next-session-plan.md` Track 4 chunk 2. Recommend
   client-side first; upgrade if tamper concerns surface.
+
+## 23. Chat-app MVP closeout — chunks 2.5 / E / F / B / D (shipped 2026-05-12)
+
+Chat-shell polish pass. Closes out the "what users see" backlog so
+M7 can move to chunk 24 (G.3 hardware-backed wrap) without UI
+debt. Each sub-chunk in its own commit; this section narrates what
+landed.
+
+### 2.5 — server completeness
+
+Shipped per `feat: chunk 2.5 — MVP server completeness` (commit
+`7ac7e8d`). Four sub-deliverables:
+
+- **2.5a — sender attribution.** `decrypt_with_sender<G,R>` returns
+  `(Vec<u8>, Option<UserId>)` by resolving
+  `ApplicationMessageDescription.sender_index` against the group
+  roster. Channel pane shows "Bob: hello" instead of just "hello"
+  for non-self messages.
+- **2.5b — admin authorization.** Client-side flat-MLS plus a
+  per-server `admins: Vec<UserIdHex>` list seeded by
+  `ServerStateOp::Init`. `process_server_state_op` rejects
+  `AddChannel` / `RemoveChannel` / `PromoteAdmin` / `DemoteAdmin`
+  from non-admins. Tamper resistance escalates to a signed-policy
+  scheme if needed per DECISIONS §D-24.
+- **2.5c — late-joiner state sync.** `ServerStateOp::SyncState`
+  carries the full channel + admin list. The inviter publishes one
+  immediately after admit so joiners don't have to re-derive
+  history.
+- **2.5d — multi-channel.** Each channel is its own MLS group keyed
+  by a random `GroupId`. `AddChannel` op announces the new
+  channel's `group_id_hex + channel_name`; clients open a separate
+  MLS state machine for it. `reclassify_channels_after_restore`
+  promotes `NamedGroup → ServerChannel` on bootstrap when the
+  parent server's channel list contains a matching gid.
+
+### E — settings panel + configurable home server
+
+`SettingsForm` component behind a `⚙` button. `load_server_url`
+/ `save_server_url` persist to `lattice/server_url/v1`. Bootstrap
+reads the saved URL; defaults to `http://127.0.0.1:8080`. Lets
+the user point the chat at a non-default home server without
+rebuilding.
+
+### F — visual polish
+
+- Avatar circle (`avatar_color` / `avatar_initials`) — blake3-derived
+  HSL hue per conversation id, two-letter initials from the label.
+  Stable across reloads.
+- Sidebar entry is a 2×2 grid: avatar | name / preview.
+- `chat-header-bar` extracted as a flex row so the page-level
+  `<h1>` + tagline + status sit on one baseline.
+
+### B — onboarding + contacts
+
+- `Contact { user_id_hex, label, added_at_unix }` persisted to
+  `lattice/contacts/v1`. `save_contact` dedupes by hex.
+- `ChatState::add_conversation` auto-saves the peer as a contact on
+  success.
+- `ContactsList` block below the conversation list. Click → focuses
+  existing 1:1 DM (matched via `Conversation::peer_user_id_hex`)
+  or opens the AddConversation form prefilled with the contact's
+  hex + label.
+
+### D — WS push wake + no-PII notifications
+
+- `ws_subscribe.rs` opens one `web_sys::WebSocket` per active
+  group, talking to the existing `/group/:gid/messages/ws` route.
+  Frame payloads are ignored — the WS is purely a "wake the
+  poller" signal so the existing decrypt path stays
+  single-sourced.
+- `WebSocket` handles live in a `thread_local!` map so the JS
+  `!Send + !Sync` handle never leaks into `ChatState`'s Send+Sync
+  surface.
+- `notify.rs::show_generic_message_notification()` takes **zero
+  parameters**. Title `"Lattice"`, body `"New message"`. No
+  sender, no group id, no preview, no tag. The no-PII review gate
+  is enforced by the function signature, not just convention —
+  any future caller wanting per-conversation copy has to add a
+  new function. Aligned with
+  `memory/feedback_no_pii_in_notifications.md`.
+- 30-second rate limit + `document.hidden` gate so notifications
+  only fire when the tab is backgrounded AND a burst doesn't spam
+  the OS notification shade.
+- Service-worker upgrade for true background-tab receive is the
+  next step in this lane — out of scope for chunk D.
+
+### Files touched
+
+```
+apps/lattice-web/Cargo.toml            (+1 web-sys feature group)
+apps/lattice-web/src/main.rs           (+2 mod decls)
+apps/lattice-web/src/chat.rs           (+~360 LOC)
+apps/lattice-web/src/chat_state.rs     (+~120 LOC)
+apps/lattice-web/src/notify.rs         (new, 120 LOC)
+apps/lattice-web/src/ws_subscribe.rs   (new, 130 LOC)
+apps/lattice-web/styles.css            (+~90 LOC contact styles)
+```
+
+### Build status
+
+`cargo check --target wasm32-unknown-unknown --bin lattice-web` ✅
+clean. Trunk build + browser smoke deferred to the post-G.3 gate.
+
+### Next
+
+Chunk 24 — G.3 hardware-backed Windows TPM wrap. Subagent
+dispatched in this session; lands in the next HANDOFF section
+when it returns.
 
