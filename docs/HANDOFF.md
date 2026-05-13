@@ -3,10 +3,10 @@
 **Last updated:** 2026-05-12 (M7 Phases G.1 + G.2 shipped:
 `lattice-media::keystore` trait + DPAPI Windows / Secret Service
 Linux / Keychain macOS impls + five Tauri IPC commands. **Chat-app
-chunks A + C + group-state persistence** shipped: real DM flow
-over MLS survives page reload — verified two-tab end-to-end
-including post-reload bidirectional messaging. See §16 + §17 +
-§18 + §19 below.)
+chunks A + C + group-state persistence + scrollback** shipped:
+real DM flow over MLS survives page reload AND the thread
+re-renders pre-reload history on bootstrap. See §16 + §17 + §18
++ §19 + §20 below.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** 🟢 Working — **chat actually works**. Steps 1+2;
 **M1 / M2 / M3 / M4 / M5 / M6 all shipped**, **M7 Phases A–F +
@@ -180,7 +180,8 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | G.3 — TPM 2.0 (Windows) + Secure Enclave (macOS) + tss-esapi opt-in (Linux) | ⬜ | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
 | Chat chunks A + C — sidebar/thread/composer + real DM flow | ✅ shipped 2026-05-12 | End-to-end MLS chat verified across two browser tabs. See §17 + §18. |
 | Chat group-state persistence — chat survives page reload | ✅ shipped 2026-05-12 | localStorage-backed MLS group + KP + convo index. See §19. |
-| Chat chunks B / D-rest / E / F | ⬜ next | Onboarding + contacts, WebSocket push + history replay, server config, polish. |
+| Chat scrollback — pre-reload thread history renders on reload | ✅ shipped 2026-05-12 | Plaintexts persisted under `lattice/messages/{gid}/v1`. See §20. |
+| Chat chunks B / D-rest / E / F | ⬜ next | Onboarding + contacts, WebSocket push, server config, polish. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -1902,3 +1903,87 @@ last_seq = 3 (history of pre-reload + post-reload messages)
 - `cargo check --target wasm32-unknown-unknown --bin lattice-web` ✅
 - `trunk build` produces a clean dist/ bundle
 - Reload smoke verified end-to-end on two browser tabs
+
+---
+
+## 20. Chat scrollback (shipped 2026-05-12)
+
+Pre-reload thread history now renders immediately on reload.
+
+### Why plaintext-on-disk, not re-decrypt
+
+MLS application messages carry a per-epoch generation counter.
+mls-rs's `Group::decrypt` rejects any ciphertext whose generation
+is `≤ highest seen`. So we cannot replay scrollback by
+re-fetching the server's `since=0` view and re-decrypting — the
+in-memory MLS state restored from `LocalStorageGroupStateStorage`
+already knows it's processed generations 0..N, and feeding the
+same ciphertexts back errors out.
+
+Pragmatic alternative: persist the **plaintexts** to localStorage
+at decrypt time. At-rest plaintext protection is the same posture
+every chat app (Signal, Telegram, etc.) takes — full-disk
+encryption on the device is the relevant defense, not app-layer
+encryption.
+
+When chunk B's encrypted-unlock UI lands, scrollback should wrap
+under the same Argon2id / PRF KEK as the v2 / v3 identity blob.
+Until then, scrollback is plaintext alongside the v1 identity
+blob (which is also plaintext) — consistent posture.
+
+### Wire points
+
+`apps/lattice-web/src/chat.rs` adds three integration points:
+
+| Point | Behavior |
+|---|---|
+| `on_send` | Outgoing message: optimistic local-append now also `append_history(gid_hex, &entry)`. Persists before the async server POST so a reload-mid-send doesn't lose the message. |
+| `apply_polled_messages` | Each decrypted incoming envelope persists via `append_history` AND pushes to the signal. |
+| `Effect::new` watching `bootstrap_complete` | Reads `load_history(gid)` for each restored conversation and seeds the `messages` signal so the thread re-renders. Sidebar `last_preview` is stamped from the most-recent persisted message. |
+
+Storage helpers (`history_key`, `append_history`, `load_history`,
+`save_history`) live at the bottom of `chat.rs`. JSON serialization
+via `serde_json`; storage path `lattice/messages/{gid_hex}/v1`
+mirrors the existing namespacing pattern.
+
+### Reload smoke transcript (kokonoe, 2026-05-12)
+
+```
+fresh state — localStorage clear, server snapshot deleted
+both tabs bootstrap fresh identities:
+  Alice: 2828c1c9056298d5f61bf14e96fc8b5afe570befd4a4f58ced342242c74fe832
+  Bob:   3a093cd15224f0dca8f3c52554314b91bf24686831fe4ed1baef848e7e556019
+Bob invite Alice → conversation appears
+Alice add Bob → joins
+Bob send "msg1 from Bob" → Alice's poll decrypts ✓
+Alice send "reply from Alice" → Bob's poll decrypts ✓
+
+localStorage at this point on both:
+  lattice/messages/{gid}/v1 = [
+    {author: "...", body: "msg1 from Bob", ts: ...},
+    {author: "...", body: "reply from Alice", ts: ...}
+  ]
+
+both tabs navigate (hard reload)
+both tabs re-bootstrap + restore conversations + seed messages from history
+  → sidebar shows the conversation
+  → thread shows BOTH "msg1 from Bob" and "reply from Alice" immediately
+
+Bob send "msg2 from Bob — post-reload" → Alice's poll decrypts
+Alice's final thread: 3 messages (2 from scrollback + 1 new) ✓
+```
+
+### Known follow-ups
+
+- **Bounded retention.** Currently unlimited per-conversation. A
+  message-count cap (or age cap) lives in chunk E or F.
+- **Encrypted at rest.** Tracked alongside chunk B's
+  encrypted-identity-unlock UI. The KEK from
+  `argon2id-keyed ChaCha20-Poly1305` (v2 path) or PRF (v3 path)
+  should wrap the scrollback JSON.
+- **Threading consistency on server restart.** If the server
+  loses its snapshot mid-conversation, new sends start at
+  `seq=1` while clients have `last_seq>0`. Clients then miss
+  messages until they manually reset. Server-side persistence
+  hardening lives in M3 polish.
+
