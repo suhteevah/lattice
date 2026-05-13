@@ -25,8 +25,7 @@ A Lattice **identity** is two keypairs plus an extension:
 The ML-KEM keypair is carried as a custom MLS LeafNode extension with
 ID `0xF002`, distinct from the credential. ML-KEM is not a signature
 scheme; it lives next to the leaf init key (X25519 HPKE pubkey from
-the base 0x0003 suite) rather than inside the credential. See
-HANDOFF §12 for the design rationale.
+the base 0x0003 suite) rather than inside the credential.
 
 For ML-DSA-65 we persist only the 32-byte seed (the FIPS 204 `xi`
 value). The expanded signing key is deterministically rederived from
@@ -104,7 +103,7 @@ A Lattice KeyPackage carries:
   ML-KEM-768 verifying key.
 - The MLS leaf signature, classical (Ed25519, per RFC 9420).
 
-Size: roughly 12,057 bytes (verified live in the M4 β demo).
+Size: roughly 12,057 bytes (verified in browser-to-browser smoke).
 
 Wire-level structure is `mls-rs`'s `KeyPackage`; the extension layout
 is Lattice-specific.
@@ -149,7 +148,7 @@ without prompting for the passphrase first. The two secret fields
 are sealed by a ChaCha20-Poly1305 AEAD whose key is derived by
 Argon2id from your passphrase.
 
-Argon2id parameters per DECISIONS §D-08:
+Argon2id parameters:
 
 ```
 m_kib   = 64 * 1024   // 64 MiB
@@ -233,10 +232,10 @@ During a sign call, the secret bytes are unsealed into a `Zeroizing`
 buffer in process RAM, used to sign, and wiped on drop. True
 hardware-resident signing — where the key never leaves the secure
 module — is not achievable for Ed25519 or ML-DSA-65 on Windows
-(NCrypt does not support those algorithms). DECISIONS §D-26 carries
-the full rationale. Phase G.3 swaps DPAPI for a TPM-bound wrap key
-on Windows, Secure Enclave ECDH wrap on macOS, and optional
-`tss-esapi` on Linux. The trait surface does not change.
+(NCrypt does not support those algorithms). A TPM-backed
+implementation swaps DPAPI for a TPM-bound wrap key on Windows,
+Secure Enclave ECDH wrap on macOS, and optional `tss-esapi` on
+Linux. The trait surface does not change.
 
 Auditors should treat "hardware-backed" in Lattice's native-shell
 context as "platform-sealed at rest, RAM-only during sign," not as
@@ -277,16 +276,13 @@ What you can do:
 
 - Boot a new identity on a new device. Other users will see a new
   user_id; conversations with them need to be re-established. The
-  key transparency log (HANDOFF M6) makes a malicious server's
-  attempt to "recover" your account as a different user_id
-  detectable.
+  key transparency log makes a malicious server's attempt to
+  "recover" your account as a different user_id detectable.
 - If you have any **sibling device** still logged in to your
   account, you can issue an MLS Remove proposal to evict the lost
   device from active groups. The Remove fires a commit, advances
   the group epoch, and the lost device's per-epoch keys stop
-  working on next decrypt. This is the "device revocation" demo
-  button in the legacy debug grid; the chat-shell-integrated flow
-  is tracked as M5+ work.
+  working on next decrypt.
 
 The roadmap entry for a real export / import flow is Phase G
 follow-up — passphrase-keyed Argon2id wrap that lives outside the
@@ -303,17 +299,17 @@ platform.
 | Surface | OS | Path |
 |---|---|---|
 | Browser blob | All | `localStorage["lattice/identity/v1"]` |
-| CLI identity (D-08) | Linux | `~/.local/share/lattice/identity` |
-| CLI identity (D-08) | macOS | `~/Library/Application Support/chat.lattice.lattice/identity` |
-| CLI identity (D-08) | Windows | `%APPDATA%\lattice\lattice\identity` |
+| CLI identity | Linux | `~/.local/share/lattice/identity` |
+| CLI identity | macOS | `~/Library/Application Support/chat.lattice.lattice/identity` |
+| CLI identity | Windows | `%APPDATA%\lattice\lattice\identity` |
 | Tauri keystore — Windows DPAPI seal | Windows | `%LOCALAPPDATA%\Lattice\keystore\<handle>.dpapi` |
 | Tauri keystore — Linux Secret Service | Linux | Stored in the user's keyring vault (KDE Wallet / GNOME Keyring); sidecar at `~/.local/share/lattice/keystore/` |
 | Tauri keystore — macOS Keychain | macOS | login Keychain; sidecar at `~/Library/Application Support/chat.lattice.lattice/keystore/` |
 
-The CLI identity file follows DECISIONS §D-08: header (Argon2id
-params + salt) + body (ChaCha20-Poly1305 ciphertext over a
-Prost-encoded `Identity` struct) + AEAD tag. File permissions `0600`
-on Unix; refuse to load files with looser permissions.
+The CLI identity file is a header (Argon2id params + salt) + body
+(ChaCha20-Poly1305 ciphertext over a Prost-encoded `Identity`
+struct) + AEAD tag. File permissions `0600` on Unix; refuse to
+load files with looser permissions.
 
 ---
 
@@ -335,10 +331,9 @@ fastest way to lose the user. As of the current handoff:
 - **No biometric step at sign.** The OS keychain unlocks once per
   session; signing operations inside the session do not re-prompt.
 - **No key transparency proofs in the chat UI.** The KT log code is
-  in `crates/lattice-keytransparency/` (M6 shipped) and the server
+  in `crates/lattice-keytransparency/` (shipped) and the server
   publishes roots; the client-side inclusion-proof verification is
   not yet wired into the chat shell.
 
-The roadmap entries for each of the above live in
-[`docs/ROADMAP.md`](../ROADMAP.md) under M5+, M7 G.3, and the chat-app
-chunks B / E.
+Each of the above is in the public roadmap kept in the source
+repository.

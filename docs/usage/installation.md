@@ -13,8 +13,7 @@ covers all four:
 4. The **dev CLI** at `crates/lattice-cli/` — admin and smoke-test
    tool.
 
-Mobile (iOS, Android) shells are tracked in ROADMAP M7 Phase H and
-are not yet shipped.
+Mobile (iOS, Android) shells are tracked but not yet shipped.
 
 ---
 
@@ -24,14 +23,13 @@ The lattice-web bundle is a standard static SPA. There is no
 installer. You either:
 
 - Open the URL of a hosted instance. The reference public deploy
-  hostname is not yet committed (see DECISIONS §D-22 — domain choice
-  is still open).
+  hostname is not yet committed.
 - Or run a dev server locally per [quickstart.md](quickstart.md).
 - Or self-host the static bundle on any CDN / object store and point
   it at any reachable `lattice-server`. The client picks the home
-  server URL via runtime configuration (currently hardcoded to
-  `http://127.0.0.1:8080`; chunk E of the chat-app work makes this
-  user-configurable).
+  server URL via runtime configuration; the default
+  `http://127.0.0.1:8080` is overrideable from the in-app settings
+  panel.
 
 The bundle compiles to a single `.wasm` file (~3 MB release, ~800 KB
 debug compressed) plus a small JS shim, a CSS file, and an
@@ -62,7 +60,7 @@ is the fallback. See [identity-and-keys.md](identity-and-keys.md).
 - WebAuthn PRF — optional, recommended. Hardware-bound identity
   encryption.
 - WebTransport — detected, not yet used. Server-side QUIC + H3 + WT
-  is M4 follow-up work; the browser already lights up the chip when
+  is follow-up work; the browser already lights up the chip when
   it sees `window.WebTransport`.
 - WebSocket — used by the live-push path
   (`/group/<gid>/messages/ws`).
@@ -74,10 +72,10 @@ bootstrap is reconciled with that policy.
 
 ### Service worker
 
-The service worker is registered at `/sw.js` with scope `/`. In M4 it
-is a two-responsibility stub: an app-shell cache for offline draft
-compose and an empty push handler scaffolded for M6's push payloads
-(see DECISIONS §D-10). Future work fills the push handler in.
+The service worker is registered at `/sw.js` with scope `/`. It is
+currently a two-responsibility stub: an app-shell cache for offline
+draft compose, and an empty push handler scaffolded for future push
+payloads.
 
 ---
 
@@ -149,8 +147,8 @@ lattice-desktop`) compiles green on GNU.
 
 Unsigned. Lattice is AGPL; the security model assumes you either
 build from source or trust your distributor. Code-signing
-infrastructure is tracked but not in scope for M7. Reproducible
-builds are a long-horizon goal.
+infrastructure is tracked but not yet shipped. Reproducible builds
+are a long-horizon goal.
 
 ---
 
@@ -192,16 +190,16 @@ Size: ~5 MB stripped. The release profile already sets
 
 | Resource | Minimum | Notes |
 |---|---|---|
-| Memory | 64 MiB | More for larger groups; M3 server keeps state in memory. |
+| Memory | 64 MiB | More for larger groups; the current server keeps state in memory. |
 | Disk | 64 MiB | Snapshot file scales with users + KPs + group commits. |
-| Open ports | 1 (default 8080) | HTTPS lands as M3 polish (ACME via `instant-acme`). |
-| Postgres | Optional | M3 server uses in-memory state with JSON snapshot. sqlx integration is M3 polish work. |
+| Open ports | 1 (default 8080) | HTTPS via ACME (`instant-acme`) is future work. |
+| Postgres | Optional | The current server uses in-memory state with JSON snapshot. sqlx integration is future work. |
 | Federation | Outbound HTTP/1.1 | Peer fan-out goes over plain HTTP today; TLS lands with the ACME work. |
 
-There is no daemon dependency — no Redis, no RabbitMQ, no S3. The M3
-server is intentionally minimal. M5+ adds optional Postgres-backed
-storage, ACME-driven TLS, sqlite-backed message inbox, and rate
-limits. See ROADMAP for the per-milestone plan.
+There is no daemon dependency — no Redis, no RabbitMQ, no S3. The
+current server is intentionally minimal. Future work adds optional
+Postgres-backed storage, ACME-driven TLS, sqlite-backed message
+inbox, and rate limits.
 
 ### Systemd unit
 
@@ -266,7 +264,7 @@ cargo build -p lattice-cli --release
 .\target\release\lattice.exe --help
 ```
 
-Subcommands implemented as of M3:
+Subcommands implemented today:
 
 | Command | Purpose |
 |---|---|
@@ -280,8 +278,8 @@ Subcommands implemented as of M3:
 | `demo` | Single-process Alice + Bob smoke test against two server URLs. |
 | `issue-cert` | Request a sealed-sender membership cert. |
 
-The CLI uses a file-backed identity store under `~/.lattice/` per
-DECISIONS §D-08. Override with `--identity-path <file>`.
+The CLI uses a file-backed identity store under `~/.lattice/`.
+Override the path with `--identity-path <file>`.
 
 `demo` is the easiest way to verify a fresh server deploy. From any
 host that can reach both servers:
@@ -328,9 +326,9 @@ Lattice put on disk:
 
 ```powershell
 # Repository (just delete the clone)
-Remove-Item -Recurse -Force J:\lattice
+Remove-Item -Recurse -Force .\lattice
 
-# Per-user CLI identity store (D-08 path)
+# Per-user CLI identity store
 Remove-Item -Recurse -Force "$env:APPDATA\lattice"
 
 # Browser local state — open DevTools > Application > Storage > "Clear site data"
@@ -356,5 +354,6 @@ rm -rf ~/.local/share/lattice
 ```
 
 The home-server snapshot lives wherever `LATTICE__SNAPSHOT_PATH`
-points (default `J:\lattice\.run\dev-server\snapshot.json` for the
-dev script). Delete the file to reset the server to empty state.
+points (default `.\\.run\\dev-server\\snapshot.json` relative to the
+repository root, for the dev script). Delete the file to reset the
+server to empty state.

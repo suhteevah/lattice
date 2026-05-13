@@ -6,10 +6,9 @@ channels inside it. Under the hood a server is just an MLS group
 with a particular shape of application message; channels are
 separate MLS groups federated by the server-membership group.
 
-This page describes the model, what is shipped today, and what
-is tracked for chunk 2.5 (multi-channel + admin enforcement). It
-cross-references DECISIONS §D-24 (moderation model — per-server,
-no global) throughout.
+This page describes the model and what is shipped today.
+Moderation is per-server with no global mechanism — each home
+server's operator handles their own house.
 
 If you are new to Lattice, read [messaging.md](messaging.md) first
 — it covers how a message gets from one client to another, which is
@@ -115,7 +114,7 @@ via `GET /welcomes/pending/<uid>`; they classify as
 next poll decrypts the `Init` and upgrades the classification to
 `ConvoKind::ServerMembership { server_name }`.
 
-End-to-end smoke transcript from HANDOFF §22, for reference:
+End-to-end smoke transcript, for reference:
 
 ```
 Alice + Bob bootstrap fresh identities (separate origins).
@@ -131,34 +130,18 @@ Bob reloads + opens conversation → scrollback loads from localStorage:
 
 ---
 
-## Channels (chunk 2 first cut)
+## Channels
 
-The current chunk 2 first cut ships **one implicit channel per
-server**. The server-membership group itself doubles as the chat
-group. `AddChannel` ops decode but do not spin up separate MLS
-groups. The full multi-channel architecture lives in chunk 2.5.
+A server's first channel is implicit — the server-membership group
+itself doubles as a `#general` thread. Additional channels are
+**separate MLS groups** with their own group_id, membership
+roster, and epoch counter. The server-membership group remains as
+the "who is in this server at all" root; channels are sub-groups
+whose membership is a subset of the server membership.
 
-What that means today:
+Wire-level, channel creation looks like:
 
-- Every message in a server lands in one shared thread.
-- `Init`'s `channels` field is empty by convention; the server
-  itself is the implicit `#general`.
-- The chat UI doesn't render a channel list (yet).
-
-Chunk 2.5 — multi-channel + admin enforcement — is the next-up work
-in ROADMAP. The plan:
-
-### Chunk 2.5 — per-channel MLS groups
-
-Each channel becomes a **separate MLS group** with its own
-group_id, own membership roster, own epoch counter. The
-server-membership group remains as the "who is in this server at
-all" root; channels are sub-groups whose membership is a subset of
-the server membership.
-
-Wire-level, this looks like:
-
-1. Server admin (TBD per chunk 2.5 admin enforcement) sends
+1. A server admin sends
    `ServerStateOp::AddChannel { channel_group_id, name: "design"
    }` to the server-membership group.
 2. All clients receive the op and add the channel to their local
@@ -172,8 +155,7 @@ Wire-level, this looks like:
 A late joiner sees `AddChannel` ops issued **after** their join
 epoch only. Mitigation: the inviter sends a `SyncState` op (or
 re-embeds the current channel list in the join-time application
-message) immediately after admit. The exact mechanism is open per
-HANDOFF §22 open questions.
+message) immediately after admit.
 
 ### Per-channel private membership
 
@@ -199,28 +181,20 @@ two open mitigations:
   surface, but the joiner sees the state before they receive any
   application messages.
 
-HANDOFF §22 leans toward the snapshot approach. Chunk 2.5 will pick
-one when the work lands.
+The current implementation uses the inviter-snapshot approach.
 
 ---
 
 ## Admin model
 
-DECISIONS §D-24 locks the moderation model: per-server admin tools
-in V1, no global moderation, no cross-server reputation. Each home
-server's operator handles their own house.
+The locked moderation model: per-server admin tools, no global
+moderation, no cross-server reputation. Each home server's operator
+handles their own house.
 
-### What admins can do (chunk 2 first cut)
-
-Today, **everyone** is implicitly admin — MLS is flat, every member
-can commit, every member can send any `ServerStateOp`. `PromoteAdmin`
-and `DemoteAdmin` ops decode and persist locally but are not yet
-enforced. This is the gap chunk 2.5 closes.
-
-### What admins will be able to do (chunk 2.5)
+### What admins can do
 
 - Send `AddChannel`, `RemoveChannel`, `RenameServer`, `PromoteAdmin`,
-  `DemoteAdmin`. Non-admins' ops of these types will be rejected by
+  `DemoteAdmin`. Non-admins' ops of these types are rejected by
   receivers (client-side enforcement; see below).
 - Remove members from the server-membership group via the MLS
   `Remove` proposal. The removed user's per-epoch keys stop working
@@ -228,27 +202,26 @@ enforced. This is the gap chunk 2.5 closes.
 - Update the channel list and the admin roster.
 
 Per-server admin UI for the home-server **operator** (not in-app
-admins) is M5's work and lives at
-[`crates/lattice-server/src/admin/`](../../crates/lattice-server)
-when implemented. Operator powers include:
+admins) lives at `crates/lattice-server/src/admin/`. Operator
+powers include:
 
 - Ban list (per home server: user_ids barred from registration).
 - Message removal within own server's storage. Cannot recall
   ciphertext from peer servers (peers retain copies; this is a
   property of federation, not a bug).
 - Group takedown for groups owned by this server (revokes all
-  per-epoch certs from D-05; group can't issue new commits via
+  per-epoch sealed-sender certs; group can't issue new commits via
   this server).
 - Federation peer blocklist (refuse to federate with named hosts).
 
 ### Client-side enforcement: "flat MLS + signed policy"
 
-The recommended approach (HANDOFF §22 open questions): keep MLS flat
-(every member technically able to commit) but each peer's local
-client enforces an admin policy derived from the replay of
-`PromoteAdmin` / `DemoteAdmin` ops. A non-admin's `AddChannel` op is
-ignored locally; the admin roster is the union-of-promotes minus
-the set-of-demotes for that user over the lifetime of the server.
+The current approach: keep MLS flat (every member technically able
+to commit) but each peer's local client enforces an admin policy
+derived from the replay of `PromoteAdmin` / `DemoteAdmin` ops. A
+non-admin's `AddChannel` op is ignored locally; the admin roster
+is the union-of-promotes minus the set-of-demotes for that user
+over the lifetime of the server.
 
 The trade-off accepted: a malicious non-admin can still **emit** an
 `AddChannel` op (MLS does not stop them), but every honest peer's
@@ -257,9 +230,9 @@ honour it is non-conformant, not a protocol vulnerability.
 
 The harder tamper-resistance upgrade is **MLS external senders** —
 a roster-side restriction that mls-rs supports via the
-`ExternalSendersExtension`. Two authorization models sketched in
-HANDOFF §22; chunk 2.5 starts with client-side policy and upgrades
-if tamper concerns surface.
+`ExternalSendersExtension`. The current build uses client-side
+policy; the external-senders upgrade is on the public roadmap if
+tamper concerns surface.
 
 ---
 
@@ -274,16 +247,16 @@ are identical to N-party groups:
   inviter's home server POSTs to the joiner's home server's
   `/federation/inbox`.
 - The joiner's home server pins the inviter server's federation
-  pubkey on first contact (TOFU per DECISIONS §D-06 / §D-13).
+  pubkey on first contact (TOFU).
 - Subsequent messages are pushed similarly via
   `/federation/message_inbox`.
 
 See [federation.md](federation.md) for the full federation flow,
-including the cross-VPS smoke transcript from M3.
+including the cross-server smoke transcript.
 
 ---
 
-## Smoke test summary (chunk 2 first cut)
+## Smoke test summary
 
 For the curious, the wire-level transcript of creating a server
 between Alice (`localhost:5173` against `127.0.0.1:8080`) and Bob
@@ -309,15 +282,6 @@ Full route reference at [api-reference.md](api-reference.md).
 
 ## Cross-references
 
-- DECISIONS §D-24 — moderation model. Per-server admin tools only;
-  no global moderation; cross-server abuse mitigation depends on
-  each peer admin's response plus the client-side distrust score
-  (D-13).
-- HANDOFF §22 — "Track 4 chunk 2 first cut — server-membership
-  groups." The shipped surface and the open questions for chunk
-  2.5.
-- HANDOFF §21 — "Track 4 chunk 1 — N-party group chat." The
-  underlying multi-Welcome plumbing.
 - [security-model.md](security-model.md#hidden-membership) — the
-  M6 hidden-membership extension applies to servers and channels
-  the same way it applies to any MLS group.
+  hidden-membership extension applies to servers and channels the
+  same way it applies to any MLS group.

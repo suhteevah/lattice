@@ -22,7 +22,7 @@ convention is mandatory per CLAUDE.md.
 **Cause:** Your `localStorage["lattice/identity/v1"]` is a v2
 (Argon2id-encrypted) or v3 (PRF-encrypted) blob, but the chat-shell
 auto-bootstrap only handles v1 plaintext. The chat-shell flow for
-encrypted unlock is chunk B work that has not yet landed.
+encrypted unlock has not yet landed.
 
 **Fix (today):**
 
@@ -42,8 +42,8 @@ location.reload();
 
 You lose your existing identity and any conversations.
 
-**Permanent fix:** chunk B integrates the unlock UI into the chat
-shell directly. Tracked in HANDOFF §1.
+**Permanent fix:** the unlock UI is being integrated directly into
+the chat shell.
 
 ---
 
@@ -72,10 +72,9 @@ that the Welcome is addressed to. Three possible reasons:
 race silently. For case 2, you have a new identity and need to
 re-invite from the peer's side.
 
-**Fix (case 3):** see HANDOFF §19 — the KP repo shadow-sync is
-shipped. Confirm by inspecting
-`localStorage["lattice/mls/kp_ids"]` in DevTools; it should
-contain a non-empty JSON array.
+**Fix (case 3):** the KP repo shadow-sync is shipped. Confirm by
+inspecting `localStorage["lattice/mls/kp_ids"]` in DevTools; it
+should contain a non-empty JSON array.
 
 ---
 
@@ -103,7 +102,7 @@ sub-causes:
    `apps/lattice-web/src/app.rs::DEFAULT_SERVER_URL`. Editing it
    requires rebuilding (`trunk build`).
 3. Confirm CORS is permissive on the server: it should reply with
-   `Access-Control-Allow-Origin: *`. M3 ships this as the default.
+   `Access-Control-Allow-Origin: *`. The server ships this as the default.
 4. Check the server log for the request — if it does not show up
    there, the problem is between the browser and the server, not
    in the server itself.
@@ -132,9 +131,9 @@ location.reload();
 
 **Cause:** You auto-joined an N-party group or a server-membership
 group via `discover_pending_welcomes`. Welcomes do not carry the
-group name (chunk 2 first-cut limitation). For server-membership
-groups, the label upgrades to the server's name on the next 5-second
-poll when the `ServerStateOp::Init` decrypts.
+group name. For server-membership groups, the label upgrades to
+the server's name on the next 5-second poll when the
+`ServerStateOp::Init` decrypts.
 
 **Fix:** wait 5 seconds for the poll, or click into the conversation
 to trigger a poll immediately.
@@ -234,8 +233,8 @@ the pubkey you have pinned for that host. Two possibilities:
 - Confirm by fetching `/.well-known/lattice/server` from the peer
   out-of-band (Signal, voice call). Compare to the pubkey you have
   pinned.
-- If the peer legitimately rotated, manually update your pin (M5+
-  config knob; pre-M5 requires editing the persisted peer registry
+- If the peer legitimately rotated, manually update your pin (future
+  config knob; today this requires editing the persisted peer registry
   by hand).
 - If the change is unexpected, leave the pin alone and surface a
   distrust delta. Investigate the peer.
@@ -252,7 +251,7 @@ gets dropped. The client reconnects on its end and recovers via
 `GET /group/<gid>/messages?since=N`.
 
 **Fix:** none required — this is the protocol behaving correctly.
-M5+ config tuning may bump the buffer size for high-traffic groups.
+Future config tuning may bump the buffer size for high-traffic groups.
 
 ---
 
@@ -291,7 +290,7 @@ Either is supported; the GNU path is the one Matt's box uses.
 
 **Cause:** A `RUSTC_WRAPPER` (commonly `sccache`) is shimming the
 linker call and producing a malformed command line. Seen on
-openSUSE Tumbleweed's default config (HANDOFF §M3 deploy notes).
+openSUSE Tumbleweed's default config.
 
 **Fix:** disable the wrapper for this build.
 
@@ -319,10 +318,10 @@ transitive symbol count (Tauri + webrtc-rs + lattice-crypto +
 lattice-server cross-deps under workspace unification).
 
 **Fix:** the workspace pins `lattice-desktop`'s `[lib]` to `rlib`
-only (HANDOFF §15). `cargo check -p lattice-desktop` and `cargo
-tauri dev` both compile green. `cargo tauri build` for the MSI
-bundle requires the MSVC toolchain. Reinstate
-`["staticlib", "cdylib", "rlib"]` once you stand up an MSVC host.
+only. `cargo check -p lattice-desktop` and `cargo tauri dev` both
+compile green. `cargo tauri build` for the MSI bundle requires the
+MSVC toolchain. Reinstate `["staticlib", "cdylib", "rlib"]` once
+you stand up an MSVC host.
 
 ---
 
@@ -469,7 +468,7 @@ security findings. For regular bugs:
 3. Note your platform + toolchain (`rustc --version`, OS, host
    triple).
 4. Open an issue or pull request against
-   `github.com/suhteevah/lattice`. The owner's GitHub Actions are
-   not used (per Matt's policy); local verification gates are
+   `github.com/suhteevah/lattice`. GitHub Actions are not used for
+   this project; local verification gates are
    `scripts/test-all.ps1` and the explicit commands in
    [development.md](development.md).

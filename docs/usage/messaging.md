@@ -90,8 +90,8 @@ When Alice types `hi bob — first lattice message` and presses Enter:
 3. The plaintext is fed to `encrypt_application` on the group,
    producing a ~3.6 KB MLS ciphertext.
 4. The ciphertext is wrapped in a `SealedEnvelope` signed by Alice's
-   per-epoch ephemeral Ed25519 key. The membership cert (D-05) was
-   issued by the home server during the commit-acceptance flow.
+   per-epoch ephemeral Ed25519 key. The membership cert was issued
+   by the home server during the commit-acceptance flow.
 5. The envelope is base64-encoded and POSTed to
    `/group/<gid>/messages`. The server returns a monotonic
    `seq`.
@@ -115,10 +115,9 @@ Bob's side:
 3. The UI re-renders with the new message.
 
 WebSocket push (`/group/<gid>/messages/ws`) replaces the 5-second
-poll for instant delivery; it is shipped server-side and used by the
-"Live WS push (γ.4 fallback)" demo button. The chat shell still
-polls by default — wiring the WS path into the shell is chunk D of
-the chat-app work.
+poll for instant delivery. The chat shell opens one WS per active
+group at bootstrap and wakes the poll loop on every frame, with
+the 5-second poll retained as the fallback.
 
 ### Scrollback persistence
 
@@ -137,11 +136,11 @@ errors out.
 Pragmatic alternative: persist the **plaintexts** at decrypt time.
 At-rest plaintext protection becomes the operating system's
 full-disk encryption rather than the app's MLS layer, which is the
-posture Signal and Telegram take. When chunk B's encrypted-unlock UI
-lands, scrollback should wrap under the same Argon2id / PRF KEK as
+posture Signal and Telegram take. When the encrypted-unlock UI
+lands, scrollback will wrap under the same Argon2id / PRF KEK as
 the v2 / v3 identity blob.
 
-Reload smoke transcript from HANDOFF §20, for reference:
+Reload smoke transcript, for reference:
 
 ```
 fresh state — localStorage clear, server snapshot deleted
@@ -166,7 +165,7 @@ both tabs re-bootstrap + restore conversations + seed messages from history
 ```
 
 Bounded retention (a per-conversation message-count or age cap) is
-tracked as chat-app chunk E / F work. Today scrollback is unlimited.
+on the public roadmap. Today scrollback is unlimited.
 
 ---
 
@@ -193,8 +192,7 @@ Submit and:
    - One MLS commit.
    - One MLS Welcome per joiner.
    - One `PqWelcomePayload` per joiner (per-joiner ML-KEM-768
-     ciphertext + a per-joiner AEAD-wrapped random secret `W` —
-     see HANDOFF §5 multi-member section for the wire detail).
+     ciphertext + a per-joiner AEAD-wrapped random secret `W`).
 4. POST the bundle to `/group/<gid>/commit` as a single body with a
    `welcomes: [...]` array.
 5. Persist the `ConvoRecord` with `ConvoKind::NamedGroup`.
@@ -231,7 +229,7 @@ and the client silently skips it.
 ### Multi-joiner Welcome construction
 
 The wire format for N-party Welcomes deserves its own paragraph
-because it is the M5 deliverable that bumped the protocol from
+because it bumped the protocol from
 v1 → v2.
 
 In a 1:1 invite, the `PqWelcomePayload` is a simple `(ml_kem_ct,
@@ -277,7 +275,7 @@ the inviter sends an `Init` op as the first application message
 ServerStateOp::Init {
     server_name: "Friends",
     admins: vec![<creator_uid_hex>],
-    channels: vec![],   // chunk 2 first-cut: one implicit channel
+    channels: vec![],   // additional channels added via AddChannel ops
 }
 ```
 
@@ -296,8 +294,8 @@ The full state machine and the multi-channel posture live at
 
 ## Sealed sender
 
-Every message Lattice sends rides a `SealedEnvelope`. The construction
-is documented in DECISIONS §D-05 and threat-modelled in
+Every message Lattice sends rides a `SealedEnvelope`. The
+construction is threat-modelled in
 [security-model.md](security-model.md#sealed-sender); the short
 version is:
 
@@ -331,7 +329,7 @@ For a sense of the over-the-wire shape:
 | MLS Welcome (1 joiner) | ~19,819 bytes | |
 | `PqWelcomePayload` (1 joiner) | 1,088 bytes | ML-KEM-768 ciphertext |
 | MLS application ciphertext | ~3,662 bytes | For a short plaintext ("hello, lattice") |
-| `SealedEnvelope` (D-05) | ~3,879 bytes | App ciphertext + sig + cert reference |
+| `SealedEnvelope` | ~3,879 bytes | App ciphertext + sig + cert reference |
 | Identity blob v1 | ~7,679 bytes | Plaintext |
 | Identity blob v2 | ~7,756 bytes | Argon2id-keyed AEAD |
 
@@ -361,9 +359,9 @@ The composer at the bottom of the thread pane supports:
 
 - **Enter** to send. **Shift+Enter** for a newline.
 - Plain text only. No markdown, no rich-text, no HTML rendering of
-  message content. This is a deliberate hardening choice (D-20):
-  rendering HTML from message content would re-introduce an
-  XSS-equivalent attack surface inside the chat shell.
+  message content. This is a deliberate hardening choice: rendering
+  HTML from message content would re-introduce an XSS-equivalent
+  attack surface inside the chat shell.
 - A future limited-markdown subset (bold, italic, code spans, code
   blocks, links with `nofollow`) is tracked but not shipped.
 
@@ -371,7 +369,7 @@ There is no file-upload affordance in the current chat shell. The
 attachment crypto path is exercised in the legacy debug grid
 (`try_attachment_demo`) and the wire format is locked
 (`lattice/attachment/v1`); the server-side upload route is
-post-M3 work.
+future work.
 
 ---
 
@@ -388,6 +386,5 @@ post-M3 work.
 - Search across history.
 - Block / mute.
 
-Most of the above live in chat-app chunks D / E / F in HANDOFF §1.
-Track 4 chunk 2.5 covers the multi-channel and admin-enforcement
-work for Discord-style servers.
+All of the above are on the project's public roadmap in the
+source repository.

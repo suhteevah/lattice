@@ -26,13 +26,13 @@ const USAGE_SRC = path.join(repoRoot, 'docs', 'usage');
 const USAGE_DEST = path.join(appRoot, 'src', 'content', 'docs', 'docs', 'usage');
 
 const WIKI_DEST = path.join(appRoot, 'src', 'content', 'docs', 'wiki');
+// **Public wiki only.** HANDOFF / ROADMAP / DECISIONS / README are
+// internal — they leak machine names, future plans, session logs,
+// and tentative product decisions. Do not add them here without an
+// explicit scrub-and-review pass.
 const WIKI_FILES = [
-  { name: 'README', src: 'README.md', sort: 0, label: 'Wiki home' },
-  { name: 'HANDOFF', src: 'docs/HANDOFF.md', sort: 10, label: 'Handoff' },
-  { name: 'ROADMAP', src: 'docs/ROADMAP.md', sort: 20, label: 'Roadmap' },
-  { name: 'DECISIONS', src: 'docs/DECISIONS.md', sort: 30, label: 'Decisions' },
-  { name: 'ARCHITECTURE', src: 'docs/ARCHITECTURE.md', sort: 40, label: 'Architecture' },
-  { name: 'THREAT_MODEL', src: 'docs/THREAT_MODEL.md', sort: 50, label: 'Threat model' },
+  { name: 'ARCHITECTURE', src: 'docs/ARCHITECTURE.md', sort: 10, label: 'Architecture' },
+  { name: 'THREAT_MODEL', src: 'docs/THREAT_MODEL.md', sort: 20, label: 'Threat model' },
 ];
 
 function log(...args) {
@@ -172,7 +172,7 @@ async function syncWiki() {
   const indexBody = [
     '---',
     'title: "Wiki"',
-    'description: "Design-doc wiki — handoff, roadmap, decisions, architecture, threat model."',
+    'description: "Lattice architecture + threat model reference."',
     'sidebar:',
     '  order: -10',
     '  label: "Wiki overview"',
@@ -180,18 +180,15 @@ async function syncWiki() {
     '',
     '# Lattice wiki',
     '',
-    "The wiki mirrors the repo's top-level design documents so anyone can",
-    'follow the project without cloning the source tree.',
+    'Reference pages for the design surface — published verbatim from the',
+    'repository so readers can audit the construction without cloning the',
+    'source tree.',
     '',
-    '- [Handoff](handoff/) — the rolling status doc; what is shipped, what is next.',
-    '- [Roadmap](roadmap/) — milestone gating + sequencing through V1 / V2 / V3.',
-    '- [Decisions](decisions/) — locked design choices (D-NN entries). Re-open conditions per row.',
-    '- [Architecture](architecture/) — workspace layout, crate responsibilities, dependency graph.',
-    '- [Threat model](threat_model/) — adversary classes, mitigations, residual risk.',
+    '- [Architecture](architecture/) — workspace layout, crate responsibilities, the layered view, federation topology, and the hybrid PQXDH handshake.',
+    '- [Threat model](threat_model/) — adversary classes considered, mitigations in place, and the residual exposure we explicitly do not defend against.',
     '',
-    'These are auto-mirrored from `docs/` at every site build. Edit them in',
-    'the [repo](https://github.com/suhteevah/lattice/tree/main/docs); the docs',
-    'site picks up changes on the next deploy.',
+    'For installation, day-to-day usage, the HTTP API surface, and the',
+    "operator-side self-hosting runbook, head to the [Documentation](/docs/usage/) section.",
     '',
   ].join('\n');
   await fs.writeFile(path.join(WIKI_DEST, 'index.md'), indexBody, 'utf8');

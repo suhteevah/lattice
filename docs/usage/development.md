@@ -27,8 +27,8 @@ lattice/
 │   ├── lattice-server/                 # home server binary (axum)
 │   ├── lattice-core/                   # client core lib, compiles to wasm32
 │   ├── lattice-storage/                # encrypted store (IndexedDB v1, native v2)
-│   ├── lattice-keytransparency/        # M6 — Trillian-style log
-│   ├── lattice-media/                  # M7 voice/video, keystore, PQ-DTLS-SRTP
+│   ├── lattice-keytransparency/        # Trillian-style transparency log
+│   ├── lattice-media/                  # voice/video, keystore, PQ-DTLS-SRTP
 │   └── lattice-cli/                    # admin + dev tooling
 │
 ├── apps/
@@ -40,12 +40,8 @@ lattice/
 │   └── icons/                          # custom outline icon set
 │
 ├── docs/
-│   ├── HANDOFF.md                      # session log + design rationale
-│   ├── ROADMAP.md                      # phased security mitigations
-│   ├── THREAT_MODEL.md                 # node-capture analysis
 │   ├── ARCHITECTURE.md                 # protocol + topology deep-dive
-│   ├── DECISIONS.md                    # D-01 through D-26
-│   ├── DEPLOY.md                       # verified deploy walkthrough
+│   ├── THREAT_MODEL.md                 # node-capture analysis
 │   └── usage/                          # user-facing guide (this set)
 │
 └── scripts/
@@ -229,19 +225,14 @@ pub fn fn_name(&self, large_arg: SomeBigType, small_arg: u64) -> Result<Foo> {
 buffers, secrets). The function still emits an entry log; the
 skipped arg is omitted.
 
-See `J:\llm-wiki\patterns\verbose-logging-everywhere.md` for the
-detailed pattern doc.
-
 ---
 
 ## Crypto spec lock — do not drift
 
-Algorithm choices are pinned in [HANDOFF §8](../HANDOFF.md#8-cryptographic-spec-lock).
-If you change any of these, you must:
+Algorithm choices are pinned. If you change any of these, you must:
 
-1. Update HANDOFF §8.
-2. Bump the wire protocol version in `lattice-protocol`.
-3. Update `docs/THREAT_MODEL.md` if the threat model changes.
+1. Bump the wire protocol version in `lattice-protocol`.
+2. Update `docs/THREAT_MODEL.md` if the threat model changes.
 
 Frozen primitives: ML-KEM-768 (PQ KEM), X25519 (classical KEM),
 ML-DSA-65 (PQ sig), Ed25519 (classical sig), ChaCha20-Poly1305
@@ -264,7 +255,7 @@ The browser PWA ships with a strict Content Security Policy: **no
 CSP source: `apps/lattice-web/csp.json`. Trunk injects an inline
 bootstrap module with a per-request nonce that any static CSP would
 block; production CSP is enforced by the home server via
-`csp.json`-derived headers (M5+).
+`csp.json`-derived headers (future work).
 
 `scripts/verify-csp.ps1` is a pure-PowerShell pass that:
 
@@ -333,7 +324,7 @@ If you submit a PR and want CI to run on your fork, enable Actions
 on your fork and the workflow will execute. The owning repo does
 not run it.
 
-The full pre-commit gate as of M6:
+The full pre-commit gate:
 
 - `cargo test --workspace` with `LATTICE_NET_TESTS=1` — **200
   workspace tests pass** as of the current handoff.
@@ -347,57 +338,6 @@ The full pre-commit gate as of M6:
 - `trunk build --release` succeeds.
 
 All green is the bar for merging to `main`.
-
----
-
-## Working with HANDOFF.md
-
-[`docs/HANDOFF.md`](../HANDOFF.md) is the **single source of truth**
-for project status and design rationale. Read it top-to-bottom
-before touching the codebase. Sections to skim first:
-
-- §1 — Status header and session log.
-- §2.5 — Locked decisions summary.
-- §4 — Current state (what's been built, what's stubbed).
-- §6 — The first vertical slice (HANDOFF §6 acceptance criteria).
-- §8 — Crypto spec lock.
-- §22 — Latest shipped milestone (server-membership groups).
-
-Update HANDOFF at the end of every session that ships work. The
-session-log block goes at the top; the per-§ updates go at the
-relevant section. **Trust prior session findings.** Do not
-re-diagnose bugs already patched. If a §15 entry says it's
-shipped, it's shipped until proven otherwise.
-
----
-
-## Working with DECISIONS.md
-
-[`docs/DECISIONS.md`](../DECISIONS.md) carries D-01 through D-26.
-Once an entry appears there, it is **locked** — do not re-open
-without an explicit re-open discussion and a new entry preserving
-the audit trail.
-
-To add a decision:
-
-1. Pick the next free `D-NN` ID.
-2. Add a row to the **Index** at the top.
-3. Write the entry following the Decision / Rationale /
-   Implementation / Trade-off format.
-4. If the decision originated from a "Open questions" subsection in
-   ROADMAP.md or HANDOFF.md §10, replace that subsection with a
-   pointer to your new D-NN.
-5. If the decision changes architecture, update ARCHITECTURE.md with
-   the concrete details and a cross-reference back to DECISIONS.
-
-To re-open:
-
-1. Append a `**Re-opened YYYY-MM-DD:**` block to the existing entry.
-2. Update the Status column in the index to `Re-opened`.
-3. Draft the replacement decision as a sibling block. Do not delete
-   the original — we want the audit trail.
-4. When the new decision lands, mark the original `Superseded by
-   D-NN` and add the new entry with the next free ID.
 
 ---
 
@@ -435,12 +375,11 @@ cargo test -p lattice-crypto --test mls_integration alice_invites_bob
 
 ## Contributing
 
-1. Read HANDOFF.md, DECISIONS.md, ARCHITECTURE.md, THREAT_MODEL.md.
-2. Pick an item from ROADMAP.md or HANDOFF.md §4 "Not done."
-3. Implement against the non-negotiable conventions above.
-4. Run `.\scripts\test-all.ps1` until green.
-5. Update HANDOFF.md with a session-log block.
-6. Commit and open a PR (or attach the patch in an email — the
+1. Read ARCHITECTURE.md and THREAT_MODEL.md to absorb the locked
+   design surface.
+2. Implement against the non-negotiable conventions above.
+3. Run `.\scripts\test-all.ps1` until green.
+4. Commit and open a PR (or attach the patch in an email — the
    project is not strictly GitHub-bound).
 
 Pull requests are reviewed against the conventions, the crypto spec
@@ -451,18 +390,16 @@ bump will not be merged.
 
 The single largest risk surface is `crates/lattice-crypto/src/mls/`
 — the custom hybrid ciphersuite. A separate audit pass on this
-module is planned before M5 production deploy.
+module is planned before any production-scale deploy.
 
 ---
 
 ## Cross-references
 
-- [`CLAUDE.md`](../../CLAUDE.md) — project instructions for AI
-  coding sessions. Mirrors most of this page's conventions.
-- [`docs/HANDOFF.md`](../HANDOFF.md) — session log and current state.
-- [`docs/ROADMAP.md`](../ROADMAP.md) — milestone gates and acceptance
-  criteria.
-- [`docs/DECISIONS.md`](../DECISIONS.md) — locked design decisions.
+- [Architecture](/wiki/architecture/) — layered view, federation
+  topology, and the hybrid PQXDH handshake.
+- [Threat model](/wiki/threat_model/) — adversary classes and
+  mitigations.
 - [installation.md](installation.md) — runtime install paths.
 - [troubleshooting.md](troubleshooting.md) — build / runtime error
   table.

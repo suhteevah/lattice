@@ -1,10 +1,8 @@
 # Self-hosting
 
 This guide covers running your own `lattice-server` for production
-use. The reference deploy walkthrough — verified across three nodes
-in M3 — lives at [`docs/DEPLOY.md`](../DEPLOY.md). This page is the
-user-facing operator guide that links DEPLOY's mechanical steps to
-the surrounding "why" and "what to watch."
+use. This page links the operator-facing "why" and "what to watch"
+to the mechanical steps in the repository's deploy notes.
 
 If you just want to develop locally, [quickstart.md](quickstart.md)
 is faster: it uses `scripts/run-server-dev.ps1` and binds to
@@ -37,8 +35,8 @@ A home server is a single static binary that handles:
 
 Full request / response shapes at [api-reference.md](api-reference.md).
 
-The M3 server keeps all state in memory and writes a JSON snapshot
-on graceful shutdown. M5+ adds Postgres-backed storage via `sqlx`.
+The current server keeps all state in memory and writes a JSON snapshot
+on graceful shutdown. Future work adds Postgres-backed storage via `sqlx`.
 For the current state, snapshotting is enough for small deployments;
 big deployments wait for the Postgres path.
 
@@ -55,7 +53,7 @@ Before bringing the server up on a public host:
 - **Hostname.** A DNS A/AAAA record pointing at the box. Avoid IP-
   only — the federation descriptor binds to a hostname.
 - **TLS strategy.** Today: terminate TLS at a reverse proxy (Caddy,
-  nginx, Cloudflare). M3-polish: ACME via `instant-acme` inside the
+  nginx, Cloudflare). Future work: ACME via `instant-acme` inside the
   server. The federation descriptor signature does not depend on
   TLS; pubkey-pinning works either way.
 - **Firewall.** One inbound port (default 443). Outbound HTTPS for
@@ -68,7 +66,7 @@ Before bringing the server up on a public host:
   Empty value means "no persistence" — useful for dev, dangerous
   for prod.
 - **Postgres.** Required to be present in env (the typed config
-  demands it) but unused in M3. Provide a dummy value:
+  demands it) but unused today. Provide a dummy value:
   `LATTICE__DATABASE_URL=postgres://noop@localhost/noop`.
 
 ---
@@ -151,7 +149,7 @@ TOML.
 
 ## TLS
 
-The current M3 server does not terminate TLS. The two supported
+The current current server does not terminate TLS. The two supported
 production patterns are:
 
 ### Pattern A — reverse proxy
@@ -168,11 +166,11 @@ home.example.com {
 Pro: standard ops surface, automatic ACME via Caddy.
 Con: extra process, additional config to maintain.
 
-### Pattern B — ACME inside the server (M3 polish)
+### Pattern B — ACME inside the server (future)
 
 The plan is `instant-acme` inside `lattice-server` with Let's
 Encrypt issuance. Self-signed `rcgen` certs are used for dev. The
-production path is tracked in HANDOFF §M3 polish.
+production path is on the public roadmap.
 
 When this lands, configuration becomes:
 
@@ -228,7 +226,7 @@ The server writes the snapshot at:
   via `LATTICE__OBSERVABILITY__SNAPSHOT_EVERY_COMMIT`).
 
 Hard crashes (SIGKILL, OOM, power loss) still lose state since the
-last snapshot. The sqlx integration in M3 polish closes the gap.
+last snapshot. Future sqlx integration closes the gap.
 
 Verify a round-trip:
 
@@ -322,14 +320,13 @@ federation pubkey out-of-band rather than rely on TOFU. This is the
 operator-config-driven equivalent of the client-side distrust
 scoring. The wire-level support is in place (peers' pubkeys are
 stored in the registry); the config knob to pre-load a pin list is
-M5+ work.
+future work.
 
 ### Blocklist
 
 Refusing to federate with a named host is a per-server admin
-operation tracked under DECISIONS §D-24 ("federation peer
-blocklist"). The wire-level support is the registry's distrust
-flag; the admin UI is M5+ work.
+operation ("federation peer blocklist"). The wire-level support
+is the registry's distrust flag; the admin UI is future work.
 
 ---
 
@@ -369,7 +366,7 @@ to **tighten** the policy — overlaying a duplicate `*` policy makes
 some browsers refuse the response.
 
 To tighten, set `LATTICE__SERVER__CORS_ALLOW_ANY=false` in env
-(post-M5 — currently the policy is hardcoded to allow-any).
+(future work — currently the policy is hardcoded to allow-any).
 
 ---
 
@@ -417,7 +414,7 @@ What to watch for in production:
 | `federation push delivered host=X status=4XX/5XX` | WARN | Peer is unreachable or rejecting. Check connectivity and pubkey pin. |
 | `signature verify failed origin_host=X` | ERROR | Possible federation pubkey rotation or MITM. Investigate. |
 | `snapshot write failed path=X error=Y` | ERROR | Disk full or perms wrong. Fix before next graceful restart. |
-| `ws broadcast lagged subscriber missed=N` | WARN | Client is slow. Investigate downstream client; the broadcast channel is sized at 64 — bumps are M5 config work. |
+| `ws broadcast lagged subscriber missed=N` | WARN | Client is slow. Investigate downstream client; the broadcast channel is sized at 64 — bumps are future config work. |
 
 Per the CLAUDE.md verbose-logging-everywhere rule: do not turn this
 down. The log volume is the cost of an auditable server.
@@ -429,20 +426,21 @@ down. The log volume is the cost of an auditable server.
 - **Federation key safety.** Anyone with the file can impersonate
   the server. Restrict to `0600` and limit to the lattice-server
   user.
-- **In-memory state.** M3 servers lose state on restart unless
+- **In-memory state.** current servers lose state on restart unless
   `LATTICE__SNAPSHOT_PATH` is set. KP inboxes, group commit logs,
   message inboxes — all vanish on SIGKILL or power loss.
 - **No rate limiting.** A single client can flood `/messages`.
-  Rate limits are M5 work. Until then, use the reverse proxy's
+  Rate limits are future work. Until then, use the reverse proxy's
   rate-limit module (Caddy's `rate_limit`, nginx's `limit_req`) or
   Cloudflare's per-zone rules.
-- **No auth on the API surface.** Anyone who knows a user_id can
-  register or publish a KP under it. M5 introduces auth via
-  signed-by-federation-cert HMACs on every request.
+- **No auth on the API surface today.** Anyone who knows a user_id
+  can register or publish a KP under it. A future milestone
+  introduces auth via signed-by-federation-cert HMACs on every
+  request.
 - **Push payloads** are emitted as Web Push API-format encrypted
   payloads using the recipient's `keys.p256dh` + `keys.auth`. The
-  registry path lands in M6 (D-17); the actual emit hook on
-  `append_message` is the next follow-on.
+  registry path is in place; the actual emit hook on
+  `append_message` is follow-on work.
 
 ---
 
@@ -486,10 +484,8 @@ sudo userdel lattice
 
 ## Cross-references
 
-- [`docs/DEPLOY.md`](../DEPLOY.md) — verified deploy walkthrough,
-  including SSH-tunnel federation patterns.
 - [federation.md](federation.md) — how the federation surface works
-  end-to-end, plus the M3 cross-VPS smoke transcript.
+  end-to-end, plus the cross-server smoke transcript.
 - [api-reference.md](api-reference.md) — every HTTP endpoint.
 - [troubleshooting.md](troubleshooting.md) — operator-side error
   table.

@@ -1,14 +1,10 @@
 # Security model
 
 This page summarises Lattice's threat model in user-facing terms.
-The authoritative internal document is
-[`docs/THREAT_MODEL.md`](../THREAT_MODEL.md); the cryptographic
-algorithm choices are pinned in
-[HANDOFF §8](../HANDOFF.md#8-cryptographic-spec-lock); the locked
-design decisions live in [`docs/DECISIONS.md`](../DECISIONS.md). The
-goal of this page is to let a non-cryptographer reason about what
-Lattice protects, what it does not protect, and how to verify that
-the wire is doing what we claim.
+The full node-capture analysis is on the [Threat model](/wiki/threat_model/)
+page. The goal of this page is to let a non-cryptographer reason
+about what Lattice protects, what it does not protect, and how to
+verify that the wire is doing what we claim.
 
 If you are evaluating Lattice for a security-sensitive deployment,
 read this page top to bottom. If you find anything that overclaims
@@ -33,9 +29,9 @@ believed to be CRQC-safe.
 
 The hybrid combiner is `HKDF-SHA-256(salt=0..., ikm = K_x25519 ||
 K_mlkem, info = "lattice/init/v1", L = 64)`. The pattern follows
-[draft-mahy-mls-xwing] in spirit. The full construction lives in
-[HANDOFF §8](../HANDOFF.md#8-cryptographic-spec-lock) and
-ARCHITECTURE §"Crypto handshake spec."
+[draft-mahy-mls-xwing] in spirit. The full construction is on the
+[Architecture](/wiki/architecture/) page under
+"Crypto handshake spec."
 
 ### Active man-in-the-middle on identity
 
@@ -50,7 +46,7 @@ either algorithm does not strand identity claims signed under the
 other.
 
 The hybrid signature wire type is `HybridSignature { ml_dsa_sig:
-Vec<u8>, ed25519_sig: [u8; 64] }`. See DECISIONS §D-03.
+Vec<u8>, ed25519_sig: [u8; 64] }`. See the locked design decisions in the source tree.
 
 ### Compromised home server
 
@@ -75,8 +71,8 @@ account.
 - User identity private keys. Device-local; server never had them.
 - Group session keys. MLS keeps these on members' devices, not on
   the Delivery Service.
-- Past messages. MLS forward secrecy via epoch ratcheting; the
-  commit cadence (M5+) shrinks the post-compromise window.
+- Past messages. MLS forward secrecy via epoch ratcheting; an
+  aggressive commit cadence shrinks the post-compromise window.
 - Future messages after the next commit. MLS post-compromise
   security.
 - Ability to impersonate users. No private signing keys on the
@@ -87,12 +83,12 @@ routes; it sees envelopes. Mitigations:
 
 | Mitigation | Status |
 |---|---|
-| Sealed sender on every DM | Shipped M5 |
-| Message padding to fixed buckets | Shipped M1 |
-| Hidden group rosters (MLS extension) | Shipped M6 |
-| Key transparency log (Trillian-style) | Shipped M6 |
-| Cross-server witnessing of KT roots | Shipped M6 |
-| Cover-traffic | Tracked, post-M7 |
+| Sealed sender on every DM | Shipped |
+| Message padding to fixed buckets | Shipped |
+| Hidden group rosters (MLS extension) | Shipped |
+| Key transparency log (Trillian-style) | Shipped |
+| Cross-server witnessing of KT roots | Shipped |
+| Cover-traffic | Tracked, not yet shipped |
 | Mixnet routing | Long-horizon, not committed |
 
 ### Compromised client device
@@ -181,24 +177,22 @@ Honesty in scope, lifted from THREAT_MODEL §5:
   exposure to GPAs is the fundamental open problem of federated
   systems; we shrink it with padding and sealed sender but do not
   eliminate it.
-- **Notification metadata leaks pre-chunk-D.** Today's chat shell
-  polls; chunk D's WebSocket push will fire on every incoming
-  message. Per the no-PII-in-notifications constraint (see below),
-  the notification payload will be generic. Until chunk D ships, no
-  notifications exist; until the post-chunk-D constraint enforcement
-  ships, treat notification text as best-effort metadata-light.
-- **Traffic correlation pre-Phase-I cover-traffic.** A passive
-  observer can correlate "request bursts" between clients and a
-  server. Cover-traffic toggle (Phase I) injects timed noise.
+- **Notification metadata leaks.** The notification payload is
+  deliberately generic ("Lattice: New message") with zero
+  identifying content. The no-PII-in-notifications constraint is
+  enforced at the function signature: the helper that surfaces a
+  notification takes no parameters.
+- **Traffic correlation.** A passive observer can correlate
+  "request bursts" between clients and a server. A future
+  cover-traffic toggle injects timed noise as a mitigation.
 
 ---
 
 ## Sealed sender
 
 The construction that hides sender→recipient linkage from the routing
-home server. Specified in DECISIONS §D-05; the wire format is
-`MembershipCert` + `SealedEnvelope` in
-`crates/lattice-protocol/src/wire.rs`.
+home server. The wire format is `MembershipCert` + `SealedEnvelope`
+in `crates/lattice-protocol/src/wire.rs`.
 
 Flow:
 
@@ -235,9 +229,9 @@ zero-knowledge proofs are overkill. The cert approach has a known
 audit story.
 
 Trade-off: one cert-issuance round-trip per MLS commit to the owning
-server. With M5's 50-msg / 5-min commit cadence this is at most ~12
-commits/hour per active group — negligible. Cert lifetime ≤ 1h bounds
-replay-after-revocation.
+server. With the current 50-msg / 5-min commit cadence this is at
+most ~12 commits/hour per active group — negligible. Cert lifetime
+≤ 1h bounds replay-after-revocation.
 
 ---
 
@@ -256,8 +250,7 @@ schedule rotates every commit (a "ratchet step") and gives:
 Lattice's custom ciphersuite — `LATTICE_HYBRID_V1` (ID `0xF000`) —
 wraps the base `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`
 (`0x0003`) suite and folds an ML-KEM-768 secret into the key schedule
-via **per-epoch external PSK injection** (DECISIONS §D-04, re-opened
-2026-05-10 after `mls-rs`'s `init_secret` hook was found `pub(crate)`).
+via **per-epoch external PSK injection**.
 
 Concretely, per commit:
 
@@ -280,9 +273,9 @@ the property the original `init_secret`-folding construction sought.
 
 ## Hidden membership
 
-M6's hidden-membership MLS extension hides the RatchetTree from
-out-of-group observers. DECISIONS §D-16 locks it; the implementation
-is `lattice-crypto::mls::hidden_membership_rules`.
+The hidden-membership MLS extension hides the RatchetTree from
+out-of-group observers. The implementation is
+`lattice-crypto::mls::hidden_membership_rules`.
 
 What "hidden" means in practice:
 
@@ -299,13 +292,13 @@ What "hidden" means in practice:
 
 The integration test `hidden_membership_omits_ratchet_tree_from_welcome`
 parses the server-visible Welcome bytes and confirms the
-RatchetTreeExt tag is absent. See HANDOFF §M6.
+RatchetTreeExt tag is absent.
 
 ---
 
 ## Key transparency
 
-M6 ships a Trillian-style append-only Merkle log in
+A Trillian-style append-only Merkle log lives in
 `crates/lattice-keytransparency/`. Per home server:
 
 - Each `key_bundles` insertion or rotation appends a leaf:
@@ -321,8 +314,7 @@ Cross-server witnessing:
   root of every federation peer it has seen.
 - Witness signatures gossip over the federation control stream.
 - Drift (a peer publishes two different roots for the same epoch)
-  triggers a user-visible warning and a +100 distrust delta
-  (DECISIONS §D-13).
+  triggers a user-visible warning and a +100 distrust delta.
 
 The acceptance gate test
 `malicious_swap_detection_simulation` simulates a server trying to
@@ -331,7 +323,7 @@ check rejects.
 
 Client-side verification (the chat shell calls
 `/.well-known/lattice/kt-root` and verifies inclusion proofs on
-every KP fetch) is post-M6 UI plumbing — the cryptographic
+every KP fetch) is follow-on UI plumbing — the cryptographic
 machinery is shipped; the chat shell does not yet surface KT
 warnings.
 
@@ -339,12 +331,10 @@ warnings.
 
 ## Notifications constraint — no PII in payloads
 
-When chunk D's WebSocket push fires for server-membership group
+When the WebSocket push fires for server-membership group
 messages, the notification payload **remains generic** — no server
-name, no sender, no group_id. This is a hard constraint baked into
-the memory file `feedback_no_pii_in_notifications.md` and applies
-to every push surface (UnifiedPush, FCM, APNS, web-push, Tauri OS
-notification API).
+name, no sender, no group_id. This applies to every push surface
+(UnifiedPush, FCM, APNS, web-push, Tauri OS notification API).
 
 What the OS / push provider observes:
 
@@ -427,15 +417,15 @@ for the keystore FFI in `lattice-media`, documented inline with
 The descriptor at `/.well-known/lattice/server` carries the
 `federation_pubkey_b64`. Compare it against an out-of-band value (a
 Signal message, a phone call). The full signed-descriptor wrapper
-(D-06) lands as M3 polish — for M3 the response is the unsigned JSON.
+is future work — today the response is the unsigned JSON.
 
 ### 5. KT log inclusion proofs
 
-(Post-M6 UI work.) The home server publishes a daily Merkle root at
-`/.well-known/lattice/kt-root`. The client fetches inclusion proofs
-with every KP fetch and verifies them against the cached root. A
-silent key substitution by the home server leaves a detectable
-inconsistency in the log.
+(UI surfacing is follow-on work.) The home server publishes a daily
+Merkle root at `/.well-known/lattice/kt-root`. The client fetches
+inclusion proofs with every KP fetch and verifies them against the
+cached root. A silent key substitution by the home server leaves a
+detectable inconsistency in the log.
 
 ---
 
@@ -444,28 +434,21 @@ inconsistency in the log.
 Lattice is AGPL-3.0-or-later. The entire source tree is published.
 The cryptographic primitives are standard NIST / IETF algorithms
 implemented by `RustCrypto`, `ml-kem`, `ml-dsa`, and `mls-rs`. The
-custom ciphersuite shipped in `lattice-crypto::mls` is documented in
-DECISIONS §D-04 and HANDOFF §M2 design notes; the shipping
-implementation is ~1,200 lines.
+custom ciphersuite shipped in `lattice-crypto::mls` is ~1,200 lines.
 
-There has been **no formal external audit** of Lattice. The internal
-self-review covers M0 through M6. Bug-bounty disclosure flows live at
-`SECURITY.md` at the repo root; the disclosure protocol is documented
-in DECISIONS §D-14. Researchers get public credit on a hall-of-fame
-page and V2 beta access for verified findings.
+There has been **no formal external audit** of Lattice. Bug-bounty
+disclosure flows live at `SECURITY.md` at the repo root.
+Researchers get public credit on a hall-of-fame page and beta
+access for verified findings.
 
 ---
 
 ## Cross-references
 
-- [`docs/THREAT_MODEL.md`](../THREAT_MODEL.md) — authoritative threat
-  model, including per-attacker analysis.
-- [`docs/DECISIONS.md`](../DECISIONS.md) — every locked cryptographic
-  choice, with rationale.
-- [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) — protocol topology
+- [Threat model](/wiki/threat_model/) — authoritative
+  node-capture analysis, with per-attacker breakdown.
+- [Architecture](/wiki/architecture/) — protocol topology
   and storage model.
-- [HANDOFF §8](../HANDOFF.md#8-cryptographic-spec-lock) — the
-  cryptographic spec lock (frozen primitives + parameters).
 - [identity-and-keys.md](identity-and-keys.md) — your keys at rest.
 - [federation.md](federation.md) — server trust + TOFU + distrust
   scoring.

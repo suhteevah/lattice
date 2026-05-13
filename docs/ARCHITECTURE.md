@@ -1,6 +1,7 @@
 # Lattice — ARCHITECTURE
 
-How the pieces fit. Read after HANDOFF.md.
+How the pieces fit. Reference for readers who want to understand the
+construction without reading the source.
 
 ## Layered view
 
@@ -37,9 +38,7 @@ How the pieces fit. Read after HANDOFF.md.
 Each user has a **home server**. Home servers federate with peer home servers
 on demand — there is no central directory. Federation discovery uses
 `.well-known/lattice/server` over HTTPS, identical in spirit to Matrix's
-discovery but binary over QUIC instead of JSON over HTTPS. The exact JSON
-schema and signature requirements are locked in
-[`DECISIONS.md`](DECISIONS.md) §D-06.
+discovery but binary over QUIC instead of JSON over HTTPS.
 
 ```
    Alice's device                           Bob's device
@@ -93,8 +92,7 @@ Alice (client)                   home.alice            home.bob             Bob 
 Sealed sender wraps step 6's envelope so that `home.alice` cannot trivially
 log the sender→recipient link in plaintext metadata. The mechanism uses
 Signal-style per-MLS-epoch membership certificates issued by the owning
-home server — see [`DECISIONS.md`](DECISIONS.md) §D-05 for the full
-construction.
+home server.
 
 ## Crypto handshake spec
 
@@ -170,9 +168,8 @@ schema migrations that would add one fail CI.
 QUIC connections are long-lived. Each client maintains one QUIC connection to
 its home server (WebTransport in V1, native quinn in V2). Federation between
 servers also uses QUIC. Browser clients probe WebTransport first and fall
-back to WebSocket where unsupported — full negotiation order in
-[`DECISIONS.md`](DECISIONS.md) §D-11. QUIC server certificates: `rcgen`
-self-signed for dev (TOFU), ACME / Let's Encrypt for prod — see §D-07.
+back to WebSocket where unsupported. QUIC server certificates: `rcgen`
+self-signed for dev (TOFU), ACME / Let's Encrypt for prod.
 
 Streams within a connection:
 - Stream 0: control (heartbeats, version negotiation, error notifications)

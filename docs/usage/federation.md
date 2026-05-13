@@ -19,24 +19,24 @@ is no plaintext message column anywhere in the federation surface.
 
 ## The federated model
 
-Three node types, all of which are present from M3 onward:
+Three node types, all present in the current build:
 
 1. **Home server** (`lattice-server`). Holds your account registry,
    published KeyPackages, group commit logs, message inboxes,
    federation peer registry, push subscriptions. Federates with peer
-   home servers over HTTP for now (QUIC + H3 is M4 polish work).
+   home servers over HTTP for now; QUIC + H3 is future work.
 2. **Client** (browser PWA or Tauri shell). Holds your private keys
    and decrypted state. Talks to one home server at a time.
-3. **Rendezvous node** (V2 / M7). STUN/TURN-like service for P2P NAT
+3. **Rendezvous node**. STUN/TURN-like service for P2P NAT
    traversal on voice/video. Sees connection-attempt metadata, never
-   plaintext media. See DECISIONS §D-19.
+   plaintext media.
 
 For groups spanning multiple home servers, the MLS Delivery Service
 responsibility is held by the **owning server** (the server that
 hosts the group creator's user_id). Read replicas are pushed to
-participating peer servers. M6's multi-server store-and-forward
-extends this to multi-master so a single owning server going dark
-does not kill the room.
+participating peer servers. Multi-server store-and-forward extends
+this to multi-master so a single owning server going dark does not
+kill the room.
 
 ---
 
@@ -48,7 +48,7 @@ A peer server discovers your home server by fetching:
 GET https://<your-host>/.well-known/lattice/server
 ```
 
-The response per DECISIONS §D-06 is:
+The response is:
 
 ```json
 {
@@ -58,9 +58,9 @@ The response per DECISIONS §D-06 is:
 }
 ```
 
-The M3 server returns the minimal JSON above without the
+The current server returns the minimal JSON above without the
 canonical-CBOR + Ed25519 signature wrapper. The fully signed
-descriptor (per the D-06 contract):
+descriptor shape:
 
 ```json
 {
@@ -85,8 +85,8 @@ descriptor (per the D-06 contract):
 The `signature` is an Ed25519 signature over the canonical CBOR
 serialisation of every other field (alphabetical key order, no
 indeterminate-length encodings). Peers verify on every fetch. The
-full signed descriptor is M3 polish work — the unsigned shape above
-is what M3 ships.
+fully signed descriptor is future work — the unsigned shape above
+is what currently ships.
 
 Cache TTL: 24 hours, refreshed on `signed_at` change. Peers cache
 per host.
@@ -106,13 +106,12 @@ server. Mitigations:
 - DNSSEC where deployed.
 - Manual operator key pinning where federation relationships are
   high-trust (operator hardcodes the peer's pubkey in config).
-- Key transparency log inclusion proofs in M6 — a captured server
-  cannot publish a substituted key without leaving an auditable
-  trail.
+- Key transparency log inclusion proofs — a captured server cannot
+  publish a substituted key without leaving an auditable trail.
 
-DECISIONS §D-06 carries the full discussion. The KT log machinery is
-shipped (`crates/lattice-keytransparency/`); the client-side
-verification path is post-M6 work.
+The KT log machinery is shipped
+(`crates/lattice-keytransparency/`); the client-side verification
+path is follow-on work.
 
 ---
 
@@ -126,7 +125,7 @@ an MLS group, here is what happens:
    otherwise it returns 404. Cross-server KP fetch is **not** done by
    server A on behalf of Alice — that path is the federation-fetch
    pattern documented in ARCHITECTURE §"End-to-end message flow."
-   In the current M3 server, Alice's client knows it must fetch Bob's
+   In the current server, Alice's client knows it must fetch Bob's
    KP directly from Bob's home server: `GET https://<bob's
    host>/key_packages/<bob_uid>`.
 3. Alice builds the MLS commit + Welcome locally.
@@ -197,7 +196,7 @@ The fan-out list comes from one of two sources:
 - The per-message `remote_routing` field (lets a client override
   topology per-send).
 - The per-group replication-peer list stored via
-  `POST /group/<gid>/replication_peers` (M6 multi-server
+  `POST /group/<gid>/replication_peers` (multi-server
   store-and-forward).
 
 The per-group list is preferred for steady-state — clients
@@ -206,11 +205,11 @@ fans out without per-send instrumentation.
 
 ---
 
-## Distrust scoring (D-13)
+## Distrust scoring
 
 Lattice clients maintain a local distrust score per federated peer
-server. The score is **local-only** — there is no gossip in V1 or
-V1.5. Each user's client builds its own picture.
+server. The score is **local-only** — there is no gossip. Each
+user's client builds its own picture.
 
 Score sources:
 
@@ -231,53 +230,52 @@ The chat client implements this as
 
 ---
 
-## Cross-server smoke transcript (M3)
+## Cross-server smoke transcript
 
-This is the real transcript from the M3 testbed, reproduced from
-HANDOFF §4 for documentation purposes. Three nodes:
+Two `lattice-server` instances, one DM round-trip across them. Server
+hostnames below are placeholders — substitute your own.
 
-| Node | IP | Role |
-|---|---|---|
-| pixie | `207.244.232.227` (public, Ubuntu 24.04) | Alice's home server, port 4443 |
-| cnc-server | LAN + tailscale (openSUSE Tumbleweed) | Bob's home server, port 4443 |
-| kokonoe-WSL | Ubuntu under WSL2 | Demo orchestrator |
+| Node | Role |
+|---|---|
+| `server-a` (public, port 4443) | Alice's home server |
+| `server-b` (behind NAT, reachable via SSH reverse tunnel) | Bob's home server |
 
-cnc-server is behind NAT, so it maintains a persistent SSH reverse
-tunnel from cnc to pixie. From pixie's perspective,
-`http://127.0.0.1:4444` IS the cnc peer's `lattice-server`.
+`server-b` exposes itself to `server-a` via a persistent SSH reverse
+tunnel, so from `server-a`'s perspective `http://127.0.0.1:4444` IS
+the `server-b` peer.
 
 Demo run:
 
 ```bash
 ~/lattice/target/release/lattice demo \
-    --server-a http://pixie:4443 \
+    --server-a http://server-a:4443 \
     --server-b http://localhost:4444 \
-    --message clean-pixie-cnc
+    --message cross-server-hello
 ```
 
 Steps observed in the logs:
 
-1. Alice's CLI registers against pixie:4443. `register_user` returns
-   `new_registration: true`.
-2. Alice publishes a KeyPackage (12,057 bytes) to pixie.
-3. Bob's CLI registers against cnc:4443 (via the tunnel as
-   localhost:4444). `new_registration: true`.
-4. Bob publishes a KeyPackage to cnc.
+1. Alice's CLI registers against `server-a:4443`. `register_user`
+   returns `new_registration: true`.
+2. Alice publishes a KeyPackage (12,057 bytes) to `server-a`.
+3. Bob's CLI registers against `server-b:4443` (via the tunnel as
+   `localhost:4444`). `new_registration: true`.
+4. Bob publishes a KeyPackage to `server-b`.
 5. Alice creates a group, invites Bob.
-6. Alice's commit POST to pixie carries `remote_routing` pointing at
-   cnc's base URL.
-7. pixie POSTs the commit to cnc's `/federation/inbox`. cnc verifies
-   the signature against pixie's federation pubkey (TOFU-pinned on
-   this first contact).
-8. cnc accepts, appends to its own log.
-9. Bob's CLI calls `fetch_welcome` against cnc; cnc returns the
-   pq-wrapped welcome.
+6. Alice's commit POST to `server-a` carries `remote_routing`
+   pointing at `server-b`'s base URL.
+7. `server-a` POSTs the commit to `server-b`'s `/federation/inbox`.
+   `server-b` verifies the signature against `server-a`'s federation
+   pubkey (TOFU-pinned on this first contact).
+8. `server-b` accepts, appends to its own log.
+9. Bob's CLI calls `fetch_welcome` against `server-b`; `server-b`
+   returns the pq-wrapped welcome.
 10. Bob processes the welcome, MLS-joins.
-11. Alice posts "clean-pixie-cnc" via pixie.
-12. pixie POSTs to cnc's `/federation/message_inbox`.
-13. cnc accepts, appends.
-14. Bob fetches messages from cnc; decrypts; CLI prints
-    `clean-pixie-cnc`.
+11. Alice posts `cross-server-hello` via `server-a`.
+12. `server-a` POSTs to `server-b`'s `/federation/message_inbox`.
+13. `server-b` accepts, appends.
+14. Bob fetches messages from `server-b`; decrypts; CLI prints
+    `cross-server-hello`.
 
 Exit code 0. The full log lines emit at `lattice_server=info` —
 `federation push delivered` on the sender, `federation push accepted`
@@ -285,23 +283,12 @@ on the receiver.
 
 ### Persistence verification
 
-After the round-trip, pixie was SIGTERMed. The graceful-shutdown
-handler wrote `/tmp/lattice-deploy/state-a.json` with all state:
+After the round-trip, `server-a` was SIGTERMed. The graceful-shutdown
+handler wrote a state JSON snapshot with all in-memory state:
 registered users, published KPs, group commit logs, message inbox,
-federation peer registry. On restart, the JSON snapshot was reloaded
-and `verify-persistence.ps1` confirmed that the same federation
-pubkey, same group commits, and same message inbox were present.
-
-### Known issue
-
-The pixie ↔ kokonoe-WSL cross-host demo path fails with
-`WelcomeKeyPackageNotFound` when run through a two-hop SSH tunnel
-(kokonoe → pixie reverse, then pixie → kokonoe forward inside the
-demo process). Single-host on WSL works, and pixie ↔ cnc works.
-The issue is in the demo orchestration's handling of the slower
-two-hop path, not in the federation protocol itself. Does not block
-M3 acceptance because the per-action CLI is the intended deploy
-path.
+federation peer registry. On restart, the snapshot was reloaded and
+`verify-persistence.ps1` confirmed that the same federation pubkey,
+same group commits, and same message inbox were present.
 
 ---
 
@@ -337,8 +324,8 @@ Your client only ever talks to **your** home server. It never makes
 HTTP calls to foreign hosts. All cross-server communication rides
 the federation pubkey-pinned signed push.
 
-Per HANDOFF §4 (M3 cross-VPS deploy), the pixie ↔ cnc round-trip is
-verified working over the public internet via SSH reverse tunnel.
+The cross-server round-trip described above has been verified working
+over the public internet via SSH reverse tunnel.
 
 ---
 
@@ -358,10 +345,10 @@ I think it is" workflow:
 
 3. Compare `federation_pubkey_b64` to the out-of-band value.
 
-4. (M6 polish) Once the signed-descriptor wrapper lands, also verify
+4. (Future work) Once the signed-descriptor wrapper lands, also verify
    the Ed25519 signature against the pubkey.
 
-5. (M6 polish) Compare the KT log root from
+5. (Future work) Compare the KT log root from
    `/.well-known/lattice/kt-root` against the cross-server witnessed
    roots from your own home server. Drift triggers a +100 distrust
    delta and a red badge.
@@ -370,7 +357,7 @@ I think it is" workflow:
 
 ## Federation transport (current vs planned)
 
-| Layer | Current (M3) | Planned (M4 polish) |
+| Layer | Today | Planned |
 |---|---|---|
 | Transport | HTTP/1.1 via `reqwest`/`axum` | QUIC + HTTP/3 + WebTransport |
 | TLS | Plain HTTP (dev) / operator-provided TLS reverse-proxy | ACME via `instant-acme`, Let's Encrypt |
@@ -379,12 +366,11 @@ I think it is" workflow:
 | Push | POST to `/federation/inbox` and `/federation/message_inbox` | Same paths over WT bidi streams |
 
 The wire shape stays. The change is purely transport. Once the
-QUIC + H3 + WT server-side stack lands (sizing in HANDOFF §M4
-status), HTTP remains as the fallback selected by
-`capabilities::Capabilities::probe()`.
+QUIC + H3 + WT server-side stack lands, HTTP remains as the fallback
+selected by `capabilities::Capabilities::probe()`.
 
-The current M3 server's HTTP path is single-process, in-memory, no
-rate limits. M5 introduces:
+The current HTTP server is single-process, in-memory, no rate limits.
+A later milestone introduces:
 
 - Rate limits per source IP and per user_id.
 - Per-request auth via signed-by-federation-cert HMACs.
@@ -398,10 +384,5 @@ checklist.
 
 ## Cross-references
 
-- ARCHITECTURE §"Federation topology" + §"End-to-end message flow."
-- DECISIONS §D-06 (federation discovery), §D-07 (QUIC certs),
-  §D-13 (distrust scoring), §D-15 (KT log).
-- HANDOFF §M3 sections — the cross-VPS testbed and the M3 polish
-  list.
-- [`docs/DEPLOY.md`](../DEPLOY.md) — the verified deploy walkthrough.
+- [Architecture](/wiki/architecture/) — federation topology + end-to-end message flow.
 - [self-hosting.md](self-hosting.md) — operator-focused guide.

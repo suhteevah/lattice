@@ -2,9 +2,8 @@
 
 Every HTTP endpoint exposed by `lattice-server`. This is a working
 reference — every shape below comes from the source at
-`crates/lattice-server/src/routes/` and is verified against the M3
-shipped surface. The wire-protocol version is currently 4 (bumped in
-M7 Phase C for call signalling).
+`crates/lattice-server/src/routes/` and is verified against the
+shipped surface. The wire-protocol version is currently 4.
 
 For higher-level flows that compose these endpoints (the chat client's
 bootstrap, an invite, a federation push), see
@@ -33,9 +32,9 @@ The server's base URL throughout these examples is
   - `500 Internal Server Error` — unexpected server-side failure.
 - **CORS.** `Access-Control-Allow-Origin: *` by default. See
   [self-hosting.md](self-hosting.md) for tightening.
-- **Auth.** None in M3. The federation surface uses Ed25519
-  signatures on TBS bodies; client routes are unauthenticated. M5
-  introduces signed-by-federation-cert HMACs.
+- **Auth.** None today. The federation surface uses Ed25519
+  signatures on TBS bodies; client routes are unauthenticated.
+  Future work introduces signed-by-federation-cert HMACs.
 
 ---
 
@@ -68,9 +67,8 @@ changes.
 
 ### `GET /.well-known/lattice/server`
 
-The federation descriptor. Per DECISIONS §D-06; the M3 server
-returns the minimal unsigned shape. The full signed shape is M3
-polish work.
+The federation descriptor. The server returns the minimal unsigned
+shape; the full signed shape is future work.
 
 **Request body:** none.
 
@@ -106,9 +104,9 @@ overwrites the claim in place.
 ```
 
 The `IdentityClaim` is the Prost-encoded wire type with the
-hybrid-signed identity bundle. In M3 the server accepts any
-well-formed Prost claim and does not verify the hybrid signature —
-M5 introduces full signature verification.
+hybrid-signed identity bundle. Today the server accepts any
+well-formed Prost claim and does not verify the hybrid signature;
+future work introduces full signature verification.
 
 **Response (200):**
 
@@ -333,7 +331,7 @@ Publish an application message (or sealed envelope) to a group.
 
 `remote_routing` lists peer base URLs to federate-push to. If
 omitted, the server falls back to the per-group replication-peer
-list configured via `POST /group/<gid>/replication_peers` (M6).
+list configured via `POST /group/<gid>/replication_peers`.
 
 **Response (200):**
 
@@ -411,8 +409,7 @@ fetch any messages they missed.
 
 ### `POST /group/{gid_b64}/issue_cert`
 
-Request a sealed-sender membership cert (D-05) for the current
-epoch.
+Request a sealed-sender membership cert for the current epoch.
 
 **Path parameter:** `gid_b64`.
 
@@ -445,7 +442,7 @@ the sender's identity.
 
 ### `POST /group/{gid_b64}/replication_peers`
 
-Set the per-group replication-peer list (M6 store-and-forward).
+Set the per-group replication-peer list (store-and-forward replication).
 Subsequent message publishes fan out to every URL in this list
 when the per-message `remote_routing` is empty.
 
@@ -454,8 +451,8 @@ when the per-message `remote_routing` is empty.
 ```json
 {
   "peers": [
-    "https://cnc:4443",
-    "https://pixie:4444"
+    "https://peer-a.example:4443",
+    "https://peer-b.example:4444"
   ]
 }
 ```
@@ -465,8 +462,8 @@ when the per-message `remote_routing` is empty.
 ```json
 {
   "peers": [
-    "https://cnc:4443",
-    "https://pixie:4444"
+    "https://peer-a.example:4443",
+    "https://peer-b.example:4444"
   ]
 }
 ```
@@ -483,7 +480,7 @@ Read the current replication-peer list.
 
 ```json
 {
-  "peers": ["https://cnc:4443"]
+  "peers": ["https://peer-a.example:4443"]
 }
 ```
 
@@ -564,8 +561,8 @@ TBS layout.)
 
 ## Push subscription routes
 
-Per DECISIONS §D-17. The registry is M6-shipped; the payload-emit
-hook is the next follow-on.
+Registry-only today: the subscription record is stored on the
+server, but the payload-emit hook is follow-on work.
 
 ### `POST /push/subscribe`
 
@@ -587,7 +584,7 @@ Register a Web Push API subscription for the user_id.
 `"fcm"`, `"apns"`, `"web-push"`.
 
 Multiple endpoints per user are allowed (e.g. a primary UnifiedPush
-distributor plus an FCM fallback per D-17).
+distributor plus an FCM fallback).
 
 **Response (200):**
 
@@ -634,15 +631,15 @@ Empty list if none registered.
 The wire version negotiated at `GET /.well-known/lattice/server` is
 4 today. Breaking wire changes bump this value. The version history:
 
-| Version | Shipped | Major change |
-|---|---|---|
-| 1 | M1 / M2 | Initial wire contract — Prost-encoded `IdentityClaim`, `KeyPackage`, `Welcome`, etc. Sealed-sender D-05 added. |
-| 2 | M5 | N-party group Welcome — `PqWelcomePayload` extended with `joiner_idx`, `wrap_nonce`, `wrap_ct` for the multi-Welcome construction. |
-| 3 | M5 closeout | Prost → Cap'n Proto wire swap. Internal signing-transcript helpers (`sealed_sender`, `federation`) still use Prost; the on-the-wire types moved to capnp. |
-| 4 | M7 Phase C | Call signalling types: `CallInvite`, `CallAccept`, `CallIceCandidate`, `CallEnd`, `CallSignal`. |
+| Version | Major change |
+|---|---|
+| 1 | Initial wire contract — Prost-encoded `IdentityClaim`, `KeyPackage`, `Welcome`, etc. Sealed-sender added. |
+| 2 | N-party group Welcome — `PqWelcomePayload` extended with `joiner_idx`, `wrap_nonce`, `wrap_ct` for the multi-Welcome construction. |
+| 3 | Prost → Cap'n Proto wire swap. Internal signing-transcript helpers (`sealed_sender`, `federation`) still use Prost; the on-the-wire types moved to capnp. |
+| 4 | Call signalling types: `CallInvite`, `CallAccept`, `CallIceCandidate`, `CallEnd`, `CallSignal`. |
 
-Future breaking bumps are documented in HANDOFF and require an
-explicit re-open against DECISIONS § when relevant.
+Future breaking bumps require an explicit re-open against the
+locked design decisions in the source tree.
 
 ---
 

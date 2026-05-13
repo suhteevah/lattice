@@ -2,10 +2,8 @@
 
 Welcome to the Lattice user guide. This set of pages describes how to
 install, configure, and operate Lattice — a post-quantum, end-to-end
-encrypted, federated messaging platform. The reference pages live
-under `docs/usage/`; the internal design history (HANDOFF, DECISIONS,
-ARCHITECTURE, THREAT_MODEL, ROADMAP) lives one directory up and is the
-single source of truth for engineers working on the code itself.
+encrypted, federated messaging platform. The [Wiki](/wiki/) section
+carries the architecture and threat-model deep dives.
 
 ---
 
@@ -20,8 +18,7 @@ sufficiently large quantum computer. Concretely:
   no React, no transpiler — just a `wasm32-unknown-unknown` bundle
   served as static files.
 - **Native shells.** A Tauri 2 desktop wrapper packages the same Leptos
-  bundle alongside native code for voice and video. Mobile shells are
-  in flight.
+  bundle alongside native code for voice and video.
 - **Federated, not central.** Every Lattice account lives on a **home
   server**. Servers federate with each other on demand. There is no
   central directory and no privileged operator.
@@ -94,14 +91,12 @@ Lattice is a fit for you if any of the following are true:
 Lattice is **not** a fit yet if:
 
 - You need fully-managed SaaS today with a billing portal. The
-  self-hosted path is the supported one; the managed SaaS tier is
-  decided in structure (DECISIONS §D-25) but not in price.
+  self-hosted path is the supported one.
 - You need a feature-parity Slack clone with threads, code blocks,
-  integrations marketplaces, and Office365 SSO. Those land
-  incrementally. Today's surface is DMs, groups, and Discord-style
-  servers with one implicit channel per server.
-- You need iOS or Android native clients. Mobile shells are tracked
-  in ROADMAP M7 Phase H but not shipped.
+  integrations marketplaces, and Office365 SSO. Today's surface is
+  DMs, groups, and Discord-style servers.
+- You need iOS or Android native clients. Mobile shells are not
+  shipped.
 
 ---
 
@@ -121,7 +116,7 @@ common alternatives. PQ stands for post-quantum.
 | Message metadata privacy | Sealed sender | Limited | Visible to Discord | **Sealed sender + hidden membership** |
 | Key transparency | Audited (announce-only) | None | None | **Trillian-style log with cross-server witnessing** |
 | License | AGPL-3.0 (server) | Apache-2.0 (server) | Proprietary | **AGPL-3.0-or-later (all code)** |
-| Voice / video | Yes (classical) | Yes (classical) | Yes (classical) | **PQ-hybrid DTLS-SRTP (M7, in progress)** |
+| Voice / video | Yes (classical) | Yes (classical) | Yes (classical) | **PQ-hybrid DTLS-SRTP** |
 
 The licensing position is intentional. AGPL forces a SaaS rehost of
 Lattice to publish their changes, which is the only license that
@@ -186,24 +181,17 @@ context. A reasonable reading order:
     contributing.
 
 Each page is self-contained and cross-references the others where
-relevant. If you find a page that says "see HANDOFF.md" without a
-working pointer, please file an issue.
+relevant.
 
 ---
 
 ## Project status
 
-Lattice is at milestone **M7** — voice and video are in progress; text
-chat survives daily use. The browser PWA can register, exchange
-keypackages, form 1:1 and N-party MLS groups, send and receive sealed
-envelopes, survive page reload with scrollback intact, and federate
-across home servers. The Tauri desktop wrapper builds on Windows and
-Linux. iOS and Android shells are not shipped. Voice and video are
-proven cryptographically end-to-end in a same-process loopback (Phase
-E.2 smoke test); cross-machine signalling and OS audio capture are M7
+Text chat is daily-usable. The browser PWA can register, exchange
+keypackages, form 1:1 and N-party MLS groups, send and receive
+sealed envelopes, survive page reload with scrollback intact, and
+federate across home servers. The Tauri desktop wrapper builds on
+Windows and Linux. iOS and Android shells are not shipped. Voice
+and video are proven cryptographically end-to-end in a same-process
+loopback; cross-machine signalling and OS audio capture are
 follow-up work.
-
-If a feature in these docs is annotated **"in progress"** or
-**"upcoming"**, it is intentionally not shipped yet. Read
-[HANDOFF.md](../HANDOFF.md) §1–§22 for the authoritative status as of
-the last engineering session.

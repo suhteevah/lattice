@@ -33,7 +33,7 @@ already installed.
 
 You do **not** need Postgres, Docker, an SSL certificate, or a domain
 to complete this quickstart. All state lives in memory and a JSON
-snapshot under `J:\lattice\.run\dev-server` (or your repository root).
+snapshot under `.\\.run\\dev-server` inside the repository root.
 
 ---
 
@@ -68,9 +68,8 @@ followed by "Finished `dev` profile". The binary lands at
 ## Step 2 — start a local home server
 
 The included script binds to `127.0.0.1:8080` with a per-run scratch
-directory under `J:\lattice\.run\dev-server` (or your project's
-equivalent) for the federation signing key and the JSON state
-snapshot:
+directory at `.\\.run\\dev-server` inside the repository for the
+federation signing key and the JSON state snapshot:
 
 ```powershell
 .\scripts\run-server-dev.ps1
@@ -79,7 +78,7 @@ snapshot:
 Expected log output (slightly truncated):
 
 ```
-starting lattice-server on 127.0.0.1:8080 (run dir: J:\lattice\.run\dev-server)
+starting lattice-server on 127.0.0.1:8080 (run dir: .\.run\dev-server)
 INFO lattice_server: server started bind_addr=127.0.0.1:8080 wire_version=4
 INFO lattice_server: federation key loaded from .run\dev-server\federation.key
 INFO lattice_server: snapshot loaded from .run\dev-server\snapshot.json users=0 groups=0
@@ -277,7 +276,7 @@ The seven steps above exercised every layer of Lattice's text stack:
 | 3 — KP publish | `lattice-crypto::mls::generate_key_package` |
 | 5 — invite | `LatticeHybridCipherSuite` + `add_member` + `PqWelcomePayload` |
 | 6 — join | `process_welcome_with_storage` + ML-KEM-768 decap |
-| 7 — send | `encrypt_application` + sealed sender (D-05) |
+| 7 — send | `encrypt_application` + sealed sender |
 | 7 — receive | `fetch_messages` + `decrypt_with_sender` |
 
 The cryptographic guarantees you get are:
