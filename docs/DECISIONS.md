@@ -1031,6 +1031,30 @@ signing.
 - DPAPI is found cryptographically broken or trivially extractable
   → upgrade urgency on G.3.
 
+**G.3 amendment (2026-05-12):** Windows G.3 shipped as
+`TpmWindowsKeystore`. Construction: a single persistent
+RSA-2048 wrap key in the TPM under
+`MS_PLATFORM_CRYPTO_PROVIDER`, named
+`Lattice-MasterWrap-v1`, non-exportable. Each identity's
+secret bytes are AEAD-sealed with a fresh ChaCha20-Poly1305
+key; that 32-byte AEAD key is OAEP-SHA-256-wrapped by the
+TPM. On-disk file `<handle>.tpmseal` carries
+`version || wrapped_key_len || wrapped_key || nonce ||
+ciphertext_with_tag`. New `KeystoreError::TpmUnavailable`
+signals to callers that they should fall back to
+`WindowsKeystore` (DPAPI). DPAPI stays in tree as the
+fallback for boxes where the TPM is absent or unprovisioned.
+The desktop default (`build_keystore()` selection) still
+constructs DPAPI; flipping to TPM is gated on a hardware
+smoke against a real TPM 2.0 chip — kokonoe's TPM is not
+provisioned for the Platform Crypto Provider so the 6 TPM
+unit tests skip cleanly. See HANDOFF §24.
+
+The RAM-window property from the original trade-off is
+unchanged: TPM never sees the identity secret bytes, only
+the 32-byte AEAD key. Signing still happens in process RAM
+with `zeroize::Zeroizing` cleanup.
+
 ---
 
 ## How to add a decision

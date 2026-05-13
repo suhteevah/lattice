@@ -12,7 +12,7 @@ lands.
 | Field | Value |
 |---|---|
 | Current milestone | **M7 — V2 — Tauri shells + voice/video** (in progress) |
-| Last shipped | Chat-app MVP closeout — chunks 2.5 + E + F + B + D (2026-05-12) |
+| Last shipped | M7 Phase G.3 (Windows) — TPM 2.0 wrap via NCrypt (2026-05-12) |
 | Blocker | None |
 | Owner | Matt Gates (suhteevah) |
 
@@ -125,7 +125,29 @@ backlog ahead of M7 Phase G.3 hardware-backed wrap.
   deferred.
 
 G.3 (Windows TPM 2.0 wrap via NCrypt `MS_PLATFORM_CRYPTO_PROVIDER`)
-is the next gate; subagent in flight.
+shipped in the same session — see below.
+
+### M7 Phase G.3 (Windows) shipped 2026-05-12
+
+`TpmWindowsKeystore` replaces DPAPI's user-credential wrap with a
+TPM 2.0-resident RSA-2048 key under
+`MS_PLATFORM_CRYPTO_PROVIDER`. Persistent named handle
+`Lattice-MasterWrap-v1`, shared across every identity, non-
+exportable. Per-blob ChaCha20-Poly1305 wraps the secret; the
+32-byte AEAD key is OAEP-SHA-256-wrapped by the TPM. On-disk
+format `version || wrapped_key_len || wrapped_key || nonce ||
+ct+tag` under `<handle>.tpmseal`. Two RAII guards ensure
+`NCryptFreeObject` runs on drop. New `KeystoreError::TpmUnavailable`
+variant for explicit callsite fallback to `WindowsKeystore`
+(DPAPI). 40 lib tests pass; the 6 TPM-specific tests skip
+cleanly on kokonoe (TPM not provisioned for the Platform Crypto
+Provider — verified via `NCryptOpenStorageProvider` returning
+`0x80090030`). **Hardware verification on a real TPM 2.0 chip is
+pending** before flipping `lattice-desktop::build_keystore()` to
+TPM as the default Windows path. See HANDOFF §24.
+
+macOS Secure Enclave + Linux `tss-esapi` opt-in remain on the
+follow-up list.
 
 Read [`HANDOFF.md`](HANDOFF.md) §6 for the concrete first vertical slice
 this roadmap sequences around. Read [`THREAT_MODEL.md`](THREAT_MODEL.md) for

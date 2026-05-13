@@ -177,7 +177,8 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | F — Tauri desktop shell | ✅ shipped 2026-05-12 | This session. See above + §15. |
 | G.1 — Keystore trait + DPAPI Windows impl | ✅ shipped 2026-05-12 | `lattice-media::keystore` + 5 IPC commands. See §16, DECISIONS §D-26. |
 | G.2 — Linux Secret Service + macOS Keychain | ✅ shipped 2026-05-12 | OS-keychain seal on all 3 desktops. See §17. |
-| G.3 — TPM 2.0 (Windows) + Secure Enclave (macOS) + tss-esapi opt-in (Linux) | ⬜ | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
+| G.3 (Windows) — TPM 2.0 wrap via NCrypt `MS_PLATFORM_CRYPTO_PROVIDER` | ✅ shipped 2026-05-12 | `TpmWindowsKeystore`. Persistent RSA-2048 wrap key + per-blob ChaCha20-Poly1305. New `KeystoreError::TpmUnavailable` for fallback. Hardware-test deferred — kokonoe's TPM not provisioned. See §24. |
+| G.3 (macOS / Linux) — Secure Enclave + tss-esapi opt-in | ⬜ | Same trait surface, hardware-bound seal. Plan in `scratch/next-session-plan.md` Track 2. |
 | Chat chunks A + C — sidebar/thread/composer + real DM flow | ✅ shipped 2026-05-12 | End-to-end MLS chat verified across two browser tabs. See §17 + §18. |
 | Chat group-state persistence — chat survives page reload | ✅ shipped 2026-05-12 | localStorage-backed MLS group + KP + convo index. See §19. |
 | Chat scrollback — pre-reload thread history renders on reload | ✅ shipped 2026-05-12 | Plaintexts persisted under `lattice/messages/{gid}/v1`. See §20. |
@@ -2298,7 +2299,79 @@ clean. Trunk build + browser smoke deferred to the post-G.3 gate.
 
 ### Next
 
-Chunk 24 — G.3 hardware-backed Windows TPM wrap. Subagent
-dispatched in this session; lands in the next HANDOFF section
-when it returns.
+§24 ships G.3 (Windows TPM wrap). After that the next gate is
+service-worker push (true background-tab receive), G.3 for macOS
+Secure Enclave + tss-esapi opt-in on Linux, and threat-model
+refresh ahead of an external audit.
+
+## 24. M7 Phase G.3 (Windows) — TPM 2.0-backed key wrap (shipped 2026-05-12)
+
+Replaces the G.1 DPAPI user-credential wrap on Windows with a TPM
+2.0-resident RSA-2048 wrap key under
+`MS_PLATFORM_CRYPTO_PROVIDER`. Identity secret bytes are sealed
+with a fresh ChaCha20-Poly1305 key per identity, and only that
+AEAD key is OAEP-SHA-256-wrapped by the TPM. The DPAPI keystore
+stays in tree as the fallback for boxes where the TPM is absent
+or unprovisioned.
+
+### Why a wrap key, not direct signing
+
+`MS_PLATFORM_CRYPTO_PROVIDER` exposes RSA and ECDSA only — no
+Ed25519 or ML-DSA-65 (HANDOFF §8 spec lock). Sealing to the TPM
+keeps the at-rest envelope hardware-bound without forcing a wire
+spec change. Same RAM-window posture as G.1 (DPAPI) and G.2b
+(macOS ECDH-wrap): bytes appear in RAM during sign, zeroized on
+return.
+
+### What shipped
+
+```
+crates/lattice-media/src/keystore/windows_tpm.rs   new, ~700 LOC
+crates/lattice-media/src/keystore/mod.rs           +TpmUnavailable variant
+crates/lattice-media/Cargo.toml                    chacha20poly1305 → [deps]
+```
+
+- `TpmWindowsKeystore::new(dir)` + `at_default_location()` at
+  `%LOCALAPPDATA%\Lattice\keystore-tpm` (distinct from the DPAPI
+  dir so both can coexist during migration).
+- Persistent wrap key named `Lattice-MasterWrap-v1` — generated
+  lazily on first `generate()` / `sign()`, reopened on every
+  subsequent run.
+- On-disk format: `version=1 || wrapped_key_len_u16_be ||
+  wrapped_key || nonce_12 || ciphertext_with_tag`. Public-key
+  sidecar `.pub` JSON shares the DPAPI schema for future rewrap.
+- Two RAII guards (`ProviderHandle`, `KeyHandleGuard`) call
+  `NCryptFreeObject` on drop so partial-failure paths can't leak
+  CNG resources.
+- New `KeystoreError::TpmUnavailable { message }` so callers
+  decide explicitly whether to fall back to
+  `WindowsKeystore` (DPAPI).
+
+### Test status
+
+`cargo test -p lattice-media --lib`: **40 passed, 1 ignored**.
+
+The 6 TPM unit tests pass via the `tpm_available()` guard —
+kokonoe's TPM returns `NCryptOpenStorageProvider: 0x80090030`
+("device is not ready"). Each test logs
+`skipping <name>: no TPM 2.0` to stderr. **The seal / unseal /
+sign-against-real-TPM paths have not been exercised on real
+hardware on this box.** Need a Windows host where `Get-Tpm`
+reports a provisioned chip to validate end-to-end.
+
+`tpm_unavailable_path_returns_typed_error` is `#[ignore]`-gated —
+run it on a TPM-less host to confirm the fallback signal.
+
+### Caveats / follow-ups
+
+- Hardware verification on a real TPM 2.0 chip is the gating
+  step before flipping the desktop default to `TpmWindowsKeystore`.
+  `lattice-desktop::build_keystore()` still constructs the DPAPI
+  `WindowsKeystore`; switch is a one-line change once a hardware
+  smoke passes.
+- Not PCR-bound. Sealing to PCRs (so a firmware tamper kills the
+  wrap key) is out of scope for G.3 per
+  `scratch/m7-phase-g-plan.md` §G.3.
+- macOS Secure Enclave + Linux `tss-esapi` opt-in remain on the
+  G.3 follow-up list — not in this commit.
 
