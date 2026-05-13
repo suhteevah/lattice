@@ -1,0 +1,7 @@
+Lattice is licensed under the GNU Affero General Public License v3.0 or later.
+
+See `../../LICENSE` in the workspace root for the full license text. This file
+exists so package managers and Vercel both surface the correct SPDX
+identifier; it is not an independent grant.
+
+SPDX-License-Identifier: AGPL-3.0-or-later

@@ -1,0 +1,10 @@
+/* Inter font stack.
+ *
+ * We do NOT pull Inter from Google Fonts or Bunny Fonts. The CSP in
+ * `vercel.json` is allowlisted to the deploy origin only, and the chat
+ * shell already standardized on the system-fallback Inter stack. So the
+ * docs site follows suit: no external font fetches, no FOUT.
+ *
+ * If a future iteration self-hosts Inter, drop the .woff2 files into
+ * `public/fonts/` and add an @font-face block here — keep it same-origin.
+ */

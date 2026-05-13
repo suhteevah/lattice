@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# Sitemap is emitted automatically by Astro once the site URL is configured.
+Sitemap: https://lattice.chat/sitemap-index.xml

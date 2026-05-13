@@ -1,0 +1,111 @@
+---
+title: Changelog
+description: Shipped milestones for Lattice. Tracks the protocol wire version and the public-facing surface only — internal refactors live in git.
+---
+
+This page summarizes what has actually shipped on `main`. For the full
+plan-of-record see
+[`docs/ROADMAP.md`](https://github.com/suhteevah/lattice/blob/main/docs/ROADMAP.md)
+in the repo; for what's coming next see
+[`docs/HANDOFF.md`](https://github.com/suhteevah/lattice/blob/main/docs/HANDOFF.md).
+
+## 2026-05-12 — M7 Phase G.2 + chat-app chunk A
+
+- **Linux keystore.** FreeDesktop Secret Service via pure-Rust
+  `secret-service` over `zbus`.
+- **macOS keystore.** Login Keychain via `security-framework`.
+- **Per-OS dispatch.** `lattice-desktop` selects the right keystore at
+  build time via `target_os`. Functional tests gated behind opt-in env
+  vars so day-to-day `cargo test` stays offline.
+- **Chat-app chunk A.** `lattice-web` default view is now a classic
+  chat layout (sidebar / thread / composer) rendered against in-memory
+  mock data. Real MLS state plumbing is chunk C.
+
+## 2026-05-12 — M7 Phase G.1
+
+- **Keystore trait.** `lattice-media::keystore::Keystore` with two
+  initial backends: `MemoryKeystore` (volatile, in-process) and
+  `WindowsKeystore` (DPAPI under `%LOCALAPPDATA%\Lattice\keystore`).
+- **Tauri IPC.** Five new commands — `keystore_generate`,
+  `keystore_pubkey`, `keystore_sign`, `keystore_delete`,
+  `keystore_list`.
+- **14 new tests pass.** Twelve inline + two trait-object integration.
+
+## 2026-05-12 — M7 Phases A–F
+
+- **PQ-DTLS-SRTP construction.** Phases A–E prove the cryptographic
+  pipeline end-to-end in a same-process loopback.
+- **Tauri desktop shell.** `apps/lattice-desktop/` wraps the Leptos UI
+  and natively links `lattice-core`, `lattice-crypto`,
+  `lattice-protocol`, `lattice-media`.
+- **Call orchestrator.** `lattice_media::call::run_loopback_call`
+  wraps the Phase E pipeline; Tauri `start_call` invokes it for the
+  in-shell smoke proof.
+- **SRTP round trip.** `PqSrtpEndpoint` wraps `webrtc-srtp::Context`
+  for real RTP encrypt → decrypt. Profile pinned to
+  `AES-128-CM-HMAC-SHA1-80`.
+- **rustls provider unification.** `ensure_crypto_provider()`
+  installs `ring` once at boot, defending against the workspace's
+  transitive rustls feature unification.
+- **186 workspace tests pass** with `LATTICE_NET_TESTS=1`.
+
+## 2026-05-12 — M6 V1.5 hardening
+
+- **Key transparency log.** CONIKS-style append-only log fronts the
+  identity service.
+- **Hidden group rosters.** Membership lists are encrypted to the
+  group, not visible server-side.
+- **Multi-server store-and-forward.** Offline message delivery via
+  federated relay queue.
+- **Out-of-band safety numbers.** Compare-across-the-table key
+  verification UI.
+- **Encrypted push notifications.** Server-side notification payloads
+  carry no plaintext.
+- **148 workspace tests pass** at `wire_version=3`. Text-only daily-use
+  is viable from this milestone forward.
+
+## 2026-05-11 — M5 V1 feature complete
+
+- **Sealed sender on every DM.** Server-routed envelopes hide the
+  sender from the routing server.
+- **Bug bounty open.** External review pipeline live.
+- **Usable for daily small-group use.** First "would actually use it"
+  milestone.
+
+## 2026-05-11 — M4 web client functional
+
+- **Passkey register → create DM → send → receive** across two browser
+  sessions. The web client transitions from demo to functional.
+
+## 2026-05-11 — M3 vertical slice (CLI)
+
+- **Two servers, two clients, one message** across federation. HANDOFF
+  §6 acceptance met. `lattice-cli` reaches the
+  `register / create-group / invite / send / recv` surface.
+
+## 2026-05-10 — M2 MLS + sealed sender
+
+- **`mls-rs` wrapper** with the custom hybrid ciphersuite.
+- **Sealed-sender envelopes** for server-routed messages.
+- **Wire types** in `lattice-protocol`: `IdentityClaim`, `KeyPackage`,
+  `Welcome`, `Commit`, `ApplicationMessage`.
+
+## 2026-05-10 — M1 crypto primitives
+
+- **Identity.** ML-DSA-65 + Ed25519 keypair generation.
+- **Hybrid KEM.** X25519 + ML-KEM-768.
+- **AEAD + padding.** ChaCha20-Poly1305 framing; constant-rate padding
+  helpers.
+
+## 2026-05-10 — M0 scaffold
+
+- **Workspace.** Seven Rust crates under `crates/`, web client under
+  `apps/lattice-web/`.
+- **Workspace-wide `forbid(unsafe_code)`** (FFI exempted).
+- **Lint gates.** `clippy::pedantic` + `clippy::nursery` warn-level,
+  `unwrap_used` / `expect_used` warned, `println!` banned in favor of
+  `tracing`.
+- **Design tokens** in `design/tokens/` — lilac-anchored, dark-mode-first.
+- **CI scripts.** `scripts/test-all.ps1` as the pre-commit gate. CI
+  workflows authored as a contributor reference; project owner verifies
+  locally.

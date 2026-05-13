@@ -1,0 +1,174 @@
+/* Lattice docs theme.
+ *
+ * Values mirror `design/tokens/colors.json` in the workspace root.
+ * Anchor: lilac --lattice-lilac-400 = #C8A2C8.
+ *
+ * Starlight exposes its theme via custom properties under
+ * `:root[data-theme='dark']` and `:root[data-theme='light']`. We override
+ * the brand-related ones and the surface neutrals to match the chat
+ * shell's `apps/lattice-web/styles.css`.
+ *
+ * Dark mode is canonical. Light mode is supported (Starlight ships it
+ * for free) but tuned to the lilac-50 / ink-50 surface tokens.
+ */
+
+:root {
+  /* Lilac ramp (token mirror) */
+  --lattice-lilac-50: #F2E8F2;
+  --lattice-lilac-100: #EAD8EA;
+  --lattice-lilac-200: #E0C8E0;
+  --lattice-lilac-300: #D4B4D4;
+  --lattice-lilac-400: #C8A2C8;
+  --lattice-lilac-500: #B38EB8;
+  --lattice-lilac-600: #9D7BA8;
+  --lattice-lilac-700: #6B4F8A;
+  --lattice-lilac-800: #4A3560;
+  --lattice-lilac-900: #2A1F3A;
+  --lattice-lilac-950: #18101E;
+
+  /* Ink neutrals */
+  --lattice-ink-50: #F8F5F8;
+  --lattice-ink-100: #EDE6ED;
+  --lattice-ink-200: #D8CDD8;
+  --lattice-ink-300: #B8A8B8;
+  --lattice-ink-400: #9A8A9A;
+  --lattice-ink-500: #8A7A8A;
+  --lattice-ink-600: #6A5A6A;
+  --lattice-ink-700: #4A3F50;
+  --lattice-ink-800: #3A2F40;
+  --lattice-ink-900: #2A2330;
+  --lattice-ink-950: #18141C;
+
+  /* Status */
+  --lattice-sage-500: #A2C8A8;
+  --lattice-amber-500: #E8C896;
+  --lattice-rose-500: #C88AA2;
+  --lattice-slate-500: #8AB0C8;
+}
+
+/* Dark theme overrides — the default Starlight scheme. */
+:root[data-theme='dark'],
+:root:not([data-theme='light']) {
+  /* Accent (Starlight maps these to links, buttons, focus rings) */
+  --sl-color-accent-low: var(--lattice-lilac-900);
+  --sl-color-accent: var(--lattice-lilac-400);
+  --sl-color-accent-high: var(--lattice-lilac-200);
+
+  /* Surfaces */
+  --sl-color-white: var(--lattice-ink-50);
+  --sl-color-gray-1: var(--lattice-ink-100);
+  --sl-color-gray-2: var(--lattice-ink-200);
+  --sl-color-gray-3: var(--lattice-ink-400);
+  --sl-color-gray-4: var(--lattice-ink-600);
+  --sl-color-gray-5: var(--lattice-ink-700);
+  --sl-color-gray-6: var(--lattice-ink-800);
+  --sl-color-black: var(--lattice-ink-950);
+
+  /* Body text */
+  --sl-color-text: var(--lattice-ink-50);
+  --sl-color-text-accent: var(--lattice-lilac-300);
+  --sl-color-text-invert: var(--lattice-ink-950);
+
+  /* Hairlines & cards */
+  --sl-color-hairline-light: var(--lattice-ink-800);
+  --sl-color-hairline: var(--lattice-ink-700);
+  --sl-color-hairline-shade: var(--lattice-ink-900);
+
+  --sl-color-bg: var(--lattice-ink-950);
+  --sl-color-bg-nav: var(--lattice-ink-900);
+  --sl-color-bg-sidebar: var(--lattice-ink-950);
+  --sl-color-bg-inline-code: var(--lattice-ink-800);
+  --sl-color-bg-accent: var(--lattice-lilac-400);
+
+  /* Status callouts */
+  --sl-color-green: var(--lattice-sage-500);
+  --sl-color-orange: var(--lattice-amber-500);
+  --sl-color-red: var(--lattice-rose-500);
+  --sl-color-blue: var(--lattice-slate-500);
+  --sl-color-purple: var(--lattice-lilac-400);
+
+  /* Shadow on cards / dropdowns */
+  --sl-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+/* Light theme — kept on-brand but secondary. Sentence-case copy, lilac-
+ * tinted neutrals. Visitors who opt in still see a recognizable Lattice. */
+:root[data-theme='light'] {
+  --sl-color-accent-low: var(--lattice-lilac-50);
+  --sl-color-accent: var(--lattice-lilac-700);
+  --sl-color-accent-high: var(--lattice-lilac-900);
+
+  --sl-color-white: var(--lattice-ink-950);
+  --sl-color-gray-1: var(--lattice-ink-900);
+  --sl-color-gray-2: var(--lattice-ink-800);
+  --sl-color-gray-3: var(--lattice-ink-500);
+  --sl-color-gray-4: var(--lattice-ink-300);
+  --sl-color-gray-5: var(--lattice-ink-200);
+  --sl-color-gray-6: var(--lattice-ink-100);
+  --sl-color-black: var(--lattice-ink-50);
+
+  --sl-color-text: var(--lattice-ink-900);
+  --sl-color-text-accent: var(--lattice-lilac-700);
+
+  --sl-color-bg: var(--lattice-ink-50);
+  --sl-color-bg-nav: #FFFFFF;
+  --sl-color-bg-sidebar: #FFFFFF;
+  --sl-color-bg-inline-code: var(--lattice-ink-100);
+}
+
+/* Typography — Inter as the preferred fallback, matching lattice-web. */
+:root {
+  --sl-font-system:
+    Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --sl-font-system-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+}
+
+/* Hero section — homepage flair without ditching Starlight's layout. */
+.hero {
+  background:
+    radial-gradient(
+      circle at 20% 10%,
+      var(--lattice-lilac-900) 0%,
+      transparent 50%
+    ),
+    radial-gradient(
+      circle at 80% 30%,
+      var(--lattice-lilac-800) 0%,
+      transparent 45%
+    );
+}
+
+/* Tighten the brand mark next to the title. */
+.site-title img {
+  height: 1.5em;
+  width: auto;
+}
+
+/* Sentence-case sidebar headings — Starlight uppercase-cases them by
+ * default; Lattice copy is sentence case throughout. */
+.sidebar-content nav > ul > li > details > summary,
+.sidebar-content nav > ul > li > .group-label > span {
+  text-transform: none !important;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--lattice-lilac-300);
+}
+
+/* Subtle lilac focus ring everywhere for keyboard nav. */
+:focus-visible {
+  outline: 2px solid var(--lattice-lilac-400);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Inline code uses an elevated surface, not the link color. */
+:not(pre) > code {
+  background: var(--sl-color-bg-inline-code);
+  color: var(--lattice-lilac-300);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  font-size: 0.92em;
+}

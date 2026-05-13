@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Lattice">
+  <title>Lattice</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#E0C8E0"/>
+      <stop offset="60%" stop-color="#C8A2C8"/>
+      <stop offset="100%" stop-color="#9D7BA8"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#g)" stroke-width="3" stroke-linecap="round">
+    <path d="M12 12 L52 12 L52 52 L12 52 Z"/>
+    <path d="M12 32 L52 32"/>
+    <path d="M32 12 L32 52"/>
+    <path d="M12 12 L52 52"/>
+    <path d="M52 12 L12 52"/>
+  </g>
+</svg>

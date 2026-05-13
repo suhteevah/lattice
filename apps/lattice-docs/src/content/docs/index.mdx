@@ -1,0 +1,61 @@
+---
+title: Lattice
+description: Post-quantum encrypted, federated messaging. A Discord replacement with Matrix-class decentralization at Discord-class UX speed.
+template: splash
+hero:
+  tagline: Post-quantum encrypted, federated messaging. A Discord replacement with Matrix-class decentralization at Discord-class UX speed.
+  image:
+    file: ../../assets/lattice-mark.svg
+    alt: Lattice mark
+  actions:
+    - text: Get started
+      link: /docs/usage/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/suhteevah/lattice
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Lattice
+
+<CardGrid stagger>
+  <Card title="Post-quantum by default" icon="seti:lock">
+    Every message is encrypted with a hybrid ciphersuite — ML-KEM-768 paired
+    with X25519, ML-DSA-65 paired with Ed25519. The day a quantum computer
+    breaks elliptic curves is the day your old transcripts stay sealed.
+  </Card>
+  <Card title="Federated, not centralized" icon="seti:config">
+    Run your own server. Talk to anyone on any other server. No platform
+    owner can deplatform a community; no single outage takes the network
+    down. QUIC-based gossip keeps federation snappy.
+  </Card>
+  <Card title="Server-blind by design" icon="seti:shell">
+    Sealed-sender envelopes hide who is talking to whom. The threat model
+    starts from the assumption that a server is hostile — the schema
+    physically cannot store plaintext.
+  </Card>
+  <Card title="Discord-class UX" icon="seti:rust">
+    Channels, DMs, voice and video. The browser client is a real-time chat
+    surface, not a federated forum. Native desktop shells via Tauri.
+  </Card>
+</CardGrid>
+
+## Where to start
+
+The documentation is structured as a single linear path you can read top
+to bottom, or jump into whichever section matches the question you have
+right now. Open the [docs index](/docs/usage/) and the sidebar will guide
+you through quickstart, installation, the protocol concepts (identity,
+messaging, servers, federation, security), then operations
+(self-hosting, API reference, troubleshooting), then development.
+
+## Project
+
+Lattice is open source under AGPL-3.0-or-later. Read the
+[architecture deep-dive](https://github.com/suhteevah/lattice/blob/main/docs/ARCHITECTURE.md)
+and the [threat model](https://github.com/suhteevah/lattice/blob/main/docs/THREAT_MODEL.md)
+on GitHub.
