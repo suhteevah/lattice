@@ -187,6 +187,7 @@ Phase progress against [`scratch/m7-build-plan.md`](../scratch/m7-build-plan.md)
 | Track 4 chunk 2.5 — multi-channel + admin enforcement | ✅ shipped 2026-05-12 | Each channel a separate MLS group; `AddChannel`/`RemoveChannel`/`PromoteAdmin` acted on. Sender attribution, late-joiner SyncState, classify-on-restore. See §23. |
 | Chat chunks E / F / B | ✅ shipped 2026-05-12 | Settings panel, avatar polish, contacts directory. See §23. |
 | Chat chunk D — WS push + no-PII notifications | ✅ shipped 2026-05-12 | Per-group WebSocket wake + `Notification` with fixed body. See §23. |
+| Public docs site — Vercel deploy + scrub | ✅ shipped 2026-05-13 | `https://lattice-quantum.vercel.app`. `/wiki/` mirrors ARCHITECTURE + THREAT_MODEL only. See §25. |
 | H — Tauri mobile shells | ⬜ | |
 | I — Cover-traffic + V2 parity gate | ⬜ | |
 
@@ -2381,4 +2382,83 @@ to confirm the fallback signal.
   `scratch/m7-phase-g-plan.md` §G.3.
 - macOS Secure Enclave + Linux `tss-esapi` opt-in remain on the
   G.3 follow-up list — not in this commit.
+
+## 25. Public docs site — deploy + internal-leak scrub (shipped 2026-05-13)
+
+🟢 Working. `https://lattice-quantum.vercel.app` is live with the
+sanitized doc set.
+
+The public Astro/Starlight site that the docs subagent scaffolded
+earlier was deployed to Vercel under the `lattice-quantum` project
+in the `suhteevah` scope. Two follow-on problems were uncovered and
+fixed in this session:
+
+### Why the first deploy was wrong
+
+1. **Build-time portability.** The original sync script
+   (`scripts/sync-usage.ps1`) used PowerShell. Vercel's Linux build
+   container has no `powershell`, so the `npm run prebuild` hook
+   would have failed on every Vercel build. Even after deploying
+   with `--prebuilt` (which skips Vercel-side build) the script
+   remained a Windows-only liability.
+2. **Internal-leak surface.** The wiki sync mirrored
+   `docs/{HANDOFF,DECISIONS,ARCHITECTURE,THREAT_MODEL,ROADMAP}.md`
+   plus `README.md` into `/wiki/`. HANDOFF / ROADMAP / DECISIONS /
+   README are inherently internal — they leak machine names
+   (kokonoe, satibook, pixie, cnc-server), a real public VPS IP
+   (`207.244.232.227`), LAN + Tailscale IPs, owner identity,
+   tentative product decisions (D-22 domain choice, D-25
+   monetization), and chunk-by-chunk session logs. The
+   `docs/usage/*` files written by the docs subagent also leaked
+   `HANDOFF §N`, `DECISIONS §D-NN`, milestone labels (M0–M7), and
+   chat-app chunk labels (A/B/C/D/E/F, 2, 2.5) throughout.
+
+### Fixes shipped
+
+- `apps/lattice-docs/scripts/sync.mjs` — pure-Node sync script
+  replacing the PowerShell one. Cross-platform, zero deps,
+  idempotent, normalises frontmatter the same way.
+- `apps/lattice-docs/package.json` — `prebuild` / `predev` /
+  `sync` scripts all call `node ./scripts/sync.mjs`.
+- `scripts/sync-usage.ps1` removed.
+- `WIKI_FILES` narrowed to `ARCHITECTURE` + `THREAT_MODEL` only.
+- `docs/usage/*.md` (all 12 files) and `docs/ARCHITECTURE.md` —
+  every internal reference scrubbed or rewritten. See commit
+  `d1de71a` for the full per-file diff.
+- `apps/lattice-docs/src/content/docs/index.mdx` — project-section
+  links repointed from GitHub `docs/*.md` to in-site `/wiki/`.
+- `apps/lattice-docs/src/content/docs/changelog.mdx` — gutted to a
+  stub; the old release notes leaked milestone labels + internal
+  test counts.
+
+### Deploy pattern
+
+`vercel deploy --prebuilt --prod` from `apps/lattice-docs/`. We
+pre-build locally so the sync script can reach `../../docs/`, then
+ship `.vercel/output/` as-is. There is no auto-deploy from git —
+intentional, per `CLAUDE.md`'s manual-gate rule. Full runbook at
+`apps/lattice-docs/DEPLOY.md`.
+
+### Verification
+
+Browser smoke confirmed:
+- `/wiki/handoff/`, `/wiki/roadmap/`, `/wiki/decisions/`,
+  `/wiki/readme/` → 404 (correctly missing).
+- `/wiki/architecture/`, `/wiki/threat_model/` → render clean.
+- `/docs/usage/*` → 12 pages, zero hits for any of
+  `HANDOFF`, `kokonoe`, `pixie`, `207.244`, `D-NN`, `M[0-9]`,
+  `llm-wiki`, `DECISIONS`, `chunk *`.
+- `npm run build` indexes 17 pages green; Pagefind search
+  works on the sanitized corpus.
+
+### Follow-ups
+
+- Tag a `v0.1.0` and fill `changelog.mdx` with the first
+  user-facing release notes once the surface stabilises.
+- Future-proof the leak audit: add a `scripts/audit-public-docs.ps1`
+  (or `.mjs`) that greps the publish targets for the same regex set
+  before every deploy and fails non-zero on a hit. Currently a
+  manual grep is the only gate.
+- Domain (D-22 in the locked decisions) still open — until it's
+  resolved, `lattice-quantum.vercel.app` is the canonical URL.
 
