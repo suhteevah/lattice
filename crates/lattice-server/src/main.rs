@@ -48,9 +48,11 @@ async fn main() -> anyhow::Result<()> {
     // 5. Federation key + in-memory state
     let federation_sk = load_or_generate_federation_key(&cfg.federation_key_path)
         .context("failed to load or generate federation signing key")?;
-    let state = lattice_server::state::ServerState::new_with_federation_key(federation_sk);
+    let state = lattice_server::state::ServerState::new_with_federation_key(federation_sk)
+        .with_registration_token(&cfg.server.registration_token);
     info!(
         federation_pubkey = %state.federation_pubkey_b64,
+        registration_gated = state.registration_token.is_some(),
         "federation identity loaded"
     );
 

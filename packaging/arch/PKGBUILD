@@ -1,0 +1,244 @@
+# Maintainer: Matt Gates <mmichels88@gmail.com>
+#
+# Lattice — post-quantum encrypted federated messaging.
+#
+# Split package: produces two pacman packages from one source tree:
+#   - lattice-desktop  : Tauri 2 + Leptos PWA chat client
+#   - lattice-server   : home-server daemon (HTTP API + federation)
+#
+# Build from a pinned commit on github.com/suhteevah/lattice.
+# Bump _commit when shipping a new revision; pkgver / pkgrel
+# track downstream packaging changes.
+#
+# Build deps notes:
+#   - trunk is in the AUR.  Install before makepkg:
+#       paru -S trunk         (or: cargo install trunk --locked)
+#   - capnproto must provide the `capnp` binary on PATH; lattice-protocol
+#     invokes it during build.rs.  Repo package is fine.
+#   - wasm-bindgen-cli is pinned by Trunk.toml to 0.2.121; Trunk will
+#     download the matching binary into ~/.cache/trunk if the system
+#     wasm-bindgen disagrees.
+#
+# Usage:
+#   cd packaging/arch
+#   makepkg -si        # builds + installs lattice-desktop and lattice-server
+#
+# To install only one:
+#   makepkg
+#   sudo pacman -U lattice-desktop-*.pkg.tar.zst
+#   # or
+#   sudo pacman -U lattice-server-*.pkg.tar.zst
+
+pkgbase=lattice
+pkgname=('lattice-desktop' 'lattice-server')
+pkgver=0.1.0
+pkgrel=1
+arch=('x86_64')
+url='https://github.com/suhteevah/lattice'
+license=('AGPL-3.0-or-later')
+
+# Pin to the commit cnc-server verified builds cleanly with capnp + trunk
+# on 2026-05-14.  Bump _commit when shipping a new revision and reset
+# pkgrel to 1.
+_commit='74817ba4219a24ff30ef5c72c1e34fda9725ef57'
+
+makedepends=(
+    'rust'           # stable; lattice pins via rust-toolchain.toml
+    'cargo'          # comes with rust but listed for clarity
+    'pkgconf'
+    'capnproto'      # provides `capnp` for lattice-protocol/build.rs
+    'wasm-bindgen'   # 0.2.121 pinned in Trunk.toml; trunk fetches if mismatched
+    'trunk'          # AUR; install before makepkg
+    'git'
+    'webkit2gtk-4.1' # build-link for the Tauri shell
+    'libsoup3'
+    'gtk3'
+    'librsvg'
+    'libayatana-appindicator'  # modern Arch replacement for libappindicator-gtk3
+)
+
+source=("$pkgbase::git+$url.git#commit=$_commit")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$pkgbase"
+    # Use the Cargo.toml workspace version + the short commit hash.
+    # If the upstream cuts a v* tag, replace with: git describe --tags
+    local cargo_ver
+    cargo_ver=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+    printf '%s.r%s.%s' "$cargo_ver" \
+        "$(git rev-list --count HEAD)" \
+        "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir/$pkgbase"
+
+    # cnc-server hit `sccache: error: Timed out waiting for server startup`
+    # when a RUSTC_WRAPPER=sccache was set globally.  We don't enforce it
+    # here, but document the workaround: export RUSTC_WRAPPER= before
+    # running makepkg if your shell sets it.
+    :
+}
+
+build() {
+    cd "$srcdir/$pkgbase"
+
+    # Verify the build toolchain is sane before we burn 20 minutes.
+    capnp --version >/dev/null || {
+        printf 'capnp not on PATH; install `capnproto`\n' >&2
+        return 1
+    }
+    trunk --version >/dev/null || {
+        printf 'trunk not on PATH; install via AUR or `cargo install trunk`\n' >&2
+        return 1
+    }
+
+    # --- 1. lattice-server (release) ---------------------------------
+    cargo build --release -p lattice-server --locked
+
+    # --- 2. lattice-web (Leptos / wasm32 / Trunk) --------------------
+    pushd apps/lattice-web >/dev/null
+    trunk build --release
+    popd >/dev/null
+
+    # --- 3. lattice-desktop (Tauri shell, bin only) ------------------
+    # We build the binary directly via cargo rather than `cargo tauri
+    # build` so we skip the .deb / .AppImage bundlers and produce only
+    # what pacman needs.  This dodges the appimagetool GitHub-rate-limit
+    # hang we saw on cnc-server.
+    cargo build --release -p lattice-desktop --locked
+}
+
+# ---------------------------------------------------------------------
+# package_lattice-desktop  — Tauri shell, icons, .desktop file
+# ---------------------------------------------------------------------
+package_lattice-desktop() {
+    pkgdesc='Lattice desktop chat client — post-quantum encrypted, federated'
+    depends=(
+        'webkit2gtk-4.1'
+        'libsoup3'
+        'gtk3'
+        'librsvg'
+        'libayatana-appindicator'
+        'glibc'
+    )
+    optdepends=(
+        'lattice-server: self-host your home server on the same box'
+    )
+    provides=('lattice-desktop')
+    conflicts=('lattice-desktop-bin' 'lattice-desktop-git')
+
+    cd "$srcdir/$pkgbase"
+
+    # Binary
+    install -Dm755 target/release/lattice-desktop \
+        "$pkgdir/usr/bin/lattice-desktop"
+
+    # Icons (32 / 128 / 128@2x)
+    install -Dm644 apps/lattice-desktop/src-tauri/icons/32x32.png \
+        "$pkgdir/usr/share/icons/hicolor/32x32/apps/lattice.png"
+    install -Dm644 apps/lattice-desktop/src-tauri/icons/128x128.png \
+        "$pkgdir/usr/share/icons/hicolor/128x128/apps/lattice.png"
+    install -Dm644 apps/lattice-desktop/src-tauri/icons/128x128@2x.png \
+        "$pkgdir/usr/share/icons/hicolor/256x256/apps/lattice.png"
+
+    # .desktop file
+    install -dm755 "$pkgdir/usr/share/applications"
+    cat > "$pkgdir/usr/share/applications/lattice.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Lattice
+GenericName=Encrypted messenger
+Comment=Post-quantum encrypted federated messaging
+Exec=lattice-desktop
+Icon=lattice
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=Lattice
+Keywords=chat;messaging;encryption;mls;post-quantum;
+DESKTOP
+
+    # LICENSE
+    install -Dm644 LICENSE \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------
+# package_lattice-server  — home-server daemon + systemd unit
+# ---------------------------------------------------------------------
+package_lattice-server() {
+    pkgdesc='Lattice home-server — HTTP API, MLS group state, federation'
+    depends=('glibc' 'gcc-libs' 'openssl')
+    backup=('etc/lattice/lattice.toml')
+    provides=('lattice-server')
+    conflicts=('lattice-server-bin' 'lattice-server-git')
+
+    cd "$srcdir/$pkgbase"
+
+    # Binary
+    install -Dm755 target/release/lattice-server \
+        "$pkgdir/usr/bin/lattice-server"
+
+    # Default config
+    install -dm755 "$pkgdir/etc/lattice"
+    cat > "$pkgdir/etc/lattice/lattice.toml" <<'CONF'
+# Lattice home-server configuration.
+# Environment variables override these.  See docs/usage/self-hosting.md.
+
+[server]
+bind_addr = "127.0.0.1:8080"
+
+[observability]
+json = true
+CONF
+
+    # systemd unit
+    install -dm755 "$pkgdir/usr/lib/systemd/system"
+    cat > "$pkgdir/usr/lib/systemd/system/lattice-server.service" <<'UNIT'
+[Unit]
+Description=Lattice home server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lattice
+Group=lattice
+WorkingDirectory=/var/lib/lattice
+Environment=LATTICE__SERVER__BIND_ADDR=0.0.0.0:8444
+Environment=LATTICE__FEDERATION_KEY_PATH=/var/lib/lattice/federation.key
+Environment=LATTICE__SNAPSHOT_PATH=/var/lib/lattice/snapshot.json
+Environment=LATTICE__ENVIRONMENT=production
+Environment=LATTICE__DATABASE_URL=postgres://noop@localhost/noop
+Environment=RUST_LOG=lattice_server=info,axum=warn
+ExecStart=/usr/bin/lattice-server
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lattice
+ProtectHome=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    # sysusers / tmpfiles  — pacman runs these on install
+    install -dm755 "$pkgdir/usr/lib/sysusers.d"
+    cat > "$pkgdir/usr/lib/sysusers.d/lattice.conf" <<'SYSU'
+u lattice - "Lattice home-server" /var/lib/lattice /sbin/nologin
+SYSU
+
+    install -dm755 "$pkgdir/usr/lib/tmpfiles.d"
+    cat > "$pkgdir/usr/lib/tmpfiles.d/lattice.conf" <<'TMP'
+d /var/lib/lattice 0700 lattice lattice -
+TMP
+
+    # LICENSE
+    install -Dm644 LICENSE \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}

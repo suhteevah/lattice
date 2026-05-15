@@ -25,6 +25,17 @@ pub struct AppConfig {
 pub struct ServerConfig {
     /// Socket address to bind (e.g. `0.0.0.0:8443`).
     pub bind_addr: String,
+    /// Optional invite token. When set, `POST /register` requires
+    /// `Authorization: Bearer <token>` and rejects every request that
+    /// does not present the exact token bytes. When unset (or empty),
+    /// `/register` is open — preserves the M3 dev-mode behavior. Other
+    /// endpoints (`/key_packages`, message inbox, federation pushes)
+    /// stay unauthenticated regardless; federation peers must remain
+    /// able to fetch KPs for any user_id they federate with, and the
+    /// federation push surface authenticates via its own Ed25519
+    /// signed-TBS pattern.
+    #[serde(default)]
+    pub registration_token: String,
 }
 
 impl AppConfig {
@@ -42,6 +53,7 @@ impl AppConfig {
                     .try_parsing(true),
             )
             .set_default("server.bind_addr", "0.0.0.0:8443")?
+            .set_default("server.registration_token", "")?
             .set_default("environment", "development")?
             .set_default("federation_key_path", "./federation.key")?
             .set_default("snapshot_path", "")?

@@ -168,6 +168,12 @@ pub struct ServerState {
     /// encrypted payloads to each endpoint when a message arrives
     /// for that user.
     pub push_subscriptions: Arc<RwLock<HashMap<[u8; 32], Vec<PushSubscription>>>>,
+    /// Optional invite token gating `POST /register`. `None` = open
+    /// registration (legacy dev-mode behavior). `Some(token)` =
+    /// reject any /register POST whose `Authorization: Bearer <…>`
+    /// header doesn't match these bytes (constant-time compare). See
+    /// `AppConfig::registration_token`.
+    pub registration_token: Option<Arc<String>>,
 }
 
 /// Web Push API subscription registered by a client. The `endpoint`
@@ -218,7 +224,21 @@ impl ServerState {
             subscribers: Arc::default(),
             group_replication: Arc::default(),
             push_subscriptions: Arc::default(),
+            registration_token: None,
         }
+    }
+
+    /// Builder-style setter for the registration token. Pass a non-empty
+    /// string to gate `/register`; empty / unset leaves registration open.
+    #[must_use]
+    pub fn with_registration_token(mut self, token: impl Into<String>) -> Self {
+        let s: String = token.into();
+        if s.is_empty() {
+            self.registration_token = None;
+        } else {
+            self.registration_token = Some(Arc::new(s));
+        }
+        self
     }
 
     /// Get-or-create the broadcast `Sender` for `group_id` so a fresh
