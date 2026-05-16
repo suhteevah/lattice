@@ -1,27 +1,91 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-16 — **production federation pair live
-(cnc + pixie) at `https://lattice.pixiedustbot.com`** plus
-Reg v2 spec + plan + Section A server code complete on
-`worktree-reg-v2` branch (14 of 29 plan tasks done). Tauri Linux
-`.deb` artifact built on cnc. Updater spec written, no code yet.
-Android scaffold recon — gated on SDK install. See §26 below.
+**Last updated:** 2026-05-16 (Reg v2 shipped end-to-end: per-user
+single-use invite tokens minted via Clerk-gated Astro admin UI on
+`lattice-quantum.vercel.app`. New `/admin/tokens` routes on
+`lattice-server` gated by `LATTICE__SERVER__ADMIN_API_KEY`. Chat
+shell gains an "Invite token" Settings field that bootstraps the
+register call with `Authorization: Bearer <token>`. `lattice-cli`
+gains `--auth-token` for the same. Backcompat: the old static
+`LATTICE__SERVER__REGISTRATION_TOKEN` auto-mints a no-expiry
+invite on first boot. Deployed live on cnc + pixie + Vercel.
+T27 + T29 smoke green. See §26 below.) Also live since 2026-05-16
+morning: **production federation pair (cnc + pixie) at
+`https://lattice.pixiedustbot.com`**, Tauri Linux `.deb` artifact,
+Arch PKGBUILD; updater spec written (no code); Android scaffold
+recon gated on SDK install.
 
-**Status:** 🟡 In progress on Reg v2 — Section A code in worktree
-not yet committed or merged; Section B (Astro admin UI) + C
-(chat-shell token field) + OPS deploy still pending. Production
-servers still on pre-Reg-v2 binary (static-token gate via
-`LATTICE__SERVER__REGISTRATION_TOKEN`). To resume: enter the
-worktree at `J:\lattice\.claude\worktrees\reg-v2`, read
-`docs/superpowers/plans/2026-05-16-registration-v2.md`, pick up
-at Task 16.
+**Status:** 🟢 Working — Reg v2 + production federation both live.
+**M1 / M2 / M3 / M4 / M5 / M6 all shipped**, **M7 Phases A–F + G.1
++ G.2 + G.3 + chat chunks A + C shipped**. Open: M7 H (Tauri
+mobile shells, gated on Android SDK install), I (cover-traffic);
+Updater implementation (spec only, no plan yet); Android Tauri
+scaffold.
 
 ---
 
-### Session log — 2026-05-16
+### Session log — 2026-05-16 (afternoon: Reg v2 ship)
 
-Two-track session: stand up production federation, then start
-shipping invite-only registration (Reg v2).
+Took the Reg v2 plan + Section A code (a44fbf8) from the morning
+session and shipped the remaining 15 tasks end-to-end:
+
+- **Section B (Astro admin UI)**: Tasks 16–22. `@clerk/astro` +
+  Vercel SSR adapter, middleware gating `/admin/*` and
+  `/api/admin/*` on Clerk session + `LATTICE_ADMIN_USER_IDS`
+  allowlist, `/sign-in.astro` mounting Clerk's component,
+  `/admin/index.astro` mint form + token table + revoke,
+  `/invite/[token].astro` public landing covering valid /
+  expired / consumed / unknown states. Clerk Marketplace
+  provisioned via `vercel integration add clerk` (CLI). Vercel
+  env vars added via CLI. Deployed to
+  `https://lattice-quantum.vercel.app`. Mid-session fix: the
+  `/admin` page initially self-fetched
+  `${Astro.url.origin}/api/admin/tokens` and that round-trip
+  blew up middleware → 500. Refactored to call the home server
+  directly from page frontmatter; the `/api/admin/tokens`
+  forwarder still serves the client-side mint / revoke buttons.
+- **Section C (chat-shell)**: Tasks 23–26.
+  `storage.rs` invite-token persistence under
+  `lattice/invite_token/v1`, `api.rs::register` now takes
+  `Option<&str>` invite_token and attaches `Authorization:
+  Bearer <token>` when present, `chat_state.rs` bootstrap
+  loads + clears on success, `chat.rs::SettingsForm` gains an
+  "Invite token (single-use)" field.
+- **Ops deploy (Task 15)**: pushed `worktree-reg-v2` branch to
+  origin; on cnc + pixie ran `git stash` (preserving prior v1
+  in-place edits) → `git checkout worktree-reg-v2` → build →
+  `install -m 0755` over `/usr/local/bin/lattice-server` →
+  systemd restart. Generated 24-byte admin key
+  (`J:\lattice\scratch\.admin-api-key`, gitignored), pushed to
+  both `auth.conf` overrides + Vercel `LATTICE_ADMIN_API_KEY`.
+  Smoke: 401 without key, 200 list shows legacy backcompat
+  entry, 200 mint returns fresh token.
+- **CLI extension**: `lattice init` gains `--auth-token`
+  (`LATTICE_INVITE_TOKEN` env). Made T29's four-case smoke
+  cleanly driveable from a shell loop.
+- **Smoke (Tasks 27 + 29)**: T27 browser-side at
+  `http://127.0.0.1:5173` (trunk-served) → user_id
+  `2d71ea9d7bb7…` registered atomically, token shows
+  `consumed_by:2d71ea9d`. T29 four cases via `lattice init`:
+  bad → 401 unknown, expired (TTL=1s, slept 4s) → 401 expired,
+  valid fresh on clean home → 200 + KP published, replay → 401
+  already consumed.
+- **Docs (Task 28)**: §26 added (architecture / endpoints /
+  Vercel env layout / operator runbook pointer / smoke / open
+  follow-ups), DECISIONS gains D-27 (Decision / Rationale /
+  Implementation / Trade-off block on per-user tokens +
+  Clerk-via-Marketplace choice), `scratch/new-user-handoff.md`
+  rewritten to drop the Path A / Path B static-token flow in
+  favour of the single invite-token field path + a per-user
+  curl CLI fallback.
+
+Commits on `worktree-reg-v2` (now merged to main): a44fbf8
+(Section A) → 2d9a38c (B) → e710f69 (C) → 268e239 (docs)
+→ d17fa1f (admin self-fetch fix) → ddd9175 (CLI auth-token).
+
+### Session log — 2026-05-16 (morning: planning + federation + artifacts)
+
+Three-track planning session:
 
 **Track 1 — Production federation pair (live).**
 
@@ -79,6 +143,9 @@ bind addresses for the next session.
    `scratch/new-user-handoff.md` + `scratch/new-user-prompt.md`
    — paste-into-their-Claude prompt + the doc that walks their
    agent through install + verify + register against pixie.
+   (Refreshed in the afternoon session to drop the Path A / Path
+   B static-token hedge in favour of the single invite-token
+   field path.)
 6. **Android scaffold recon** dispatched via subagent. Result:
    gated on Android SDK + NDK install on kokonoe (~2 GB minimum,
    ~6.5 GB full). Cargo.toml `crate-type = ["rlib"]` and missing
@@ -86,7 +153,7 @@ bind addresses for the next session.
    blockers. Detailed in `scratch/android-scaffold-report.md`.
    Deferred behind Reg v2 + Updater.
 
-**Track 3 — Reg v2 (in flight).**
+**Track 3 — Reg v2 design + plan (shipped same day; see §26).**
 
 1. **Brainstorming**: full design pass via the brainstorming skill.
    Spec at `docs/superpowers/specs/2026-05-16-registration-v2-design.md`.
@@ -96,22 +163,16 @@ bind addresses for the next session.
    expiry default.
 2. **Plan**: 29 bite-sized tasks at
    `docs/superpowers/plans/2026-05-16-registration-v2.md`. Each
-   task has concrete code, commands, expected outputs. Per
-   `CLAUDE.md` "no commits without explicit ask," the plan stages
-   only — commits left to the operator.
-3. **Section A code** (Tasks 1–14): server-side complete. Worktree
-   at `J:\lattice\.claude\worktrees\reg-v2`, branch
-   `worktree-reg-v2`. 625 insertions / 30 deletions across 10
-   files. 5 integration tests + 4 unit tests pass. Race test
-   proves single-spend under 200 concurrent /register POSTs.
-4. **Backcompat preserved**: the legacy
-   `LATTICE__SERVER__REGISTRATION_TOKEN=BIUB…3uV2` continues to
-   work — auto-mints as a no-expiry invite at first boot if the
-   registry is empty (labelled
-   `legacy:LATTICE__SERVER__REGISTRATION_TOKEN`).
+   task has concrete code, commands, expected outputs.
+3. **Section A code** (Tasks 1–14): server-side. Worktree at
+   `J:\lattice\.claude\worktrees\reg-v2`, branch
+   `worktree-reg-v2`. Race test proves single-spend under 200
+   concurrent /register POSTs.
+4. **Tasks 15–29** shipped in the afternoon session — see the
+   first session log entry above and §26 below for the full
+   write-up.
 
-Memory: [[reg-v2-session-state]] for resume notes;
-[[reg-v2-admin-key]] for the deploy env var.
+Memory: [[reg-v2-admin-key]] for the deploy env var.
 
 **Track 4 — Updater (spec only).**
 
@@ -122,69 +183,16 @@ on GitHub Releases, manifest on the Astro deploy. `scripts/release.ps1`
 orchestrates per-platform build → sign → upload → manifest update.
 No plan written yet; comes after Reg v2 ships.
 
-**Files written (untracked / scratch):**
-- `scratch/two-user-firstserver-war.md`
-- `scratch/new-user-handoff.md`
-- `scratch/new-user-prompt.md`
-- `scratch/federation-pinning.md`
-- `scratch/android-scaffold-report.md`
-- `scratch/reg-v2-operator-notes.md`
-- `scratch/.registration-token` (secret; in .gitignore)
+**What's next:**
 
-**Files written (committed in main checkout via /handoff):**
-- `docs/superpowers/specs/2026-05-16-registration-v2-design.md`
-- `docs/superpowers/specs/2026-05-16-updater-design.md`
-- `docs/superpowers/plans/2026-05-16-registration-v2.md`
-- `packaging/arch/PKGBUILD`
-- `packaging/arch/README.md`
-
-**Files written (committed in worktree on branch worktree-reg-v2 via /handoff):**
-- All Section A code (10 files, 625 insertions / 30 deletions).
-
-**What's next (for the incoming session):**
-
-In priority order:
-
-1. **Reg v2 Section B** — Astro admin UI + invite-redemption pages
-   + Clerk-gated API routes. Plan tasks 16–22. Hits
-   `apps/lattice-docs/` (the existing live Vercel deploy).
-2. **Reg v2 Section C** — chat shell `Settings` panel adds an
-   "Invite token" input field. Plan tasks 23–26. Touches
-   `apps/lattice-web/src/{api,chat_state,chat,storage}.rs`.
-3. **Reg v2 deploy (Task 15 + 22)** — push the new server binary
-   to cnc + pixie with the new admin key in systemd override.
-   Vercel deploy the Astro changes. ~10 s federation downtime
-   per host.
-4. **Reg v2 smoke** (Tasks 27–29) — end-to-end via /admin → mint
-   → /invite/[token] → chat shell paste → register → admin shows
-   consumed.
-5. **Updater plan** — `superpowers:writing-plans` against the
-   updater spec, then implement.
-6. **Android scaffold** — install SDK + NDK, run
+1. **Updater plan + implementation** — `superpowers:writing-plans`
+   against the updater spec, then build it.
+2. **Android scaffold** — install SDK + NDK, run
    `cargo tauri android init`, address the rlib/cdylib +
    `keystore/android.rs` blockers from the recon report.
-
-**Notes for the next Claude:**
-
-- Per `CLAUDE.md`, do NOT `git commit` without an explicit ask
-  from Matt. Stage changes via `git add` and present the staged
-  set + draft commit message; he runs `git commit` himself.
-- The implementer pattern is `superpowers:subagent-driven-development`
-  — fresh subagent per task or per logical bundle. Haiku for
-  mechanical tasks, sonnet for atomic-critical-section / race
-  /federation reasoning. Bundling adjacent tasks (same file,
-  same component) cuts wall-clock without losing quality.
-- Production servers still run the pre-Reg-v2 binary. The Matt's
-  client + the documented `BIUB…3uV2` static token both still
-  work. Do NOT advertise the new admin token shape externally
-  until Section B + ops deploy land.
-- The two-user-handoff at `scratch/new-user-handoff.md` is the
-  paste-to-the-new-user's-Claude doc. After Reg v2 ships, refresh
-  the §"Path A — chat shell with a token field" section to drop
-  the "if the chat-shell build has a token field" hedge.
-- `apps/lattice-docs/` is currently Astro 4 on Vercel. The Reg v2
-  plan ADDS to it (`/admin`, `/invite/[token]`, `/api/admin/*`)
-  — does NOT migrate to Next.js. Keep that boundary clean.
+3. **Clerk hardening** — promote `pk_test_` → `pk_live_`, lock
+   signup, move from a flat `LATTICE_ADMIN_USER_IDS` list to a
+   Clerk organization model for multi-operator setups.
 
 ---
 
@@ -2649,4 +2657,153 @@ Browser smoke confirmed:
   manual grep is the only gate.
 - Domain (D-22 in the locked decisions) still open — until it's
   resolved, `lattice-quantum.vercel.app` is the canonical URL.
+
+## 26. Registration v2 — per-user invite tokens (shipped 2026-05-16)
+
+🟢 Working. End-to-end mint → redeem → consume flow live on
+cnc + pixie + `lattice-quantum.vercel.app`.
+
+Replaces the single static `LATTICE__SERVER__REGISTRATION_TOKEN`
+gate with per-user, single-use, atomically-consumed invite tokens
+issued through a Clerk-gated admin UI. The original static
+token is preserved for backcompat — on first boot, if it's set
+and the invite registry is empty, `lattice-server` auto-mints a
+no-expiry invite whose bytes match the env var, labelled
+`legacy:LATTICE__SERVER__REGISTRATION_TOKEN`. Existing
+deployments keep onboarding new users without any config
+change; operators cut over to the admin UI on their own
+schedule.
+
+### Architecture
+
+```
+operator → /admin (Clerk-gated, allowlist-checked)
+              ↓
+          /api/admin/tokens   ─POST X-Lattice-Admin-Key─►   lattice-server
+                                                              ↓ atomic
+                                                          /admin/tokens
+              ↓ shares URL
+end user → /invite/<token>  ───curl /admin/tokens/<id>──►  lattice-server
+                                                              (public lookup
+                                                               by token id)
+              ↓ paste into ⚙ Settings
+chat shell → POST /register
+             Authorization: Bearer <token>      ───────►   lattice-server
+                                                              ↓ atomic check
+                                                                + consume + register
+```
+
+### Wire changes
+
+- `ServerConfig` adds `admin_api_key` (env
+  `LATTICE__SERVER__ADMIN_API_KEY`).
+- `ServerState` adds `invite_tokens: HashMap<String, InviteToken>`
+  protected by the existing write-lock. The lock spans
+  check → mark-consumed → register-user so concurrent
+  `/register` POSTs cannot share a single-use token.
+- Snapshot bumps to v2: `state_snapshot.json` adds
+  `invites: Vec<InviteSnap>`. v1 snapshots load cleanly via
+  `#[serde(default)]`.
+- Sweeper task (`tokio::spawn`) runs every 5 min and evicts
+  expired-unconsumed entries plus consumed entries older than
+  30 days. Counts logged at INFO when > 0.
+
+### Server endpoints
+
+| Route | Auth | Body / params |
+|---|---|---|
+| `POST   /admin/tokens`         | `X-Lattice-Admin-Key` | `{ label?, ttl_secs? }` → new `InviteView` |
+| `GET    /admin/tokens`         | `X-Lattice-Admin-Key` | list all `InviteView` |
+| `GET    /admin/tokens/{token}` | **public**            | single `InviteView` (used by `/invite/[token]` landing) |
+| `DELETE /admin/tokens/{token}` | `X-Lattice-Admin-Key` | revoke (deletes entry) |
+| `POST   /register`             | `Authorization: Bearer <token>` (unless server admits open register) | atomic consume + register |
+
+`InviteView` carries `token`, `created_at`, `expires_at`,
+`label?`, `consumed_at?`, `consumed_by_prefix?`. Internally the
+struct also tracks `consumed_by: [u8; 32]` (full user_id); the
+public view truncates to the 6-byte prefix to match log-line
+identifiers.
+
+### Web admin (lattice-docs / Astro)
+
+- `output: 'server'` (Vercel SSR adapter).
+- `@clerk/astro` integration; `src/middleware.ts` gates
+  `/admin/*` and `/api/admin/*` on a Clerk session **and** a
+  `LATTICE_ADMIN_USER_IDS` allowlist (comma-separated Clerk
+  user_ids). Unauthed → `/sign-in?next=…`; non-allowlist → 403.
+- `src/pages/sign-in.astro` mounts Clerk's `<SignIn />`.
+- `src/pages/api/admin/tokens.ts` (POST + GET) + `[id].ts`
+  (DELETE) forward to `LATTICE_SERVER_URL/admin/tokens` with
+  `X-Lattice-Admin-Key` injected from the Vercel env.
+- `src/pages/admin/index.astro` — dark-themed mint form +
+  token table + per-row revoke buttons; alert with the
+  redemption URL fires after a successful mint.
+- `src/pages/invite/[token].astro` — public landing showing
+  `valid` / `expired` / `consumed` / `unknown` with install
+  instructions when valid.
+
+### Chat-shell wiring (lattice-web)
+
+- `storage.rs` — `load_invite_token` /
+  `save_invite_token` / `clear_invite_token` under
+  `lattice/invite_token/v1` in localStorage.
+- `api.rs` — `register()` gains an `invite_token: Option<&str>`
+  param; when `Some`, attaches `Authorization: Bearer <token>`.
+- `chat_state.rs` — bootstrap loads the persisted token,
+  passes it to `register()`, clears the local copy on success.
+- `chat.rs` — `SettingsForm` gains an "Invite token
+  (single-use)" field next to the home-server URL.
+
+### Vercel env (lattice-quantum project)
+
+| Var | Source |
+|---|---|
+| `LATTICE_SERVER_URL` | `https://lattice.pixiedustbot.com` |
+| `LATTICE_ADMIN_API_KEY` | mirror of the home-server env var |
+| `LATTICE_ADMIN_USER_IDS` | comma-separated Clerk user_ids |
+| `CLERK_SECRET_KEY` | auto-provisioned by Clerk Marketplace |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | auto-provisioned by Clerk Marketplace |
+| `PUBLIC_CLERK_PUBLISHABLE_KEY` | manual mirror of the NEXT_PUBLIC var (Astro convention) |
+
+### Operator runbook
+
+Full details in
+[`scratch/reg-v2-operator-notes.md`](../scratch/reg-v2-operator-notes.md).
+Key smoke pattern:
+
+```bash
+ADMIN_KEY=$(cat scratch/.admin-api-key)
+curl -H "X-Lattice-Admin-Key: $ADMIN_KEY" \
+     https://lattice.pixiedustbot.com/admin/tokens
+# → list includes legacy:LATTICE__SERVER__REGISTRATION_TOKEN entry
+
+curl -H "X-Lattice-Admin-Key: $ADMIN_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"label":"alice","ttl_secs":3600}' \
+     https://lattice.pixiedustbot.com/admin/tokens
+# → fresh token with 1-hour TTL
+```
+
+### Verification
+
+- Server-side: `cargo test --workspace` adds 4 integration + 5
+  unit tests covering mint, list, revoke, race (200 concurrent
+  POSTs vs single token → exactly 1 success), snapshot
+  round-trip, backcompat auto-mint.
+- Deploy smoke (pixie + cnc): `/admin/tokens` returns 401
+  without the key, 200 + the legacy entry with it; mint via
+  POST returns a fresh token; subsequent list shows both.
+- Web smoke: `/admin` unauthenticated redirects to `/sign-in`;
+  Clerk middleware response carries no allowlist info.
+
+### Follow-ups
+
+- The Astro `/admin` page is currently locked to a single
+  allowlist user_id. Multi-operator setups want a Clerk
+  organization model instead of a flat list.
+- `consumed_by_prefix` is 6 bytes; if two users collide in that
+  prefix the admin UI can't disambiguate. Move to a full
+  user_id field in the table for the next admin-UI iteration.
+- Promotion to a `pk_live_…` Clerk instance + Clerk-side
+  signup restrictions before the project goes fully public.
 

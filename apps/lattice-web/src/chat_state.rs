@@ -383,7 +383,16 @@ impl ChatState {
             "chat: generated fresh identity user_id={}",
             hex::encode(&identity.credential.user_id[..6]),
         ));
-        api::register(&self.server_url, &identity).await?;
+        let invite_token = crate::storage::load_invite_token();
+        api::register(&self.server_url, &identity, invite_token.as_deref()).await?;
+        // Successful register consumes the token server-side; drop
+        // the local copy so a stale value can't be replayed on the
+        // next reload.
+        if invite_token.is_some() {
+            if let Err(e) = crate::storage::clear_invite_token() {
+                log(format!("chat: clear_invite_token: {e}"));
+            }
+        }
         let published_at =
             api::publish_key_package(&self.server_url, &identity, &LatticePskStorage::new())
                 .await?;

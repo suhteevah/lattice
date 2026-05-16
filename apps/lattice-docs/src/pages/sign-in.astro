@@ -1,0 +1,23 @@
+---
+import { SignIn } from '@clerk/astro/components';
+const next = Astro.url.searchParams.get('next') ?? '/admin';
+
+export const prerender = false;
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Lattice — sign in</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #18141C; color: #ddd; min-height: 100vh; margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; }
+    h1 { color: #C8A2C8; margin-bottom: 0.5rem; }
+    p.muted { color: #888; margin-top: 0; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Lattice admin</h1>
+  <p class="muted">Sign in to mint invite tokens.</p>
+  <SignIn forceRedirectUrl={next} signUpForceRedirectUrl={next} />
+</body>
+</html>

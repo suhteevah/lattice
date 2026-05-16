@@ -389,6 +389,66 @@ pub fn restore_kp_repo_from_storage(
     Ok(restored)
 }
 
+// ────────────────────────────────────────────────────────────────
+// Invite-token persistence (Reg v2)
+// ────────────────────────────────────────────────────────────────
+//
+// The user pastes a single-use invite token into the SettingsForm.
+// The chat-shell bootstrap reads it on the next reload, attaches
+// it to `POST /register` as `Authorization: Bearer <token>`, and
+// clears the local copy on success so a stale token can't be
+// replayed if the user reloads.
+
+const INVITE_TOKEN_KEY: &str = "lattice/invite_token/v1";
+
+/// Read the persisted invite token, if any. Returns `None` on empty
+/// or read error.
+#[must_use]
+pub fn load_invite_token() -> Option<String> {
+    let win = web_sys::window()?;
+    let ls = win.local_storage().ok().flatten()?;
+    let v = ls.get_item(INVITE_TOKEN_KEY).ok().flatten()?;
+    let trimmed = v.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Persist a new invite token. An empty string clears the entry.
+///
+/// # Errors
+///
+/// Bubbles up localStorage write failures.
+#[allow(clippy::needless_pass_by_value)]
+pub fn save_invite_token(token: String) -> Result<(), String> {
+    let trimmed = token.trim();
+    let win = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let ls = win
+        .local_storage()
+        .map_err(|e| format!("local_storage: {e:?}"))?
+        .ok_or_else(|| "no localStorage".to_string())?;
+    if trimmed.is_empty() {
+        ls.remove_item(INVITE_TOKEN_KEY)
+            .map_err(|e| format!("remove: {e:?}"))?;
+    } else {
+        ls.set_item(INVITE_TOKEN_KEY, trimmed)
+            .map_err(|e| format!("set: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// Clear the persisted token. Used after a successful register so
+/// the consumed bytes don't linger.
+///
+/// # Errors
+///
+/// Bubbles up localStorage write failures.
+pub fn clear_invite_token() -> Result<(), String> {
+    save_invite_token(String::new())
+}
+
 /// Delete every persisted KeyPackage entry. Used on identity
 /// reset / clear.
 ///

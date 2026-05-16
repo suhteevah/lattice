@@ -694,7 +694,7 @@ async fn try_register_with_server(
         B64.encode(alice.credential.user_id)
     ));
     log("POST /register …".to_string());
-    let new_registration = api::register(server, &alice).await?;
+    let new_registration = api::register(server, &alice, None).await?;
     log(format!(
         "server response: new_registration={new_registration}"
     ));
@@ -722,7 +722,7 @@ async fn try_kp_round_trip(
     ));
 
     log("POST /register …".to_string());
-    let new_registration = api::register(server, &bob).await?;
+    let new_registration = api::register(server, &bob, None).await?;
     log(format!(
         "registered (new_registration={new_registration})"
     ));
@@ -763,8 +763,8 @@ async fn try_server_backed_demo(
     ));
 
     log("== register both ==".to_string());
-    api::register(server, &alice).await?;
-    api::register(server, &bob).await?;
+    api::register(server, &alice, None).await?;
+    api::register(server, &bob, None).await?;
 
     log("== bob publishes KP ==".to_string());
     let _ = api::publish_key_package(server, &bob, &bob_psk).await?;
@@ -936,8 +936,8 @@ async fn try_live_ws_demo(
     let bob = make_identity(0xD1)?;
     let alice_psk = LatticePskStorage::new();
     let bob_psk = LatticePskStorage::new();
-    api::register(server, &alice).await?;
-    api::register(server, &bob).await?;
+    api::register(server, &alice, None).await?;
+    api::register(server, &bob, None).await?;
     let _ = api::publish_key_package(server, &bob, &bob_psk).await?;
     let bob_kp_bytes = api::fetch_key_package(server, &bob.credential.user_id).await?;
 
@@ -1623,8 +1623,8 @@ async fn try_sealed_sender_demo(
         .map_err(|e| format!("parse server pubkey: {e}"))?;
 
     log("== register both + bob publishes KP ==".to_string());
-    api::register(server, &alice).await?;
-    api::register(server, &bob).await?;
+    api::register(server, &alice, None).await?;
+    api::register(server, &bob, None).await?;
     let _ = api::publish_key_package(server, &bob, &bob_psk).await?;
 
     log("== alice creates group, adds bob, commits ==".to_string());

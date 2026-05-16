@@ -1209,9 +1209,11 @@ where
     C: Fn() + Send + Sync + 'static + Copy,
 {
     let url_input: NodeRef<leptos::html::Input> = NodeRef::new();
+    let token_input: NodeRef<leptos::html::Input> = NodeRef::new();
     let saved_msg = RwSignal::new(String::new());
     let current = load_server_url(crate::app::DEFAULT_SERVER_URL);
     let initial = current.clone();
+    let initial_token = crate::storage::load_invite_token().unwrap_or_default();
     let submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         let val = url_input
@@ -1229,7 +1231,15 @@ where
             }
             Err(e) => {
                 saved_msg.set(format!("Save failed: {e}"));
+                return;
             }
+        }
+        let token_val = token_input
+            .get()
+            .map(|n| n.unchecked_into::<HtmlInputElement>().value())
+            .unwrap_or_default();
+        if let Err(e) = crate::storage::save_invite_token(token_val) {
+            saved_msg.set(format!("Token save failed: {e}"));
         }
     };
     view! {
@@ -1251,6 +1261,22 @@ where
                  Default is the local dev server. A reload is required \
                  to pick up changes — the polling loop captures the URL \
                  at construction time."
+            </p>
+            <label for="chat-settings-token" class="chat-add-label">
+                "Invite token (single-use)"
+            </label>
+            <input
+                node_ref=token_input
+                id="chat-settings-token"
+                class="chat-add-input"
+                type="text"
+                value=initial_token
+                placeholder="leave blank if not invited"
+                autocomplete="off"
+            />
+            <p class="chat-settings-hint muted">
+                "Paste a Bearer token from your invite URL. \
+                 Consumed on first successful register, then cleared."
             </p>
             <Show
                 when=move || !saved_msg.get().is_empty()

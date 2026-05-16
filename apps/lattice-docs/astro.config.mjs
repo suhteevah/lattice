@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import vercel from '@astrojs/vercel';
+import clerk from '@clerk/astro';
 
 // Lattice docs site.
 //
@@ -17,7 +18,7 @@ import vercel from '@astrojs/vercel';
 
 export default defineConfig({
   site: 'https://lattice.chat',
-  output: 'static',
+  output: 'server',
   adapter: vercel({
     webAnalytics: { enabled: false },
     imageService: false,
@@ -27,6 +28,7 @@ export default defineConfig({
     format: 'directory',
   },
   integrations: [
+    clerk(),
     starlight({
       title: 'Lattice',
       description:

@@ -6,3 +6,4 @@ src/content/docs/docs/usage/
 src/content/docs/wiki/
 
 .vercel
+.env*.local

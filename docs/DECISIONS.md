@@ -41,6 +41,7 @@ the **Trade-off accepted** so future readers know what we knew.
 | D-24 | Moderation model | HANDOFF §10 | Locked |
 | D-25 | Monetization pricing | HANDOFF §10 | **Open — needs Matt** |
 | D-26 | Native keystore primitive (Windows) | M7 Phase G | Locked |
+| D-27 | Registration access control (Reg v2) | operational | Locked |
 
 ---
 
@@ -1055,6 +1056,109 @@ The RAM-window property from the original trade-off is
 unchanged: TPM never sees the identity secret bytes, only
 the 32-byte AEAD key. Signing still happens in process RAM
 with `zeroize::Zeroizing` cleanup.
+
+---
+
+## D-27 — Registration access control (Reg v2)
+
+**Decision:** `/register` is gated by **per-user, single-use,
+atomically-consumed invite tokens** minted through a
+Clerk-authenticated admin UI. The previous static
+`LATTICE__SERVER__REGISTRATION_TOKEN` is preserved exclusively
+for backward compatibility: on first boot, if the env var is
+non-empty AND the invite registry is empty, `lattice-server`
+auto-mints a no-expiry invite whose bytes match the env var,
+labelled `legacy:LATTICE__SERVER__REGISTRATION_TOKEN`.
+Operators rotate to per-user tokens at their own pace by
+revoking that auto-minted entry.
+
+**Rationale:** A single shared registration secret is
+operationally fragile and forensically opaque. Anyone with
+the bytes can register an unbounded number of identities,
+and there is no audit trail tying an identity creation to a
+specific invite act. Per-user single-use tokens give us:
+
+- Identity creation events are individually traceable to
+  the operator who minted the invite.
+- A compromised token affects at most one identity (the one
+  that consumed it) — there is no cross-user blast radius.
+- Token expiry forces invite hygiene: TTLs are short by
+  default (7 days) and operators can revoke unredeemed
+  invites without affecting anyone already registered.
+- Multi-operator admin trust is a Clerk allowlist, not a
+  shared secret to hand around.
+
+Clerk specifically (rather than rolling our own auth) was
+chosen because:
+
+- Clerk's Vercel Marketplace integration provisions
+  `CLERK_PUBLISHABLE_KEY` + `CLERK_SECRET_KEY` with a single
+  CLI command (`vercel integration add clerk`).
+- @clerk/astro ships a server middleware (`clerkMiddleware`)
+  that integrates cleanly with Astro's `onRequest` hook —
+  no custom OAuth handling.
+- The admin scope is operator-only and tiny (mint / list /
+  revoke); we do not need self-serve sign-up flows, magic
+  links, or identity attestation. Clerk being slightly
+  oversized for the use case is acceptable given the time
+  savings.
+
+**Implementation:**
+
+- `crates/lattice-server/src/state.rs` — `InviteToken` struct
+  + `invite_tokens: HashMap<String, InviteToken>` on
+  `ServerState`. `mint_invite` / `list_invites` /
+  `get_invite` / `revoke_invite` helpers.
+- `crates/lattice-server/src/snapshot.rs` — v2 with
+  `invites: Vec<InviteSnap>`; v1 loads via
+  `#[serde(default)]`.
+- `crates/lattice-server/src/routes/admin.rs` — admin auth
+  helper (constant-time compare on `X-Lattice-Admin-Key`)
+  plus the four CRUD routes.
+- `crates/lattice-server/src/routes/identity.rs` —
+  `/register` rewritten: lookup-in-set + atomic consume
+  under a single write-lock spanning check →
+  mark-consumed → register-user. 200-concurrent-POST race
+  test passes (exactly 1 success).
+- `crates/lattice-server/src/main.rs` — backcompat
+  auto-mint on first boot; `tokio::spawn` sweeper task
+  every 5 min for expired-unconsumed + consumed-30-day
+  cleanup.
+- `apps/lattice-docs/src/middleware.ts` —
+  `clerkMiddleware` gating `/admin/*` and `/api/admin/*`
+  on session presence AND `LATTICE_ADMIN_USER_IDS`
+  allowlist (comma-separated Clerk user_ids).
+- `apps/lattice-docs/src/pages/api/admin/tokens(*)` —
+  forwarders that inject the admin key from server-side
+  env into the upstream call.
+- `apps/lattice-docs/src/pages/admin/index.astro` +
+  `invite/[token].astro` — operator + invitee UIs.
+- `apps/lattice-web/src/{storage,api,chat_state,chat}.rs` —
+  invite-token persistence + Bearer-header attach +
+  Settings form field.
+
+**Trade-off accepted:**
+
+- The admin key (`LATTICE__SERVER__ADMIN_API_KEY`) becomes a
+  shared secret across cnc + pixie (and the Vercel Astro
+  project). It's a smaller blast radius than the static
+  registration token (admin-only, no user-facing exposure)
+  but it is still a shared secret. Rotation procedure lives
+  in `scratch/reg-v2-operator-notes.md`.
+- `consumed_by_prefix` in `InviteView` truncates to 6 bytes
+  to match log-line user identifiers. Two users colliding
+  in that prefix are indistinguishable in the admin UI;
+  the full `[u8; 32]` is preserved in state and snapshot.
+
+**Re-open conditions:**
+
+- We move to a multi-operator model that warrants Clerk
+  organizations rather than a flat allowlist.
+- The atomic-consume write-lock becomes a contention
+  bottleneck under high invite redemption volume
+  (unlikely at our scale; revisit if `/register` p99 climbs).
+- We adopt a different web auth provider (e.g. self-hosted
+  Auth.js) and want to drop the Clerk dependency.
 
 ---
 

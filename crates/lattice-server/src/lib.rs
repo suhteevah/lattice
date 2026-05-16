@@ -35,6 +35,7 @@ pub fn app(state: state::ServerState) -> axum::Router {
         .merge(routes::health::router())
         .merge(routes::well_known::router().with_state(state.clone()))
         .merge(routes::identity::router().with_state(state.clone()))
+        .merge(routes::admin::router().with_state(state.clone()))
         .merge(routes::groups::router().with_state(state.clone()))
         .merge(routes::push::router().with_state(state.clone()))
         .merge(routes::federation::router().with_state(state))
