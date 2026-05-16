@@ -9,11 +9,15 @@ register call with `Authorization: Bearer <token>`. `lattice-cli`
 gains `--auth-token` for the same. Backcompat: the old static
 `LATTICE__SERVER__REGISTRATION_TOKEN` auto-mints a no-expiry
 invite on first boot. Deployed live on cnc + pixie + Vercel.
-T27 + T29 smoke green. See §26 below.) Also live since 2026-05-16
-morning: **production federation pair (cnc + pixie) at
-`https://lattice.pixiedustbot.com`**, Tauri Linux `.deb` artifact,
-Arch PKGBUILD; updater spec written (no code); Android scaffold
-recon gated on SDK install.
+T27 + T29 smoke green. See §26 below.) Same-day Clerk hardening:
+signup restricted to a 1-entry allowlist, Clerk admin org wired
+as alternate /admin gate, prod-instance promotion blocked on D-22.
+Windows release MSI rebuilt: 8.6 MB `lattice-desktop.exe` +
+4.4 MB MSI + NSIS setup.exe at `target/release/bundle/`. Also
+live since 2026-05-16 morning: **production federation pair
+(cnc + pixie) at `https://lattice.pixiedustbot.com`**, Tauri Linux
+`.deb` artifact, Arch PKGBUILD; updater spec written (no code);
+Android scaffold recon gated on SDK install.
 
 **Status:** 🟢 Working — Reg v2 + production federation both live.
 **M1 / M2 / M3 / M4 / M5 / M6 all shipped**, **M7 Phases A–F + G.1
@@ -21,6 +25,70 @@ recon gated on SDK install.
 mobile shells, gated on Android SDK install), I (cover-traffic);
 Updater implementation (spec only, no plan yet); Android Tauri
 scaffold.
+
+---
+
+### Session log — 2026-05-16 (evening: Clerk hardening + Tauri rebuild)
+
+Three Clerk follow-ups from §26 / D-27 closed, plus the Windows
+Tauri release rebuilt with the new chat-shell:
+
+- **F1 — Signup restricted (shipped).** Clerk Backend API
+  `PATCH /v1/instance/restrictions {allowlist: true, blocklist:
+  false}`. Allowlist has one entry: `ridgecellrepair@gmail.com`.
+  Random emails can no longer reach the Clerk sign-up form;
+  previously they could sign up successfully but hit a 403 in
+  middleware afterward (cosmetic, but ugly). Sign-IN is
+  unaffected — `allowlist_blocklist_disabled_on_sign_in: true`
+  is the default. Add another email with
+  `POST /v1/allowlist_identifiers {identifier, notify:false}`.
+- **F2 — Production Clerk (deferred).** `pk_live_` requires a
+  CNAME at `clerk.<your-domain>`. `lattice-quantum.vercel.app`
+  is a Vercel-managed preview domain (no custom DNS records
+  allowed), so prod Clerk is gated on resolving **DECISIONS
+  D-22 — Domain choice (still open)**. The test instance is
+  functionally equivalent for the admin use case — security
+  boundary is the middleware + `LATTICE__SERVER__ADMIN_API_KEY`,
+  not which Clerk environment issues the session.
+- **F3 — Clerk org for multi-operator (shipped).** Created
+  `org_3DpC9wuZgydUnUX7UFSFrEcRtif` ("Lattice Admins"), Matt is
+  the sole `org:admin`. New env var
+  `LATTICE_ADMIN_ORG_ID=org_3DpC9wuZgydUnUX7UFSFrEcRtif` on
+  Vercel. `apps/lattice-docs/src/middleware.ts` now accepts
+  either: (a) `userId` ∈ `LATTICE_ADMIN_USER_IDS` (flat
+  allowlist, original path) OR (b) `userId` is a member of
+  `LATTICE_ADMIN_ORG_ID` (new org path). Either passes — both
+  env vars stay set as alternatives. Per-user org-membership
+  cache (5-min TTL) keeps the Clerk Backend API off the
+  per-request hot path. Adding a second operator no longer
+  requires an env-var rotation + redeploy — invite them via
+  `POST /v1/organizations/{org}/invitations` and they're in
+  after the cache flushes. Runbook: `scratch/reg-v2-operator-notes.md`.
+- **Windows MSI rebuild (shipped).** `apps/lattice-web` rebuilt
+  with the new `SettingsForm` invite-token field. Hit a trunk
+  regression: bundled wasm-opt (binaryen) rejects rustc /
+  wasm-bindgen output with *"Bulk memory operations require
+  bulk memory [--enable-bulk-memory]"*. Worked around by
+  setting `data-wasm-opt="0"` on the `<link data-trunk
+  rel="rust">` tag in `apps/lattice-web/index.html` —
+  short-circuits the optimizer entirely. Output wasm is 3.0 MB
+  (vs ~2 MB optimized). Flip back to `data-wasm-opt="z"` when
+  the wasm-opt build catches up on bulk-memory.
+  `cargo tauri build` then produced three artifacts under
+  `J:\lattice\target\release\`:
+  - `lattice-desktop.exe` — 8.6 MB standalone
+  - `bundle/msi/Lattice_0.1.0_x64_en-US.msi` — 4.4 MB
+    (sha256 `e3a6b60e14eccc99c14d231bd91cc74cff54ead49590ebefa9619078169febdc`)
+  - `bundle/nsis/Lattice_0.1.0_x64-setup.exe` — NSIS alternate
+    installer.
+
+  Build took 4m 21s on the GNU host toolchain; the cdylib
+  "export ordinal too large" issue from HANDOFF §15 did NOT
+  surface in this build — `["rlib"]` only on `lattice-desktop`
+  is sufficient with WiX + NSIS.
+
+Commits this evening: `c79aa8c` (Clerk org + middleware +
+DECISIONS amendment), `2da95e3` (trunk wasm-opt=0).
 
 ---
 
