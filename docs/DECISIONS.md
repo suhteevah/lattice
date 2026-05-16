@@ -1154,11 +1154,55 @@ chosen because:
 
 - We move to a multi-operator model that warrants Clerk
   organizations rather than a flat allowlist.
+  *(Partially addressed by the 2026-05-16 amendment below — org path
+  is wired but coexists with the flat allowlist rather than
+  replacing it.)*
 - The atomic-consume write-lock becomes a contention
   bottleneck under high invite redemption volume
   (unlikely at our scale; revisit if `/register` p99 climbs).
 - We adopt a different web auth provider (e.g. self-hosted
   Auth.js) and want to drop the Clerk dependency.
+
+**Amendment (2026-05-16) — Clerk hardening shipped:**
+
+Three follow-ups landed in the same session:
+
+1. **Signup restricted to allowlist.** PATCH `/v1/instance/restrictions`
+   `{allowlist: true}`. Random emails can no longer sign up to the
+   Clerk instance; only `ridgecellrepair@gmail.com` is admitted.
+   Sign-IN is unaffected — existing accounts continue to work.
+   This closes the cosmetic hole where strangers could reach the
+   sign-up form (they still hit 403 in middleware afterward, but
+   denying them at Clerk is cleaner).
+
+2. **Clerk organization wired as alternate admin path.** Created
+   `org_3DpC9wuZgydUnUX7UFSFrEcRtif` ("Lattice Admins"), Matt is
+   the sole `org:admin`. `apps/lattice-docs/src/middleware.ts`
+   now accepts either:
+   - `userId` ∈ `LATTICE_ADMIN_USER_IDS` (flat allowlist, original path), OR
+   - `userId` is a member of `LATTICE_ADMIN_ORG_ID` (new org path)
+   Both env vars stay set; either passing admits. Adding a new
+   operator no longer requires a Vercel env var change + redeploy
+   — invite them to the org via the Clerk Backend API
+   (`POST /v1/organizations/{org}/invitations`) and they're in
+   after acceptance + a 5-minute cache flush.
+   The middleware caches per-user org membership for 5 min to
+   avoid a Clerk Backend API call on every admin request.
+
+3. **Production Clerk instance (deferred).** Promoting from
+   `pk_test_` to `pk_live_` requires a CNAME at
+   `clerk.<your-domain>` pointing to Clerk's production frontend.
+   `lattice-quantum.vercel.app` is a managed Vercel preview
+   domain that doesn't allow custom DNS records, so prod Clerk
+   is gated on resolving D-22 (Domain choice — still open).
+   Until a real domain lands, the test instance is the only
+   option. Functionally indistinguishable from a `pk_live_`
+   setup for our admin use case — the security boundary is the
+   middleware + `LATTICE_ADMIN_API_KEY`, not which Clerk
+   instance issues the session.
+
+The operator runbook in `scratch/reg-v2-operator-notes.md` covers
+the per-operator workflow for both paths.
 
 ---
 
