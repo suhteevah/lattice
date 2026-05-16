@@ -1,8 +1,27 @@
 ---
-const tokensRes = await fetch(`${Astro.url.origin}/api/admin/tokens`, {
-  headers: { cookie: Astro.request.headers.get('cookie') ?? '' },
-});
-const tokens = tokensRes.ok ? await tokensRes.json() : [];
+const HOME_URL = import.meta.env.LATTICE_SERVER_URL;
+const ADMIN_KEY = import.meta.env.LATTICE_ADMIN_API_KEY;
+
+let tokens: any[] = [];
+let loadError: string | null = null;
+try {
+  if (!HOME_URL || !ADMIN_KEY) {
+    loadError = 'LATTICE_SERVER_URL or LATTICE_ADMIN_API_KEY missing';
+  } else {
+    const res = await fetch(`${HOME_URL}/admin/tokens`, {
+      headers: { 'X-Lattice-Admin-Key': ADMIN_KEY },
+    });
+    if (res.ok) {
+      tokens = await res.json();
+    } else {
+      loadError = `home server returned ${res.status}: ${await res.text()}`;
+    }
+  }
+} catch (err: any) {
+  loadError = `fetch failed: ${err?.message ?? String(err)}`;
+}
+
+export const prerender = false;
 ---
 <!doctype html>
 <html lang="en">
@@ -26,6 +45,12 @@ const tokens = tokensRes.ok ? await tokensRes.json() : [];
 <body>
   <h1>Lattice invites</h1>
   <p>Mint single-use invite tokens. Each invite is valid for 7 days by default.</p>
+
+  {loadError && (
+    <div style="background: #3a1a1a; color: #e9cfcf; padding: 0.8rem; border-radius: 6px; margin: 1rem 0;">
+      <strong>Failed to load token list:</strong> <code>{loadError}</code>
+    </div>
+  )}
 
   <form class="invite-form" id="mint-form">
     <input type="text" name="label" placeholder="label (e.g. 'alice')" />
