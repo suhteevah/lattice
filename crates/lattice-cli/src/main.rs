@@ -95,6 +95,10 @@ enum Cmd {
         /// Override the default `<home>` directory.
         #[arg(long, env = "LATTICE_HOME_DIR")]
         home: Option<PathBuf>,
+        /// Reg v2 invite token. When set, attached as
+        /// `Authorization: Bearer <token>` on `/register`.
+        #[arg(long, env = "LATTICE_INVITE_TOKEN")]
+        auth_token: Option<String>,
     },
 
     /// Print our own `user_id` hex (read from the local identity).
@@ -217,24 +221,31 @@ async fn register(
     server: &str,
     identity: &LatticeIdentity,
 ) -> Result<()> {
-    register_raw(client, server, identity.credential.user_id).await
+    register_raw(client, server, identity.credential.user_id, None).await
 }
 
-async fn register_raw(client: &reqwest::Client, server: &str, user_id: [u8; 32]) -> Result<()> {
+async fn register_raw(
+    client: &reqwest::Client,
+    server: &str,
+    user_id: [u8; 32],
+    auth_token: Option<&str>,
+) -> Result<()> {
     let claim = lattice_protocol::wire::IdentityClaim::default();
     let claim_bytes = lattice_protocol::wire::encode(&claim);
-    let resp: serde_json::Value = client
-        .post(format!("{server}/register"))
-        .json(&serde_json::json!({
-            "user_id_b64": B64.encode(user_id),
-            "claim_b64": B64.encode(&claim_bytes),
-        }))
-        .send()
-        .await
-        .context("register POST")?
-        .json()
-        .await
-        .context("register response decode")?;
+    let mut req = client.post(format!("{server}/register")).json(&serde_json::json!({
+        "user_id_b64": B64.encode(user_id),
+        "claim_b64": B64.encode(&claim_bytes),
+    }));
+    if let Some(t) = auth_token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let response = req.send().await.context("register POST")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "<no body>".to_string());
+        anyhow::bail!("register HTTP {status}: {body}");
+    }
+    let resp: serde_json::Value = response.json().await.context("register response decode")?;
     tracing::info!(server, registered = ?resp["new_registration"], "register OK");
     Ok(())
 }
@@ -500,7 +511,9 @@ async fn main() -> Result<()> {
             run_demo(server_a, server_b, message, group_id).await?;
             tracing::info!("demo completed successfully");
         }
-        Cmd::Init { server, name, home } => cli_init(server, name, home).await?,
+        Cmd::Init { server, name, home, auth_token } => {
+            cli_init(server, name, home, auth_token).await?
+        }
         Cmd::Whoami { home } => cli_whoami(home)?,
         Cmd::CreateAndInvite {
             server,
@@ -556,7 +569,12 @@ fn parse_group_id(s: &str) -> Result<[u8; 16]> {
     Ok(out)
 }
 
-async fn cli_init(server: String, name: Option<String>, home: Option<PathBuf>) -> Result<()> {
+async fn cli_init(
+    server: String,
+    name: Option<String>,
+    home: Option<PathBuf>,
+    auth_token: Option<String>,
+) -> Result<()> {
     let home = resolve_home(home)?;
     let provider = lattice_crypto::mls::cipher_suite::LatticeCryptoProvider::new();
     let suite = provider
@@ -601,7 +619,7 @@ async fn cli_init(server: String, name: Option<String>, home: Option<PathBuf>) -
     let http = reqwest::Client::builder()
         .user_agent("lattice-cli/0.1")
         .build()?;
-    register_raw(&http, &server, identity.credential.user_id).await?;
+    register_raw(&http, &server, identity.credential.user_id, auth_token.as_deref()).await?;
     let kp_bytes = client::cli_generate_key_package(&mls_client, &identity)?;
     let resp: serde_json::Value = http
         .post(format!("{server}/key_packages"))
