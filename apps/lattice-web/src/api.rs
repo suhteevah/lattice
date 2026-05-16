@@ -40,19 +40,33 @@ struct RegisterResponse {
 /// (`true` on first registration, `false` if the user_id was already
 /// known and the claim was overwritten in place).
 ///
+/// `invite_token`, when `Some`, is attached as
+/// `Authorization: Bearer <token>`. The server consumes the token
+/// atomically as part of the registration write. When `None`, the
+/// header is omitted — useful for unauthenticated dev mode and for
+/// callers who want the bare register flow.
+///
 /// # Errors
 ///
 /// Returns a `String` describing where the call failed — network
 /// reachability, non-2xx status, or JSON decode mismatch. Errors are
 /// surfaced to the UI as-is.
-pub async fn register(server: &str, identity: &LatticeIdentity) -> Result<bool, String> {
+pub async fn register(
+    server: &str,
+    identity: &LatticeIdentity,
+    invite_token: Option<&str>,
+) -> Result<bool, String> {
     let claim_bytes = encode(&IdentityClaim::default());
     let body = serde_json::json!({
         "user_id_b64": B64.encode(identity.credential.user_id),
         "claim_b64": B64.encode(&claim_bytes),
     });
 
-    let request = Request::post(&format!("{server}/register"))
+    let mut request = Request::post(&format!("{server}/register"));
+    if let Some(token) = invite_token {
+        request = request.header("Authorization", &format!("Bearer {token}"));
+    }
+    let request = request
         .json(&body)
         .map_err(|e| format!("build register request: {e}"))?;
 
