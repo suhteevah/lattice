@@ -39,6 +39,7 @@
     clippy::map_unwrap_or
 )]
 
+pub mod admin;
 pub mod federation;
 pub mod groups;
 pub mod health;

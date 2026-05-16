@@ -174,6 +174,11 @@ pub struct ServerState {
     /// header doesn't match these bytes (constant-time compare). See
     /// `AppConfig::registration_token`.
     pub registration_token: Option<Arc<String>>,
+    /// Outstanding or consumed invites keyed by token string.
+    pub invite_tokens: Arc<RwLock<HashMap<String, InviteToken>>>,
+    /// Optional admin API key for gating admin endpoints. Loaded from
+    /// config or env. `None` = no admin key configured.
+    pub admin_api_key: Option<Arc<String>>,
 }
 
 /// Web Push API subscription registered by a client. The `endpoint`
@@ -196,6 +201,17 @@ pub struct PushSubscription {
     /// "FCM/APNS metadata-posture warning" to users on those paths);
     /// the encryption format is identical.
     pub distributor: String,
+}
+
+/// One outstanding or consumed invite. Persisted in StateSnapshot v2.
+#[derive(Clone, Debug)]
+pub struct InviteToken {
+    pub token: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub label: Option<String>,
+    pub consumed_at: Option<i64>,
+    pub consumed_by: Option<[u8; 32]>,
 }
 
 impl ServerState {
@@ -225,6 +241,8 @@ impl ServerState {
             group_replication: Arc::default(),
             push_subscriptions: Arc::default(),
             registration_token: None,
+            invite_tokens: Arc::default(),
+            admin_api_key: None,
         }
     }
 
@@ -237,6 +255,19 @@ impl ServerState {
             self.registration_token = None;
         } else {
             self.registration_token = Some(Arc::new(s));
+        }
+        self
+    }
+
+    /// Builder-style setter for the admin API key. Pass a non-empty string
+    /// to enable `/admin/*` routes; empty/unset leaves them disabled (503).
+    #[must_use]
+    pub fn with_admin_api_key(mut self, key: impl Into<String>) -> Self {
+        let s: String = key.into();
+        if s.is_empty() {
+            self.admin_api_key = None;
+        } else {
+            self.admin_api_key = Some(Arc::new(s));
         }
         self
     }
@@ -264,6 +295,68 @@ impl ServerState {
             std::process::abort();
         }
         Self::new_with_federation_key(SigningKey::from_bytes(&seed))
+    }
+}
+
+impl ServerState {
+    /// Mint a new invite. `ttl_secs` defaults to 7 days when None.
+    pub async fn mint_invite_token(
+        &self,
+        label: Option<String>,
+        ttl_secs: Option<i64>,
+    ) -> InviteToken {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let mut bytes = [0u8; 24];
+        if let Err(e) = OsRng.try_fill_bytes(&mut bytes) {
+            tracing::error!(error = %e, "OsRng failed during token mint; aborting");
+            std::process::abort();
+        }
+        let token = URL_SAFE_NO_PAD.encode(bytes);
+        let now = chrono::Utc::now().timestamp();
+        let ttl = ttl_secs.unwrap_or(7 * 24 * 60 * 60);
+        let entry = InviteToken {
+            token: token.clone(),
+            created_at: now,
+            expires_at: now.saturating_add(ttl),
+            label,
+            consumed_at: None,
+            consumed_by: None,
+        };
+        self.invite_tokens
+            .write()
+            .await
+            .insert(token, entry.clone());
+        entry
+    }
+
+    /// List all invites, newest-created first.
+    pub async fn list_invite_tokens(&self) -> Vec<InviteToken> {
+        let mut v: Vec<_> = self.invite_tokens.read().await.values().cloned().collect();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v
+    }
+
+    /// Revoke a token by string. Returns true if removed.
+    pub async fn revoke_invite_token(&self, token: &str) -> bool {
+        self.invite_tokens.write().await.remove(token).is_some()
+    }
+
+    /// Remove expired-unconsumed and consumed-older-than-30-days invites.
+    /// Returns the count removed.
+    pub async fn sweep_invite_tokens(&self) -> usize {
+        let now = chrono::Utc::now().timestamp();
+        let cutoff_consumed = now - 30 * 24 * 60 * 60;
+        let mut guard = self.invite_tokens.write().await;
+        let before = guard.len();
+        guard.retain(|_, t| {
+            if let Some(c) = t.consumed_at {
+                c > cutoff_consumed
+            } else {
+                t.expires_at > now
+            }
+        });
+        before - guard.len()
     }
 }
 
@@ -428,6 +521,16 @@ struct PeerSnap {
 }
 
 #[derive(Serialize, Deserialize)]
+struct InviteSnap {
+    token: String,
+    created_at: i64,
+    expires_at: i64,
+    label: Option<String>,
+    consumed_at: Option<i64>,
+    consumed_by_b64: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct StateSnapshot {
     /// Snapshot wire version. Bump on any breaking field rename.
     snapshot_version: u32,
@@ -436,6 +539,8 @@ struct StateSnapshot {
     commits: Vec<CommitSnap>,
     messages: Vec<MessageSnap>,
     peers: Vec<PeerSnap>,
+    #[serde(default)]
+    invites: Vec<InviteSnap>,
     next_seq: u64,
 }
 
@@ -452,7 +557,7 @@ impl ServerState {
     pub async fn save_snapshot(&self, path: &std::path::Path) -> Result<(), SnapshotError> {
         let b64 = base64::engine::general_purpose::STANDARD;
         let snap = StateSnapshot {
-            snapshot_version: 1,
+            snapshot_version: 2,
             users: self
                 .users
                 .read()
@@ -521,6 +626,20 @@ impl ServerState {
                     federation_pubkey_b64: b64.encode(p.federation_pubkey),
                 })
                 .collect(),
+            invites: self
+                .invite_tokens
+                .read()
+                .await
+                .values()
+                .map(|i| InviteSnap {
+                    token: i.token.clone(),
+                    created_at: i.created_at,
+                    expires_at: i.expires_at,
+                    label: i.label.clone(),
+                    consumed_at: i.consumed_at,
+                    consumed_by_b64: i.consumed_by.as_ref().map(|u| b64.encode(u)),
+                })
+                .collect(),
             next_seq: *self.next_seq.read().await,
         };
         let bytes = serde_json::to_vec_pretty(&snap).map_err(SnapshotError::codec)?;
@@ -535,6 +654,7 @@ impl ServerState {
             commits = snap.commits.len(),
             messages = snap.messages.len(),
             peers = snap.peers.len(),
+            invites = snap.invites.len(),
             "snapshot written"
         );
         Ok(())
@@ -551,7 +671,7 @@ impl ServerState {
     pub async fn load_snapshot(&self, path: &std::path::Path) -> Result<(), SnapshotError> {
         let bytes = std::fs::read(path).map_err(SnapshotError::Io)?;
         let snap: StateSnapshot = serde_json::from_slice(&bytes).map_err(SnapshotError::codec)?;
-        if snap.snapshot_version != 1 {
+        if snap.snapshot_version > 2 {
             return Err(SnapshotError::Codec(format!(
                 "unsupported snapshot version {}",
                 snap.snapshot_version
@@ -669,6 +789,34 @@ impl ServerState {
                 );
             }
         }
+        {
+            let mut invites_guard = self.invite_tokens.write().await;
+            invites_guard.clear();
+            for snap in &snap.invites {
+                let consumed_by = match &snap.consumed_by_b64 {
+                    Some(s) => {
+                        let bytes = b64
+                            .decode(s)
+                            .map_err(|e| SnapshotError::Codec(format!("consumed_by_b64: {e}")))?;
+                        Some(bytes.as_slice().try_into().map_err(|_| {
+                            SnapshotError::Codec("consumed_by length != 32".into())
+                        })?)
+                    }
+                    None => None,
+                };
+                invites_guard.insert(
+                    snap.token.clone(),
+                    InviteToken {
+                        token: snap.token.clone(),
+                        created_at: snap.created_at,
+                        expires_at: snap.expires_at,
+                        label: snap.label.clone(),
+                        consumed_at: snap.consumed_at,
+                        consumed_by,
+                    },
+                );
+            }
+        }
         *self.next_seq.write().await = snap.next_seq;
         tracing::info!(
             path = %path.display(),
@@ -677,6 +825,7 @@ impl ServerState {
             commits = snap.commits.len(),
             messages = snap.messages.len(),
             peers = snap.peers.len(),
+            invites = snap.invites.len(),
             next_seq = snap.next_seq,
             "snapshot restored"
         );
@@ -886,5 +1035,32 @@ mod tests {
         assert_eq!(log.len(), 3);
         assert_eq!(log[0].epoch, 1);
         assert_eq!(log[2].epoch, 3);
+    }
+
+    #[tokio::test]
+    async fn invite_token_snapshot_round_trip() {
+        let state = ServerState::new_test();
+        let issued = state
+            .mint_invite_token(Some("alice".into()), Some(3600))
+            .await;
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        state.save_snapshot(tmp.path()).await.expect("save");
+        let restored = ServerState::new_test();
+        restored.load_snapshot(tmp.path()).await.expect("load");
+        let restored_list = restored.list_invite_tokens().await;
+        assert_eq!(restored_list.len(), 1);
+        assert_eq!(restored_list[0].token, issued.token);
+        assert_eq!(restored_list[0].label.as_deref(), Some("alice"));
+        assert_eq!(restored_list[0].expires_at, issued.expires_at);
+    }
+
+    #[tokio::test]
+    async fn sweeper_removes_expired_unconsumed() {
+        let state = ServerState::new_test();
+        // Mint with negative TTL (already-expired).
+        let _ = state.mint_invite_token(None, Some(-3600)).await;
+        let removed = state.sweep_invite_tokens().await;
+        assert_eq!(removed, 1);
+        assert!(state.list_invite_tokens().await.is_empty());
     }
 }

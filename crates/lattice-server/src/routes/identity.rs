@@ -9,7 +9,6 @@ use axum::{
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 use crate::state::{
     PublishedKeyPackage, RegisteredUser, ServerState, fetch_key_package, put_key_package,
@@ -37,37 +36,17 @@ pub struct RegisterResponse {
 /// `POST /register` handler. Accepts a base64 user_id + base64
 /// `IdentityClaim`, stores in the in-memory registry.
 ///
-/// If `state.registration_token` is set, the request must carry
-/// `Authorization: Bearer <token>` with constant-time-equal bytes,
-/// otherwise it is rejected with 401. Other endpoints stay open —
-/// federation peers must continue to be able to fetch KPs for
-/// arbitrary user_ids, and the federation push surface authenticates
-/// via its own Ed25519 signed-TBS pattern.
+/// If any invite tokens are present in `state.invite_tokens`, or if
+/// `state.admin_api_key` is configured, the request must carry
+/// `Authorization: Bearer <token>` matching a non-expired, unconsumed
+/// invite token. The token is atomically marked consumed (holding the
+/// write-lock) before `register_user` is called, preventing double-spend
+/// under concurrent requests.
 async fn register_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
-    if let Some(expected) = state.registration_token.as_deref() {
-        let supplied = headers
-            .get(AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        let ok = supplied
-            .map(|s| s.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1)
-            .unwrap_or(false);
-        if !ok {
-            tracing::warn!(
-                supplied_token_present = supplied.is_some(),
-                "register rejected: bad or missing token"
-            );
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "registration token required".into(),
-            ));
-        }
-    }
-
     let b64 = base64::engine::general_purpose::STANDARD;
     let user_id_bytes = b64
         .decode(&body.user_id_b64)
@@ -84,6 +63,40 @@ async fn register_handler(
     let claim = lattice_protocol::wire::decode::<IdentityClaim>(claim_bytes.as_slice())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("claim decode: {e}")))?;
 
+    let supplied = headers
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::to_string);
+
+    let mut invites = state.invite_tokens.write().await;
+    let registry_empty = invites.is_empty();
+    let auth_required = state.admin_api_key.is_some() || !registry_empty;
+
+    if auth_required {
+        let supplied = supplied.as_deref().ok_or((
+            StatusCode::UNAUTHORIZED,
+            "registration token required".to_string(),
+        ))?;
+        let now = chrono::Utc::now().timestamp();
+        let token = invites.get_mut(supplied).ok_or((
+            StatusCode::UNAUTHORIZED,
+            "unknown token".to_string(),
+        ))?;
+        if token.expires_at <= now {
+            tracing::warn!(token_prefix = &supplied[..8.min(supplied.len())], "register rejected: token expired");
+            return Err((StatusCode::UNAUTHORIZED, "token expired".into()));
+        }
+        if token.consumed_at.is_some() {
+            tracing::warn!(token_prefix = &supplied[..8.min(supplied.len())], "register rejected: token already consumed");
+            return Err((StatusCode::UNAUTHORIZED, "token already consumed".into()));
+        }
+        token.consumed_at = Some(now);
+        token.consumed_by = Some(user_id);
+    }
+
+    // invites write-lock still held; consume already marked above.
+    // If register_user becomes fallible, revert consumed_at/by here.
     let now = chrono::Utc::now().timestamp();
     let new_registration = register_user(
         &state,
@@ -94,6 +107,7 @@ async fn register_handler(
         },
     )
     .await;
+    drop(invites);
     tracing::info!(
         new_registration,
         user_id_prefix = ?&user_id[..4],

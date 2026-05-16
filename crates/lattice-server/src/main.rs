@@ -49,10 +49,12 @@ async fn main() -> anyhow::Result<()> {
     let federation_sk = load_or_generate_federation_key(&cfg.federation_key_path)
         .context("failed to load or generate federation signing key")?;
     let state = lattice_server::state::ServerState::new_with_federation_key(federation_sk)
-        .with_registration_token(&cfg.server.registration_token);
+        .with_registration_token(&cfg.server.registration_token)
+        .with_admin_api_key(&cfg.server.admin_api_key);
     info!(
         federation_pubkey = %state.federation_pubkey_b64,
         registration_gated = state.registration_token.is_some(),
+        admin_enabled = state.admin_api_key.is_some(),
         "federation identity loaded"
     );
 
@@ -77,6 +79,42 @@ async fn main() -> anyhow::Result<()> {
             "no snapshot path configured (LATTICE__SNAPSHOT_PATH); state will not survive restart"
         );
     }
+
+    // 5.c. Backcompat auto-mint: if a legacy static registration token is set AND
+    // the invite registry is empty (fresh boot or v1 snapshot), auto-mint one no-expiry
+    // invite that matches the static token's bytes. Lets existing deployments keep
+    // working without config changes.
+    if !cfg.server.registration_token.is_empty()
+        && state.invite_tokens.read().await.is_empty()
+    {
+        let now = chrono::Utc::now().timestamp();
+        let token = cfg.server.registration_token.clone();
+        let entry = lattice_server::state::InviteToken {
+            token: token.clone(),
+            created_at: now,
+            expires_at: i64::MAX,
+            label: Some("legacy:LATTICE__SERVER__REGISTRATION_TOKEN".into()),
+            consumed_at: None,
+            consumed_by: None,
+        };
+        state.invite_tokens.write().await.insert(token, entry);
+        info!("backcompat: auto-minted invite for legacy static token");
+    }
+
+    // 5.d. Sweeper task: every 5 minutes, evict expired-unconsumed invites and
+    // consumed-older-than-30-days entries. Lives until the runtime exits.
+    let sweeper_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let removed = sweeper_state.sweep_invite_tokens().await;
+            if removed > 0 {
+                info!(removed, "swept expired/old invite tokens");
+            }
+        }
+    });
 
     // 6. HTTP listener
     let app = lattice_server::app(state.clone());

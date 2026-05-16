@@ -36,6 +36,10 @@ pub struct ServerConfig {
     /// signed-TBS pattern.
     #[serde(default)]
     pub registration_token: String,
+    /// Optional shared secret for /admin/* routes. Empty = admin disabled
+    /// (admin routes return 503). Set via LATTICE__SERVER__ADMIN_API_KEY.
+    #[serde(default)]
+    pub admin_api_key: String,
 }
 
 impl AppConfig {
@@ -54,6 +58,7 @@ impl AppConfig {
             )
             .set_default("server.bind_addr", "0.0.0.0:8443")?
             .set_default("server.registration_token", "")?
+            .set_default("server.admin_api_key", "")?
             .set_default("environment", "development")?
             .set_default("federation_key_path", "./federation.key")?
             .set_default("snapshot_path", "")?

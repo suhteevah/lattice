@@ -42,6 +42,7 @@ rand.workspace = true
 rand_core.workspace = true
 prost.workspace = true
 subtle.workspace = true
+hex.workspace = true
 
 # Federation client — server-to-server HTTP push.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -56,3 +57,4 @@ mls-rs.workspace = true
 mls-rs-core.workspace = true
 mls-rs-codec.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
