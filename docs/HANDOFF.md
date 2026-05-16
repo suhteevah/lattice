@@ -1,12 +1,15 @@
 # Lattice — HANDOFF
 
-**Last updated:** 2026-05-12 (M7 Phases G.1 + G.2 shipped:
-`lattice-media::keystore` trait + DPAPI Windows / Secret Service
-Linux / Keychain macOS impls + five Tauri IPC commands. **Chat-app
-chunks A + C + group-state persistence + scrollback** shipped:
-real DM flow over MLS survives page reload AND the thread
-re-renders pre-reload history on bootstrap. See §16 + §17 + §18
-+ §19 + §20 below.)
+**Last updated:** 2026-05-16 (Reg v2 shipped: per-user single-use
+invite tokens minted via Clerk-gated Astro admin UI on
+`lattice-quantum.vercel.app`. New `/admin/tokens` routes on
+`lattice-server` gated by `LATTICE__SERVER__ADMIN_API_KEY`. Chat
+shell gains an "Invite token" Settings field that bootstraps the
+register call with `Authorization: Bearer <token>`. Backcompat:
+the old static `LATTICE__SERVER__REGISTRATION_TOKEN` auto-mints
+a no-expiry invite on first boot so the existing onboarding path
+keeps working. Deployed live on cnc + pixie + Vercel. See §26
+below.)
 **Owner:** Matt Gates (suhteevah)
 **Status:** 🟢 Working — **chat actually works**. Steps 1+2;
 **M1 / M2 / M3 / M4 / M5 / M6 all shipped**, **M7 Phases A–F +
@@ -2461,4 +2464,153 @@ Browser smoke confirmed:
   manual grep is the only gate.
 - Domain (D-22 in the locked decisions) still open — until it's
   resolved, `lattice-quantum.vercel.app` is the canonical URL.
+
+## 26. Registration v2 — per-user invite tokens (shipped 2026-05-16)
+
+🟢 Working. End-to-end mint → redeem → consume flow live on
+cnc + pixie + `lattice-quantum.vercel.app`.
+
+Replaces the single static `LATTICE__SERVER__REGISTRATION_TOKEN`
+gate with per-user, single-use, atomically-consumed invite tokens
+issued through a Clerk-gated admin UI. The original static
+token is preserved for backcompat — on first boot, if it's set
+and the invite registry is empty, `lattice-server` auto-mints a
+no-expiry invite whose bytes match the env var, labelled
+`legacy:LATTICE__SERVER__REGISTRATION_TOKEN`. Existing
+deployments keep onboarding new users without any config
+change; operators cut over to the admin UI on their own
+schedule.
+
+### Architecture
+
+```
+operator → /admin (Clerk-gated, allowlist-checked)
+              ↓
+          /api/admin/tokens   ─POST X-Lattice-Admin-Key─►   lattice-server
+                                                              ↓ atomic
+                                                          /admin/tokens
+              ↓ shares URL
+end user → /invite/<token>  ───curl /admin/tokens/<id>──►  lattice-server
+                                                              (public lookup
+                                                               by token id)
+              ↓ paste into ⚙ Settings
+chat shell → POST /register
+             Authorization: Bearer <token>      ───────►   lattice-server
+                                                              ↓ atomic check
+                                                                + consume + register
+```
+
+### Wire changes
+
+- `ServerConfig` adds `admin_api_key` (env
+  `LATTICE__SERVER__ADMIN_API_KEY`).
+- `ServerState` adds `invite_tokens: HashMap<String, InviteToken>`
+  protected by the existing write-lock. The lock spans
+  check → mark-consumed → register-user so concurrent
+  `/register` POSTs cannot share a single-use token.
+- Snapshot bumps to v2: `state_snapshot.json` adds
+  `invites: Vec<InviteSnap>`. v1 snapshots load cleanly via
+  `#[serde(default)]`.
+- Sweeper task (`tokio::spawn`) runs every 5 min and evicts
+  expired-unconsumed entries plus consumed entries older than
+  30 days. Counts logged at INFO when > 0.
+
+### Server endpoints
+
+| Route | Auth | Body / params |
+|---|---|---|
+| `POST   /admin/tokens`         | `X-Lattice-Admin-Key` | `{ label?, ttl_secs? }` → new `InviteView` |
+| `GET    /admin/tokens`         | `X-Lattice-Admin-Key` | list all `InviteView` |
+| `GET    /admin/tokens/{token}` | **public**            | single `InviteView` (used by `/invite/[token]` landing) |
+| `DELETE /admin/tokens/{token}` | `X-Lattice-Admin-Key` | revoke (deletes entry) |
+| `POST   /register`             | `Authorization: Bearer <token>` (unless server admits open register) | atomic consume + register |
+
+`InviteView` carries `token`, `created_at`, `expires_at`,
+`label?`, `consumed_at?`, `consumed_by_prefix?`. Internally the
+struct also tracks `consumed_by: [u8; 32]` (full user_id); the
+public view truncates to the 6-byte prefix to match log-line
+identifiers.
+
+### Web admin (lattice-docs / Astro)
+
+- `output: 'server'` (Vercel SSR adapter).
+- `@clerk/astro` integration; `src/middleware.ts` gates
+  `/admin/*` and `/api/admin/*` on a Clerk session **and** a
+  `LATTICE_ADMIN_USER_IDS` allowlist (comma-separated Clerk
+  user_ids). Unauthed → `/sign-in?next=…`; non-allowlist → 403.
+- `src/pages/sign-in.astro` mounts Clerk's `<SignIn />`.
+- `src/pages/api/admin/tokens.ts` (POST + GET) + `[id].ts`
+  (DELETE) forward to `LATTICE_SERVER_URL/admin/tokens` with
+  `X-Lattice-Admin-Key` injected from the Vercel env.
+- `src/pages/admin/index.astro` — dark-themed mint form +
+  token table + per-row revoke buttons; alert with the
+  redemption URL fires after a successful mint.
+- `src/pages/invite/[token].astro` — public landing showing
+  `valid` / `expired` / `consumed` / `unknown` with install
+  instructions when valid.
+
+### Chat-shell wiring (lattice-web)
+
+- `storage.rs` — `load_invite_token` /
+  `save_invite_token` / `clear_invite_token` under
+  `lattice/invite_token/v1` in localStorage.
+- `api.rs` — `register()` gains an `invite_token: Option<&str>`
+  param; when `Some`, attaches `Authorization: Bearer <token>`.
+- `chat_state.rs` — bootstrap loads the persisted token,
+  passes it to `register()`, clears the local copy on success.
+- `chat.rs` — `SettingsForm` gains an "Invite token
+  (single-use)" field next to the home-server URL.
+
+### Vercel env (lattice-quantum project)
+
+| Var | Source |
+|---|---|
+| `LATTICE_SERVER_URL` | `https://lattice.pixiedustbot.com` |
+| `LATTICE_ADMIN_API_KEY` | mirror of the home-server env var |
+| `LATTICE_ADMIN_USER_IDS` | comma-separated Clerk user_ids |
+| `CLERK_SECRET_KEY` | auto-provisioned by Clerk Marketplace |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | auto-provisioned by Clerk Marketplace |
+| `PUBLIC_CLERK_PUBLISHABLE_KEY` | manual mirror of the NEXT_PUBLIC var (Astro convention) |
+
+### Operator runbook
+
+Full details in
+[`scratch/reg-v2-operator-notes.md`](../scratch/reg-v2-operator-notes.md).
+Key smoke pattern:
+
+```bash
+ADMIN_KEY=$(cat scratch/.admin-api-key)
+curl -H "X-Lattice-Admin-Key: $ADMIN_KEY" \
+     https://lattice.pixiedustbot.com/admin/tokens
+# → list includes legacy:LATTICE__SERVER__REGISTRATION_TOKEN entry
+
+curl -H "X-Lattice-Admin-Key: $ADMIN_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"label":"alice","ttl_secs":3600}' \
+     https://lattice.pixiedustbot.com/admin/tokens
+# → fresh token with 1-hour TTL
+```
+
+### Verification
+
+- Server-side: `cargo test --workspace` adds 4 integration + 5
+  unit tests covering mint, list, revoke, race (200 concurrent
+  POSTs vs single token → exactly 1 success), snapshot
+  round-trip, backcompat auto-mint.
+- Deploy smoke (pixie + cnc): `/admin/tokens` returns 401
+  without the key, 200 + the legacy entry with it; mint via
+  POST returns a fresh token; subsequent list shows both.
+- Web smoke: `/admin` unauthenticated redirects to `/sign-in`;
+  Clerk middleware response carries no allowlist info.
+
+### Follow-ups
+
+- The Astro `/admin` page is currently locked to a single
+  allowlist user_id. Multi-operator setups want a Clerk
+  organization model instead of a flat list.
+- `consumed_by_prefix` is 6 bytes; if two users collide in that
+  prefix the admin UI can't disambiguate. Move to a full
+  user_id field in the table for the next admin-UI iteration.
+- Promotion to a `pk_live_…` Clerk instance + Clerk-side
+  signup restrictions before the project goes fully public.
 
