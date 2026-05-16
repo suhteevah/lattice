@@ -1,5 +1,193 @@
 # Lattice — HANDOFF
 
+**Last updated:** 2026-05-16 — **production federation pair live
+(cnc + pixie) at `https://lattice.pixiedustbot.com`** plus
+Reg v2 spec + plan + Section A server code complete on
+`worktree-reg-v2` branch (14 of 29 plan tasks done). Tauri Linux
+`.deb` artifact built on cnc. Updater spec written, no code yet.
+Android scaffold recon — gated on SDK install. See §26 below.
+
+**Status:** 🟡 In progress on Reg v2 — Section A code in worktree
+not yet committed or merged; Section B (Astro admin UI) + C
+(chat-shell token field) + OPS deploy still pending. Production
+servers still on pre-Reg-v2 binary (static-token gate via
+`LATTICE__SERVER__REGISTRATION_TOKEN`). To resume: enter the
+worktree at `J:\lattice\.claude\worktrees\reg-v2`, read
+`docs/superpowers/plans/2026-05-16-registration-v2.md`, pick up
+at Task 16.
+
+---
+
+### Session log — 2026-05-16
+
+Two-track session: stand up production federation, then start
+shipping invite-only registration (Reg v2).
+
+**Track 1 — Production federation pair (live).**
+
+1. **cnc home server** brought up at
+   `http://cnc-server.tailb85819.ts.net:8444` (tailnet only).
+   Federation pubkey:
+   `PX98QlkAc6JTavLsbuRYUuzbw5wlizSfsVbj8GGlbsY=`. systemd-managed
+   via `/etc/systemd/system/lattice-server.service` +
+   `/var/lib/lattice/{federation.key,snapshot.json}`. Built from
+   source on the cnc host (openSUSE Leap Micro 6.2) — required
+   building `capnproto` 1.0.2 from source into `/usr/local/bin`
+   because the atomic-OS `transactional-update` path conflicts
+   with the running OpenClaw stack. See
+   [[capnp-build]] memory for the per-host install matrix.
+2. **pixie home server** brought up on Ubuntu 24.04 host
+   `pixiedust-stl` (joined Matt's tailnet for federation reach,
+   `100.117.173.42`). Bound the same 0.0.0.0:8444. Federation
+   pubkey: `AUuXAGkX5UZdzs14WPjgFGqJODSTybPK3QumQcEd5BA=`. Same
+   systemd setup.
+3. **Caddy + Let's Encrypt** on pixie. ACME via HTTP-01 succeeded
+   first try. `https://lattice.pixiedustbot.com` serves with a real
+   cert (ACME account `mmichels88@gmail.com`). ufw allows 80 + 443;
+   bare `:8444` stays publicly closed. Caddyfile at
+   `/etc/caddy/Caddyfile` — single reverse_proxy to localhost:8444
+   with zstd + gzip + HSTS headers.
+4. **Federation smoke verified.** `lattice demo` round-tripped a
+   PQ-hybrid sealed-sender message cnc → pixie in 1.2 s. TOFU
+   pin landed on pixie's side. See `scratch/federation-pinning.md`
+   (untracked, gitignored) for the operator-side fingerprint
+   record.
+5. **Matt's client** registered against cnc via the Tauri 2 dev
+   shell. user_id `97984c03…3ef0f3f39` lives in the Windows
+   DPAPI keystore at `%LOCALAPPDATA%\Lattice\keystore`.
+
+Memory: [[federation-live-pair]] captures the URLs / pubkeys /
+bind addresses for the next session.
+
+**Track 2 — Linux artifact pipeline.**
+
+1. **lattice-server** Linux binary built on cnc, pulled back to
+   kokonoe at `J:\lattice\releases\linux\lattice-server`
+   (sha256 `4ae6425879417eb1da14f4ec30b5dff037e9ea05dd0f63336cfad34c65d786b7`).
+2. **Tauri 2 `.deb`** built on cnc at
+   `target/release/bundle/deb/Lattice_0.1.0_amd64.deb` 5.1 MB
+   (sha256 `2ab387384ced3dd95f37ada957500ebbf62248c0614ad0810a46964d35698285`).
+   AppImage attempted but the appimagetool hung on a GitHub
+   rate-limit close; `.deb` is the working artifact.
+3. **Arch PKGBUILD** written at `packaging/arch/PKGBUILD` plus
+   README — split package (`lattice-desktop` + `lattice-server`),
+   pulls from a pinned commit, AUR-friendly notes for trunk.
+4. **Two-user war doc** at `scratch/two-user-firstserver-war.md`
+   (untracked) — invite + pair + first-message smoke walkthrough
+   for onboarding a *nix user.
+5. **New-user handoff** + prompt at
+   `scratch/new-user-handoff.md` + `scratch/new-user-prompt.md`
+   — paste-into-their-Claude prompt + the doc that walks their
+   agent through install + verify + register against pixie.
+6. **Android scaffold recon** dispatched via subagent. Result:
+   gated on Android SDK + NDK install on kokonoe (~2 GB minimum,
+   ~6.5 GB full). Cargo.toml `crate-type = ["rlib"]` and missing
+   `lattice-media/src/keystore/android.rs` are independent
+   blockers. Detailed in `scratch/android-scaffold-report.md`.
+   Deferred behind Reg v2 + Updater.
+
+**Track 3 — Reg v2 (in flight).**
+
+1. **Brainstorming**: full design pass via the brainstorming skill.
+   Spec at `docs/superpowers/specs/2026-05-16-registration-v2-design.md`.
+   Stateful single-use tokens, Clerk-gated Astro admin UI, atomic
+   consume on `/register`. Astro chosen (not Next.js) since the
+   existing docs site is Astro 4. Token lifetime: single-use, 7-day
+   expiry default.
+2. **Plan**: 29 bite-sized tasks at
+   `docs/superpowers/plans/2026-05-16-registration-v2.md`. Each
+   task has concrete code, commands, expected outputs. Per
+   `CLAUDE.md` "no commits without explicit ask," the plan stages
+   only — commits left to the operator.
+3. **Section A code** (Tasks 1–14): server-side complete. Worktree
+   at `J:\lattice\.claude\worktrees\reg-v2`, branch
+   `worktree-reg-v2`. 625 insertions / 30 deletions across 10
+   files. 5 integration tests + 4 unit tests pass. Race test
+   proves single-spend under 200 concurrent /register POSTs.
+4. **Backcompat preserved**: the legacy
+   `LATTICE__SERVER__REGISTRATION_TOKEN=BIUB…3uV2` continues to
+   work — auto-mints as a no-expiry invite at first boot if the
+   registry is empty (labelled
+   `legacy:LATTICE__SERVER__REGISTRATION_TOKEN`).
+
+Memory: [[reg-v2-session-state]] for resume notes;
+[[reg-v2-admin-key]] for the deploy env var.
+
+**Track 4 — Updater (spec only).**
+
+Spec written at `docs/superpowers/specs/2026-05-16-updater-design.md`.
+Tauri 2 `tauri-plugin-updater` + file-based ed25519 signing key
+(passphrase-protected, YubiKey upgrade path documented). Binaries
+on GitHub Releases, manifest on the Astro deploy. `scripts/release.ps1`
+orchestrates per-platform build → sign → upload → manifest update.
+No plan written yet; comes after Reg v2 ships.
+
+**Files written (untracked / scratch):**
+- `scratch/two-user-firstserver-war.md`
+- `scratch/new-user-handoff.md`
+- `scratch/new-user-prompt.md`
+- `scratch/federation-pinning.md`
+- `scratch/android-scaffold-report.md`
+- `scratch/reg-v2-operator-notes.md`
+- `scratch/.registration-token` (secret; in .gitignore)
+
+**Files written (committed in main checkout via /handoff):**
+- `docs/superpowers/specs/2026-05-16-registration-v2-design.md`
+- `docs/superpowers/specs/2026-05-16-updater-design.md`
+- `docs/superpowers/plans/2026-05-16-registration-v2.md`
+- `packaging/arch/PKGBUILD`
+- `packaging/arch/README.md`
+
+**Files written (committed in worktree on branch worktree-reg-v2 via /handoff):**
+- All Section A code (10 files, 625 insertions / 30 deletions).
+
+**What's next (for the incoming session):**
+
+In priority order:
+
+1. **Reg v2 Section B** — Astro admin UI + invite-redemption pages
+   + Clerk-gated API routes. Plan tasks 16–22. Hits
+   `apps/lattice-docs/` (the existing live Vercel deploy).
+2. **Reg v2 Section C** — chat shell `Settings` panel adds an
+   "Invite token" input field. Plan tasks 23–26. Touches
+   `apps/lattice-web/src/{api,chat_state,chat,storage}.rs`.
+3. **Reg v2 deploy (Task 15 + 22)** — push the new server binary
+   to cnc + pixie with the new admin key in systemd override.
+   Vercel deploy the Astro changes. ~10 s federation downtime
+   per host.
+4. **Reg v2 smoke** (Tasks 27–29) — end-to-end via /admin → mint
+   → /invite/[token] → chat shell paste → register → admin shows
+   consumed.
+5. **Updater plan** — `superpowers:writing-plans` against the
+   updater spec, then implement.
+6. **Android scaffold** — install SDK + NDK, run
+   `cargo tauri android init`, address the rlib/cdylib +
+   `keystore/android.rs` blockers from the recon report.
+
+**Notes for the next Claude:**
+
+- Per `CLAUDE.md`, do NOT `git commit` without an explicit ask
+  from Matt. Stage changes via `git add` and present the staged
+  set + draft commit message; he runs `git commit` himself.
+- The implementer pattern is `superpowers:subagent-driven-development`
+  — fresh subagent per task or per logical bundle. Haiku for
+  mechanical tasks, sonnet for atomic-critical-section / race
+  /federation reasoning. Bundling adjacent tasks (same file,
+  same component) cuts wall-clock without losing quality.
+- Production servers still run the pre-Reg-v2 binary. The Matt's
+  client + the documented `BIUB…3uV2` static token both still
+  work. Do NOT advertise the new admin token shape externally
+  until Section B + ops deploy land.
+- The two-user-handoff at `scratch/new-user-handoff.md` is the
+  paste-to-the-new-user's-Claude doc. After Reg v2 ships, refresh
+  the §"Path A — chat shell with a token field" section to drop
+  the "if the chat-shell build has a token field" hedge.
+- `apps/lattice-docs/` is currently Astro 4 on Vercel. The Reg v2
+  plan ADDS to it (`/admin`, `/invite/[token]`, `/api/admin/*`)
+  — does NOT migrate to Next.js. Keep that boundary clean.
+
+---
+
 **Last updated:** 2026-05-12 (M7 Phases G.1 + G.2 shipped:
 `lattice-media::keystore` trait + DPAPI Windows / Secret Service
 Linux / Keychain macOS impls + five Tauri IPC commands. **Chat-app
