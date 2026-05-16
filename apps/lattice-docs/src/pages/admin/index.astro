@@ -1,0 +1,92 @@
+---
+const tokensRes = await fetch(`${Astro.url.origin}/api/admin/tokens`, {
+  headers: { cookie: Astro.request.headers.get('cookie') ?? '' },
+});
+const tokens = tokensRes.ok ? await tokensRes.json() : [];
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Lattice — admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; background: #18141C; color: #ddd; }
+    h1 { margin-bottom: 0.5rem; }
+    .invite-form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #333; text-align: left; }
+    .consumed { color: #888; }
+    button { padding: 0.3rem 0.7rem; cursor: pointer; background: #2a2233; color: #ddd; border: 1px solid #443a55; border-radius: 3px; }
+    button:hover { background: #3a2f48; }
+    input { padding: 0.3rem 0.5rem; background: #1f1a26; color: #ddd; border: 1px solid #443a55; border-radius: 3px; }
+    code { background: #2a2233; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    a { color: #C8A2C8; }
+  </style>
+</head>
+<body>
+  <h1>Lattice invites</h1>
+  <p>Mint single-use invite tokens. Each invite is valid for 7 days by default.</p>
+
+  <form class="invite-form" id="mint-form">
+    <input type="text" name="label" placeholder="label (e.g. 'alice')" />
+    <input type="number" name="ttl_secs" placeholder="ttl in seconds (default 604800)" />
+    <button type="submit">Mint invite</button>
+  </form>
+
+  <table>
+    <thead><tr>
+      <th>Token</th><th>Label</th><th>Created</th><th>Expires</th><th>Consumed</th><th></th>
+    </tr></thead>
+    <tbody id="tokens-tbody">
+      {tokens.map((t: any) => (
+        <tr class={t.consumed_at ? 'consumed' : ''}>
+          <td><code>{t.token.slice(0, 10)}…</code></td>
+          <td>{t.label ?? '—'}</td>
+          <td>{new Date(t.created_at * 1000).toISOString().slice(0, 19)}</td>
+          <td>{t.expires_at >= 9223372036854775000 ? 'never' : new Date(t.expires_at * 1000).toISOString().slice(0, 19)}</td>
+          <td>{t.consumed_at ? `${new Date(t.consumed_at * 1000).toISOString().slice(0, 19)} by ${t.consumed_by_prefix ?? '?'}` : '—'}</td>
+          <td><button data-token={t.token} class="revoke-btn">revoke</button></td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+
+  <script is:inline>
+    document.getElementById('mint-form').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target);
+      const body = {
+        label: fd.get('label') || null,
+        ttl_secs: fd.get('ttl_secs') ? Number(fd.get('ttl_secs')) : null,
+      };
+      const res = await fetch('/api/admin/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        alert('mint failed: ' + (await res.text()));
+        return;
+      }
+      const issued = await res.json();
+      alert(
+        'Token minted:\n\n' + issued.token +
+        '\n\nRedemption URL:\n' + window.location.origin + '/invite/' + issued.token
+      );
+      window.location.reload();
+    });
+    document.querySelectorAll('.revoke-btn').forEach((b) => {
+      b.addEventListener('click', async (ev) => {
+        const token = ev.target.getAttribute('data-token');
+        if (!confirm('Revoke this invite?')) return;
+        const res = await fetch('/api/admin/tokens/' + encodeURIComponent(token), { method: 'DELETE' });
+        if (res.ok || res.status === 204) {
+          window.location.reload();
+        } else {
+          alert('revoke failed: ' + res.status);
+        }
+      });
+    });
+  </script>
+</body>
+</html>
